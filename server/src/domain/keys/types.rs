@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+use crate::types::UserId;
+
 // ── Stored rows ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct UserKeysRow {
-    pub user_id:              i32,
+    pub user_id:              UserId,
     pub identity_key:         String,
     pub identity_signing_key: Option<String>,
     pub signed_pre_key:       String,
@@ -55,7 +57,7 @@ pub struct OtpkCountResponse {
 
 #[derive(Debug, Serialize)]
 pub struct KeyBundleResponse {
-    pub user_id:              i32,
+    pub user_id:              UserId,
     pub identity_key:         String,
     pub identity_signing_key: Option<String>,
     pub signed_pre_key:       String,

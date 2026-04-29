@@ -5,6 +5,7 @@ use crate::{
     auth,
     app::AppState,
     error::{AppError, AppResult},
+    types::UserId,
 };
 use super::{
     repository,
@@ -132,7 +133,7 @@ pub async fn forgot_password(state: &AppState, email: &str) -> AppResult<()> {
         let token = Uuid::new_v4().to_string();
         repository::create_reset_token(&state.db, user.id, &token).await?;
         // TODO: integrations::resend::send_password_reset(&state.http, &cfg, email, &token)
-        tracing::info!(user_id = user.id, "password reset token generated");
+        tracing::info!(user_id = %user.id, "password reset token generated");
     }
     // Intentionally silent whether the email exists — prevents enumeration.
     Ok(())
@@ -153,7 +154,7 @@ pub async fn reset_password(state: &AppState, token: &str, new_password: &str) -
 
 /// Fetch and validate a user by ID. Call in handlers that need the full UserRow —
 /// the `RequireUser` extractor only decodes the JWT.
-pub async fn require_active(state: &AppState, user_id: i32) -> AppResult<UserRow> {
+pub async fn require_active(state: &AppState, user_id: UserId) -> AppResult<UserRow> {
     let user = repository::find_by_id(&state.db, user_id)
         .await?
         .ok_or(AppError::Unauthorized)?;

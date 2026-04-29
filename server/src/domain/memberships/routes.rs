@@ -8,6 +8,7 @@ use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::{auth::RequireUser, json::AppJson},
+    types::UserId,
 };
 use super::{repository, types::*};
 
@@ -86,7 +87,7 @@ async fn list_members(State(state): State<AppState>) -> AppResult<Json<Vec<Membe
 async fn contribute(
     State(state): State<AppState>,
     RequireUser(from_user_id): RequireUser,
-    Path(recipient_id): Path<i32>,
+    Path(recipient_id): Path<UserId>,
     AppJson(body): AppJson<ContributeBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     if body.amount_cents < 100 {
@@ -140,7 +141,7 @@ async fn contribute(
 
 async fn contributors(
     State(state): State<AppState>,
-    Path(user_id): Path<i32>,
+    Path(user_id): Path<UserId>,
 ) -> AppResult<Json<Vec<serde_json::Value>>> {
     Ok(Json(
         repository::list_fund_contributors(&state.db, user_id).await?,

@@ -1,11 +1,11 @@
 use sqlx::PgPool;
 
-use crate::error::{AppError, AppResult};
+use crate::{error::{AppError, AppResult}, types::UserId};
 use super::types::{MemberRow, MembershipRow};
 
 pub async fn find_for_user(
     pool:    &PgPool,
-    user_id: i32,
+    user_id: UserId,
 ) -> AppResult<Option<MembershipRow>> {
     sqlx::query_as::<_, MembershipRow>(
         "SELECT id, user_id, tier, status, started_at, renews_at
@@ -36,7 +36,7 @@ pub async fn list_active_members(pool: &PgPool) -> AppResult<Vec<MemberRow>> {
 
 pub async fn join_waitlist(
     pool:    &PgPool,
-    user_id: i32,
+    user_id: UserId,
     tier:    &str,
 ) -> AppResult<()> {
     sqlx::query(
@@ -54,7 +54,7 @@ pub async fn join_waitlist(
 
 pub async fn list_fund_contributors(
     pool:    &PgPool,
-    user_id: i32,
+    user_id: UserId,
 ) -> AppResult<Vec<serde_json::Value>> {
     #[derive(sqlx::FromRow)]
     struct Row {

@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use crate::error::{AppError, AppResult};
+use crate::{error::{AppError, AppResult}, types::UserId};
 use super::types::*;
 
 // ── Search ────────────────────────────────────────────────────────────────────
@@ -25,10 +25,10 @@ pub async fn search(pool: &PgPool, query: &str) -> AppResult<Vec<UserSearchResul
 
 // ── Public profile ────────────────────────────────────────────────────────────
 
-pub async fn public_profile(pool: &PgPool, id: i32) -> AppResult<Option<PublicProfile>> {
+pub async fn public_profile(pool: &PgPool, id: UserId) -> AppResult<Option<PublicProfile>> {
     #[derive(sqlx::FromRow)]
     struct Row {
-        id:             i32,
+        id:             UserId,
         display_name:   Option<String>,
         portrait_url:   Option<String>,
         is_dj:          bool,
@@ -63,7 +63,7 @@ pub async fn public_profile(pool: &PgPool, id: i32) -> AppResult<Option<PublicPr
 
 // ── Social access ─────────────────────────────────────────────────────────────
 
-pub async fn social_access(pool: &PgPool, user_id: i32) -> AppResult<Option<SocialAccess>> {
+pub async fn social_access(pool: &PgPool, user_id: UserId) -> AppResult<Option<SocialAccess>> {
     sqlx::query_as::<_, SocialAccess>(
         "SELECT social_tier, social_time_bank_seconds
          FROM users WHERE id = $1",
@@ -76,7 +76,7 @@ pub async fn social_access(pool: &PgPool, user_id: i32) -> AppResult<Option<Soci
 
 // ── Stats ─────────────────────────────────────────────────────────────────────
 
-pub async fn stats(pool: &PgPool, user_id: i32) -> AppResult<UserStats> {
+pub async fn stats(pool: &PgPool, user_id: UserId) -> AppResult<UserStats> {
     let evening: i64 = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint FROM evening_tokens
          WHERE user_id_1 = $1 OR user_id_2 = $1",
@@ -123,7 +123,7 @@ pub async fn stats(pool: &PgPool, user_id: i32) -> AppResult<UserStats> {
 
 // ── Wallet ────────────────────────────────────────────────────────────────────
 
-pub async fn set_wallet(pool: &PgPool, user_id: i32, address: &str) -> AppResult<()> {
+pub async fn set_wallet(pool: &PgPool, user_id: UserId, address: &str) -> AppResult<()> {
     sqlx::query("UPDATE users SET eth_address = $1 WHERE id = $2")
         .bind(address)
         .bind(user_id)
@@ -144,7 +144,7 @@ pub async fn set_wallet(pool: &PgPool, user_id: i32, address: &str) -> AppResult
 
 // ── Follows ───────────────────────────────────────────────────────────────────
 
-pub async fn follow(pool: &PgPool, follower_id: i32, following_id: i32) -> AppResult<()> {
+pub async fn follow(pool: &PgPool, follower_id: UserId, following_id: UserId) -> AppResult<()> {
     sqlx::query(
         "INSERT INTO user_follows (follower_id, following_id)
          VALUES ($1, $2)
@@ -158,7 +158,7 @@ pub async fn follow(pool: &PgPool, follower_id: i32, following_id: i32) -> AppRe
     Ok(())
 }
 
-pub async fn unfollow(pool: &PgPool, follower_id: i32, following_id: i32) -> AppResult<()> {
+pub async fn unfollow(pool: &PgPool, follower_id: UserId, following_id: UserId) -> AppResult<()> {
     sqlx::query(
         "DELETE FROM user_follows
          WHERE follower_id = $1 AND following_id = $2",
@@ -173,8 +173,8 @@ pub async fn unfollow(pool: &PgPool, follower_id: i32, following_id: i32) -> App
 
 pub async fn follow_status(
     pool:         &PgPool,
-    follower_id:  i32,
-    following_id: i32,
+    follower_id:  UserId,
+    following_id: UserId,
 ) -> AppResult<bool> {
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
@@ -189,7 +189,7 @@ pub async fn follow_status(
     .map_err(AppError::Db)
 }
 
-pub async fn follower_count(pool: &PgPool, user_id: i32) -> AppResult<i64> {
+pub async fn follower_count(pool: &PgPool, user_id: UserId) -> AppResult<i64> {
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint FROM user_follows WHERE following_id = $1",
     )
@@ -199,7 +199,7 @@ pub async fn follower_count(pool: &PgPool, user_id: i32) -> AppResult<i64> {
     .map_err(AppError::Db)
 }
 
-pub async fn list_followers(pool: &PgPool, user_id: i32) -> AppResult<Vec<UserSearchResult>> {
+pub async fn list_followers(pool: &PgPool, user_id: UserId) -> AppResult<Vec<UserSearchResult>> {
     sqlx::query_as::<_, UserSearchResult>(
         "SELECT u.id, u.display_name, u.portrait_url, u.verified, u.user_code
          FROM user_follows f
@@ -214,7 +214,7 @@ pub async fn list_followers(pool: &PgPool, user_id: i32) -> AppResult<Vec<UserSe
     .map_err(AppError::Db)
 }
 
-pub async fn list_following(pool: &PgPool, user_id: i32) -> AppResult<Vec<UserSearchResult>> {
+pub async fn list_following(pool: &PgPool, user_id: UserId) -> AppResult<Vec<UserSearchResult>> {
     sqlx::query_as::<_, UserSearchResult>(
         "SELECT u.id, u.display_name, u.portrait_url, u.verified, u.user_code
          FROM user_follows f
@@ -233,7 +233,7 @@ pub async fn list_following(pool: &PgPool, user_id: i32) -> AppResult<Vec<UserSe
 
 pub async fn list_notifications(
     pool:    &PgPool,
-    user_id: i32,
+    user_id: UserId,
 ) -> AppResult<Vec<NotificationRow>> {
     sqlx::query_as::<_, NotificationRow>(
         "SELECT id, user_id, type AS notif_type, title, body, read, data, created_at
@@ -249,7 +249,7 @@ pub async fn list_notifications(
 }
 
 /// Ownership enforced in WHERE — users cannot read-mark other users' notifications.
-pub async fn mark_read(pool: &PgPool, user_id: i32, notif_id: i32) -> AppResult<()> {
+pub async fn mark_read(pool: &PgPool, user_id: UserId, notif_id: i32) -> AppResult<()> {
     let result = sqlx::query(
         "UPDATE notifications SET read = true
          WHERE id = $1 AND user_id = $2",
@@ -266,7 +266,7 @@ pub async fn mark_read(pool: &PgPool, user_id: i32, notif_id: i32) -> AppResult<
     Ok(())
 }
 
-pub async fn mark_all_read(pool: &PgPool, user_id: i32) -> AppResult<()> {
+pub async fn mark_all_read(pool: &PgPool, user_id: UserId) -> AppResult<()> {
     sqlx::query(
         "UPDATE notifications SET read = true
          WHERE user_id = $1 AND read = false",
@@ -280,10 +280,10 @@ pub async fn mark_all_read(pool: &PgPool, user_id: i32) -> AppResult<()> {
 
 // ── Feed ──────────────────────────────────────────────────────────────────────
 
-pub async fn feed(pool: &PgPool, user_id: i32) -> AppResult<Vec<FeedItem>> {
+pub async fn feed(pool: &PgPool, user_id: UserId) -> AppResult<Vec<FeedItem>> {
     #[derive(sqlx::FromRow)]
     struct Row {
-        user_id:      i32,
+        user_id:      UserId,
         display_name: Option<String>,
         portrait_url: Option<String>,
         variety_name: String,

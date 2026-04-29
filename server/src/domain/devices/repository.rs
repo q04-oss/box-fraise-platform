@@ -1,12 +1,12 @@
 use ring::rand::{SecureRandom, SystemRandom};
 use sqlx::PgPool;
 
-use crate::error::{AppError, AppResult};
+use crate::{error::{AppError, AppResult}, types::UserId};
 use super::types::DeviceRow;
 
 // ── Pairing tokens ────────────────────────────────────────────────────────────
 
-pub async fn create_pair_token(pool: &PgPool, user_id: i32) -> AppResult<String> {
+pub async fn create_pair_token(pool: &PgPool, user_id: UserId) -> AppResult<String> {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let rng = SystemRandom::new();
     let mut buf = [0u8; 8];
@@ -33,8 +33,8 @@ pub async fn create_pair_token(pool: &PgPool, user_id: i32) -> AppResult<String>
 }
 
 /// Atomically consume a pairing token. Returns the owning user_id on success.
-pub async fn consume_pair_token(pool: &PgPool, token: &str) -> AppResult<Option<i32>> {
-    let row: Option<(i32,)> = sqlx::query_as(
+pub async fn consume_pair_token(pool: &PgPool, token: &str) -> AppResult<Option<UserId>> {
+    let row: Option<(UserId,)> = sqlx::query_as(
         "DELETE FROM device_pairing_tokens
          WHERE UPPER(token) = UPPER($1) AND expires_at > NOW()
          RETURNING user_id",
@@ -51,7 +51,7 @@ pub async fn consume_pair_token(pool: &PgPool, token: &str) -> AppResult<Option<
 
 pub async fn insert_device(
     pool:           &PgPool,
-    user_id:        i32,
+    user_id:        UserId,
     device_address: &str,
 ) -> AppResult<DeviceRow> {
     sqlx::query_as(
@@ -80,7 +80,7 @@ pub async fn find_device(pool: &PgPool, address: &str) -> AppResult<Option<Devic
     .map_err(AppError::Db)
 }
 
-pub async fn list_devices(pool: &PgPool, user_id: i32) -> AppResult<Vec<DeviceRow>> {
+pub async fn list_devices(pool: &PgPool, user_id: UserId) -> AppResult<Vec<DeviceRow>> {
     sqlx::query_as(
         "SELECT id, device_address, user_id, role, created_at
          FROM devices
@@ -114,7 +114,7 @@ pub async fn set_role(pool: &PgPool, address: &str, role: &str) -> AppResult<()>
 
 pub async fn upsert_attestation(
     pool:        &PgPool,
-    user_id:     i32,
+    user_id:     UserId,
     key_id:      &str,
     attestation: &str,
     hmac_key:    &str,

@@ -1,6 +1,8 @@
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
+use crate::types::UserId;
+
 /// Tiers payable directly via Stripe. Higher tiers require a manual invoice —
 /// never accept Stripe payment for them regardless of what the client sends.
 pub const STRIPE_PAYABLE_TIERS: &[&str] = &["maison", "reserve", "atelier"];
@@ -24,7 +26,7 @@ pub fn tier_amount_cents(tier: &str) -> Option<i64> {
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct MembershipRow {
     pub id:         i32,
-    pub user_id:    i32,
+    pub user_id:    UserId,
     pub tier:       String,
     pub status:     String,
     pub started_at: Option<NaiveDateTime>,
@@ -33,7 +35,7 @@ pub struct MembershipRow {
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct MemberRow {
-    pub user_id:      i32,
+    pub user_id:      UserId,
     pub display_name: Option<String>,
     pub portrait_url: Option<String>,
     pub tier:         String,

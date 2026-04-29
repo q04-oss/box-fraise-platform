@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use crate::error::{AppError, AppResult};
+use crate::{error::{AppError, AppResult}, types::UserId};
 use super::types::{CampaignRow, SignupRow};
 
 pub async fn list_upcoming(pool: &PgPool) -> AppResult<Vec<CampaignRow>> {
@@ -28,7 +28,7 @@ pub async fn find(pool: &PgPool, id: i32) -> AppResult<Option<CampaignRow>> {
 
 pub async fn signup(
     pool:        &PgPool,
-    user_id:     i32,
+    user_id:     UserId,
     campaign_id: i32,
 ) -> AppResult<SignupRow> {
     // Determine if the campaign is full (waitlist) atomically.
@@ -64,7 +64,7 @@ pub async fn signup(
     .map_err(AppError::Db)
 }
 
-pub async fn cancel(pool: &PgPool, user_id: i32, campaign_id: i32) -> AppResult<()> {
+pub async fn cancel(pool: &PgPool, user_id: UserId, campaign_id: i32) -> AppResult<()> {
     sqlx::query(
         "DELETE FROM campaign_signups
          WHERE user_id = $1 AND campaign_id = $2",

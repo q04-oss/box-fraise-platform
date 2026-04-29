@@ -1,13 +1,15 @@
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
+use crate::types::UserId;
+
 // ── Database row ──────────────────────────────────────────────────────────────
 
 /// Subset of `users` columns used across the auth domain.
 /// Extend with additional columns as other domains require them.
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct UserRow {
-    pub id:                        i32,
+    pub id:                        UserId,
     pub apple_user_id:             Option<String>,
     pub email:                     String,
     pub display_name:              Option<String>,
@@ -103,7 +105,7 @@ pub struct DisplayNameBody {
 
 #[derive(Debug, Serialize)]
 pub struct AuthResponse {
-    pub user_id: i32,
+    pub user_id: UserId,
     pub token:   String,
     pub is_new:  bool,
     pub verified: bool,

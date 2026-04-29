@@ -1,13 +1,15 @@
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
+use crate::types::UserId;
+
 // ── Public-safe user projection ───────────────────────────────────────────────
 // Never include: password_hash, push_token, stripe_*, ban_reason, or any
 // internal flag not meant for external consumption.
 
 #[derive(Debug, Serialize)]
 pub struct PublicProfile {
-    pub id:           i32,
+    pub id:           UserId,
     pub display_name: Option<String>,
     pub portrait_url: Option<String>,
     pub is_dj:        bool,
@@ -18,7 +20,7 @@ pub struct PublicProfile {
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct UserSearchResult {
-    pub id:           i32,
+    pub id:           UserId,
     pub display_name: Option<String>,
     pub portrait_url: Option<String>,
     pub verified:     bool,
@@ -44,7 +46,7 @@ pub struct UserStats {
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct NotificationRow {
     pub id:         i32,
-    pub user_id:    i32,
+    pub user_id:    UserId,
     #[sqlx(rename = "type")]
     pub notif_type: String,
     pub title:      Option<String>,
@@ -58,7 +60,7 @@ pub struct NotificationRow {
 
 #[derive(Debug, Serialize)]
 pub struct FeedItem {
-    pub user_id:      i32,
+    pub user_id:      UserId,
     pub display_name: Option<String>,
     pub portrait_url: Option<String>,
     pub event:        String,        // "collected_order", "joined_popup", etc.

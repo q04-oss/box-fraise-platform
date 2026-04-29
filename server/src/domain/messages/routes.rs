@@ -8,6 +8,7 @@ use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::{auth::RequireUser, json::AppJson},
+    types::UserId,
 };
 use super::{repository, types::*};
 
@@ -31,7 +32,7 @@ async fn conversations(
 async fn archive(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
-    Path(peer_id): Path<i32>,
+    Path(peer_id): Path<UserId>,
 ) -> AppResult<Json<serde_json::Value>> {
     repository::archive(&state.db, user_id, peer_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -40,7 +41,7 @@ async fn archive(
 async fn thread(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
-    Path(peer_id): Path<i32>,
+    Path(peer_id): Path<UserId>,
     Query(q): Query<ThreadQuery>,
 ) -> AppResult<Json<Vec<MessageRow>>> {
     let limit = q.limit.unwrap_or(50).min(100);

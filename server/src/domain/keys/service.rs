@@ -4,6 +4,7 @@ use ring::signature::{self, UnparsedPublicKey};
 use crate::{
     app::AppState,
     error::{AppError, AppResult},
+    types::UserId,
 };
 use super::{
     repository,
@@ -12,7 +13,7 @@ use super::{
 
 // ── Challenge ─────────────────────────────────────────────────────────────────
 
-pub async fn issue_challenge(state: &AppState, user_id: i32) -> AppResult<String> {
+pub async fn issue_challenge(state: &AppState, user_id: UserId) -> AppResult<String> {
     repository::create_challenge(&state.db, user_id).await
 }
 
@@ -20,7 +21,7 @@ pub async fn issue_challenge(state: &AppState, user_id: i32) -> AppResult<String
 
 pub async fn register_keys(
     state:   &AppState,
-    user_id: i32,
+    user_id: UserId,
     body:    RegisterKeysBody,
 ) -> AppResult<()> {
     match (&body.identity_signing_key, &body.challenge_sig) {
@@ -72,19 +73,19 @@ pub async fn register_keys(
 
 pub async fn upload_otpks(
     state:   &AppState,
-    user_id: i32,
+    user_id: UserId,
     keys:    Vec<(i32, String)>,
 ) -> AppResult<()> {
     repository::insert_otpks(&state.db, user_id, &keys).await
 }
 
-pub async fn otpk_count(state: &AppState, user_id: i32) -> AppResult<i64> {
+pub async fn otpk_count(state: &AppState, user_id: UserId) -> AppResult<i64> {
     repository::count_otpks(&state.db, user_id).await
 }
 
 // ── Key bundle (X3DH) ─────────────────────────────────────────────────────────
 
-pub async fn fetch_bundle(state: &AppState, target_id: i32) -> AppResult<KeyBundleResponse> {
+pub async fn fetch_bundle(state: &AppState, target_id: UserId) -> AppResult<KeyBundleResponse> {
     let keys = repository::find_user_keys(&state.db, target_id)
         .await?
         .ok_or(AppError::NotFound)?;

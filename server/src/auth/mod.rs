@@ -13,13 +13,13 @@ use uuid::Uuid;
 
 use secrecy::ExposeSecret;
 
-use crate::{config::Config, error::AppError};
+use crate::{config::Config, error::AppError, types::UserId};
 
 // ── Claims ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
-    pub user_id: i32,
+    pub user_id: UserId,
     pub exp:     usize,
     /// Unique token ID — used for server-side revocation.
     pub jti:     String,
@@ -27,7 +27,7 @@ pub struct Claims {
 
 // ── Token operations ──────────────────────────────────────────────────────────
 
-pub fn sign_token(user_id: i32, cfg: &Config) -> Result<String, AppError> {
+pub fn sign_token(user_id: UserId, cfg: &Config) -> Result<String, AppError> {
     let exp = Utc::now()
         .checked_add_signed(chrono::Duration::days(90))
         .unwrap()

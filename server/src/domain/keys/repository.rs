@@ -1,11 +1,11 @@
 use sqlx::PgPool;
 
-use crate::error::{AppError, AppResult};
+use crate::{error::{AppError, AppResult}, types::UserId};
 use super::types::{OtpkRow, UserKeysRow};
 
 // ── Challenges ────────────────────────────────────────────────────────────────
 
-pub async fn create_challenge(pool: &PgPool, user_id: i32) -> AppResult<String> {
+pub async fn create_challenge(pool: &PgPool, user_id: UserId) -> AppResult<String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     use rand::RngCore;
 
@@ -30,7 +30,7 @@ pub async fn create_challenge(pool: &PgPool, user_id: i32) -> AppResult<String> 
 }
 
 /// Atomically consume the most recent valid challenge for the user.
-pub async fn consume_challenge(pool: &PgPool, user_id: i32) -> AppResult<Option<String>> {
+pub async fn consume_challenge(pool: &PgPool, user_id: UserId) -> AppResult<Option<String>> {
     let row: Option<(String,)> = sqlx::query_as(
         "UPDATE key_challenges
          SET used = true
@@ -56,7 +56,7 @@ pub async fn consume_challenge(pool: &PgPool, user_id: i32) -> AppResult<Option<
 
 pub async fn upsert_user_keys(
     pool:                 &PgPool,
-    user_id:              i32,
+    user_id:              UserId,
     identity_key:         &str,
     identity_signing_key: Option<&str>,
     signed_pre_key:       &str,
@@ -84,7 +84,7 @@ pub async fn upsert_user_keys(
     Ok(())
 }
 
-pub async fn find_user_keys(pool: &PgPool, user_id: i32) -> AppResult<Option<UserKeysRow>> {
+pub async fn find_user_keys(pool: &PgPool, user_id: UserId) -> AppResult<Option<UserKeysRow>> {
     sqlx::query_as(
         "SELECT user_id, identity_key, identity_signing_key, signed_pre_key, signed_pre_key_sig
          FROM user_keys
@@ -101,7 +101,7 @@ pub async fn find_user_keys(pool: &PgPool, user_id: i32) -> AppResult<Option<Use
 /// Batch-insert OPKs using unnest — one round-trip regardless of key count.
 pub async fn insert_otpks(
     pool:    &PgPool,
-    user_id: i32,
+    user_id: UserId,
     keys:    &[(i32, String)],
 ) -> AppResult<()> {
     if keys.is_empty() {
@@ -126,7 +126,7 @@ pub async fn insert_otpks(
     Ok(())
 }
 
-pub async fn count_otpks(pool: &PgPool, user_id: i32) -> AppResult<i64> {
+pub async fn count_otpks(pool: &PgPool, user_id: UserId) -> AppResult<i64> {
     let (count,): (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM one_time_pre_keys WHERE user_id = $1 AND used = false")
             .bind(user_id)
@@ -138,7 +138,7 @@ pub async fn count_otpks(pool: &PgPool, user_id: i32) -> AppResult<i64> {
 
 /// Atomically claim the oldest unused OPK. Returns None if the user has
 /// no remaining OPKs — the caller serves the bundle without one.
-pub async fn claim_otpk(pool: &PgPool, user_id: i32) -> AppResult<Option<OtpkRow>> {
+pub async fn claim_otpk(pool: &PgPool, user_id: UserId) -> AppResult<Option<OtpkRow>> {
     sqlx::query_as(
         "UPDATE one_time_pre_keys
          SET used = true
@@ -158,8 +158,8 @@ pub async fn claim_otpk(pool: &PgPool, user_id: i32) -> AppResult<Option<OtpkRow
 
 // ── Bundle lookup ─────────────────────────────────────────────────────────────
 
-pub async fn user_id_by_code(pool: &PgPool, code: &str) -> AppResult<Option<i32>> {
-    let row: Option<(i32,)> =
+pub async fn user_id_by_code(pool: &PgPool, code: &str) -> AppResult<Option<UserId>> {
+    let row: Option<(UserId,)> =
         sqlx::query_as("SELECT id FROM users WHERE UPPER(user_code) = UPPER($1)")
             .bind(code)
             .fetch_optional(pool)

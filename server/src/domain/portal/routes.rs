@@ -19,6 +19,7 @@ use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::auth::RequireUser,
+    types::UserId,
 };
 
 pub fn router() -> Router<AppState> {
@@ -83,7 +84,7 @@ struct SubscribeBody {
 async fn subscribe(
     State(state): State<AppState>,
     RequireUser(buyer_id): RequireUser,
-    Path(owner_id): Path<i32>,
+    Path(owner_id): Path<UserId>,
     axum::extract::Json(body): axum::extract::Json<SubscribeBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     if buyer_id == owner_id {
@@ -154,7 +155,7 @@ async fn subscribe(
 #[derive(sqlx::FromRow, Serialize)]
 struct ContentRow {
     id:        i32,
-    user_id:   i32,
+    user_id:   UserId,
     media_url: Option<String>,
     caption:   Option<String>,
     content_type: Option<String>,
@@ -165,7 +166,7 @@ struct ContentRow {
 async fn content(
     State(state): State<AppState>,
     RequireUser(buyer_id): RequireUser,
-    Path(owner_id): Path<i32>,
+    Path(owner_id): Path<UserId>,
 ) -> AppResult<Json<Vec<ContentRow>>> {
     // The creator can always view their own content.
     let is_owner = buyer_id == owner_id;

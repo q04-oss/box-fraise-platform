@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use crate::error::{AppError, AppResult};
+use crate::{error::{AppError, AppResult}, types::UserId};
 use super::types::{BatchStatusEntry, LocationRow, TimeSlotRow, VarietyRow};
 
 // ── Varieties ─────────────────────────────────────────────────────────────────
@@ -42,7 +42,7 @@ pub async fn find_variety(pool: &PgPool, id: i32) -> AppResult<Option<VarietyRow
 }
 
 /// Varieties the user has collected at least once ("passport").
-pub async fn user_passport(pool: &PgPool, user_id: i32) -> AppResult<Vec<VarietyRow>> {
+pub async fn user_passport(pool: &PgPool, user_id: UserId) -> AppResult<Vec<VarietyRow>> {
     sqlx::query_as(
         "SELECT DISTINCT ON (v.id)
                 v.id, v.name, v.description, v.farm_source, v.price_cents, v.stock,

@@ -20,6 +20,7 @@ use crate::{
     auth::{self, Claims},
     auth::device::{parse_auth_header, verify_signature},
     error::AppError,
+    types::UserId,
 };
 
 // ── RequireClaims ─────────────────────────────────────────────────────────────
@@ -54,7 +55,7 @@ where
 
 // ── RequireUser ───────────────────────────────────────────────────────────────
 
-pub struct RequireUser(pub i32);
+pub struct RequireUser(pub UserId);
 
 impl<S> FromRequestParts<S> for RequireUser
 where
@@ -71,7 +72,7 @@ where
 
 // ── OptionalAuth ──────────────────────────────────────────────────────────────
 
-pub struct OptionalAuth(pub Option<i32>);
+pub struct OptionalAuth(pub Option<UserId>);
 
 impl<S> FromRequestParts<S> for OptionalAuth
 where
@@ -95,7 +96,7 @@ pub struct DeviceInfo {
     pub id:      i32,
     pub address: String,
     pub role:    String,
-    pub user_id: Option<i32>,
+    pub user_id: Option<UserId>,
 }
 
 pub struct RequireDevice(pub DeviceInfo);
@@ -124,7 +125,7 @@ where
         struct Row {
             id:      i32,
             role:    String,
-            user_id: Option<i32>,
+            user_id: Option<UserId>,
         }
 
         let row: Option<Row> = sqlx::query_as(

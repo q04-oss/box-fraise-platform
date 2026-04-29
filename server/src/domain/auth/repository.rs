@@ -1,12 +1,12 @@
 use rand::Rng;
 use sqlx::PgPool;
 
-use crate::error::{AppError, AppResult};
+use crate::{error::{AppError, AppResult}, types::UserId};
 use super::types::{UserRow, USER_COLS};
 
 // ── Lookups ───────────────────────────────────────────────────────────────────
 
-pub async fn find_by_id(pool: &PgPool, id: i32) -> AppResult<Option<UserRow>> {
+pub async fn find_by_id(pool: &PgPool, id: UserId) -> AppResult<Option<UserRow>> {
     sqlx::query_as(&format!("SELECT {USER_COLS} FROM users WHERE id = $1"))
         .bind(id)
         .fetch_optional(pool)
@@ -82,7 +82,7 @@ pub async fn find_or_create_apple(
 
 /// Auto-verify `table_verified` if the user's email matches a confirmed table booking.
 /// Runs fire-and-forget; failures are logged, not propagated.
-pub async fn maybe_verify_from_booking(pool: &PgPool, user_id: i32, email: &str) {
+pub async fn maybe_verify_from_booking(pool: &PgPool, user_id: UserId, email: &str) {
     let result = sqlx::query(
         "UPDATE users
          SET table_verified = true
@@ -100,7 +100,7 @@ pub async fn maybe_verify_from_booking(pool: &PgPool, user_id: i32, email: &str)
     .await;
 
     if let Err(e) = result {
-        tracing::warn!(user_id, error = %e, "maybe_verify_from_booking failed");
+        tracing::warn!(user_id = %user_id, error = %e, "maybe_verify_from_booking failed");
     }
 }
 
@@ -155,7 +155,7 @@ pub async fn create_email_user(
     row.ok_or_else(|| AppError::conflict("email already in use"))
 }
 
-pub async fn set_password(pool: &PgPool, user_id: i32, password_hash: &str) -> AppResult<()> {
+pub async fn set_password(pool: &PgPool, user_id: UserId, password_hash: &str) -> AppResult<()> {
     sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
         .bind(password_hash)
         .bind(user_id)
@@ -167,7 +167,7 @@ pub async fn set_password(pool: &PgPool, user_id: i32, password_hash: &str) -> A
 
 // ── Profile mutations ─────────────────────────────────────────────────────────
 
-pub async fn set_push_token(pool: &PgPool, user_id: i32, token: &str) -> AppResult<()> {
+pub async fn set_push_token(pool: &PgPool, user_id: UserId, token: &str) -> AppResult<()> {
     sqlx::query("UPDATE users SET push_token = $1 WHERE id = $2")
         .bind(token)
         .bind(user_id)
@@ -177,7 +177,7 @@ pub async fn set_push_token(pool: &PgPool, user_id: i32, token: &str) -> AppResu
     Ok(())
 }
 
-pub async fn set_display_name(pool: &PgPool, user_id: i32, name: &str) -> AppResult<()> {
+pub async fn set_display_name(pool: &PgPool, user_id: UserId, name: &str) -> AppResult<()> {
     sqlx::query("UPDATE users SET display_name = $1 WHERE id = $2")
         .bind(name)
         .bind(user_id)
@@ -189,7 +189,7 @@ pub async fn set_display_name(pool: &PgPool, user_id: i32, name: &str) -> AppRes
 
 // ── Password reset tokens ─────────────────────────────────────────────────────
 
-pub async fn create_reset_token(pool: &PgPool, user_id: i32, token: &str) -> AppResult<()> {
+pub async fn create_reset_token(pool: &PgPool, user_id: UserId, token: &str) -> AppResult<()> {
     let expires_at = chrono::Utc::now().naive_utc() + chrono::Duration::hours(1);
     sqlx::query(
         "INSERT INTO password_reset_tokens (user_id, token, expires_at)
@@ -206,8 +206,8 @@ pub async fn create_reset_token(pool: &PgPool, user_id: i32, token: &str) -> App
     Ok(())
 }
 
-pub async fn consume_reset_token(pool: &PgPool, token: &str) -> AppResult<Option<i32>> {
-    let row: Option<(i32,)> = sqlx::query_as(
+pub async fn consume_reset_token(pool: &PgPool, token: &str) -> AppResult<Option<UserId>> {
+    let row: Option<(UserId,)> = sqlx::query_as(
         "DELETE FROM password_reset_tokens
          WHERE token = $1 AND expires_at > NOW()
          RETURNING user_id",
@@ -221,7 +221,7 @@ pub async fn consume_reset_token(pool: &PgPool, token: &str) -> AppResult<Option
 
 // ── Table booking claim ───────────────────────────────────────────────────────
 
-pub async fn claim_booking_email(pool: &PgPool, user_id: i32, email: &str) -> AppResult<bool> {
+pub async fn claim_booking_email(pool: &PgPool, user_id: UserId, email: &str) -> AppResult<bool> {
     let matched: bool = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1 FROM table_bookings

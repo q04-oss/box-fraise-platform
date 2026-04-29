@@ -8,6 +8,7 @@ use crate::{
     app::AppState,
     error::AppResult,
     http::extractors::{auth::RequireUser, json::AppJson},
+    types::UserId,
 };
 use super::{
     service,
@@ -68,7 +69,7 @@ async fn otpk_count(
 async fn bundle_by_id(
     State(state): State<AppState>,
     RequireUser(_): RequireUser,
-    Path(target_id): Path<i32>,
+    Path(target_id): Path<UserId>,
 ) -> AppResult<Json<KeyBundleResponse>> {
     Ok(Json(service::fetch_bundle(&state, target_id).await?))
 }

@@ -8,6 +8,7 @@ use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::{auth::RequireUser, json::AppJson},
+    types::UserId,
 };
 use super::{repository, types::*};
 
@@ -52,7 +53,7 @@ async fn search(
 
 async fn public_profile(
     State(state): State<AppState>,
-    Path(user_id): Path<i32>,
+    Path(user_id): Path<UserId>,
 ) -> AppResult<Json<PublicProfile>> {
     repository::public_profile(&state.db, user_id)
         .await?
@@ -65,7 +66,7 @@ async fn public_profile(
 async fn follow_status(
     State(state): State<AppState>,
     RequireUser(me): RequireUser,
-    Path(target_id): Path<i32>,
+    Path(target_id): Path<UserId>,
 ) -> AppResult<Json<serde_json::Value>> {
     let following = repository::follow_status(&state.db, me, target_id).await?;
     Ok(Json(serde_json::json!({ "following": following })))
@@ -75,7 +76,7 @@ async fn follow_status(
 
 async fn followers(
     State(state): State<AppState>,
-    Path(user_id): Path<i32>,
+    Path(user_id): Path<UserId>,
 ) -> AppResult<Json<serde_json::Value>> {
     let count = repository::follower_count(&state.db, user_id).await?;
     Ok(Json(serde_json::json!({ "count": count })))
@@ -83,14 +84,14 @@ async fn followers(
 
 async fn followers_list(
     State(state): State<AppState>,
-    Path(user_id): Path<i32>,
+    Path(user_id): Path<UserId>,
 ) -> AppResult<Json<Vec<UserSearchResult>>> {
     Ok(Json(repository::list_followers(&state.db, user_id).await?))
 }
 
 async fn following(
     State(state): State<AppState>,
-    Path(user_id): Path<i32>,
+    Path(user_id): Path<UserId>,
 ) -> AppResult<Json<Vec<UserSearchResult>>> {
     Ok(Json(repository::list_following(&state.db, user_id).await?))
 }
@@ -100,7 +101,7 @@ async fn following(
 async fn follow(
     State(state): State<AppState>,
     RequireUser(me): RequireUser,
-    Path(target_id): Path<i32>,
+    Path(target_id): Path<UserId>,
 ) -> AppResult<Json<serde_json::Value>> {
     if me == target_id {
         return Err(AppError::bad_request("cannot follow yourself"));
@@ -112,7 +113,7 @@ async fn follow(
 async fn unfollow(
     State(state): State<AppState>,
     RequireUser(me): RequireUser,
-    Path(target_id): Path<i32>,
+    Path(target_id): Path<UserId>,
 ) -> AppResult<Json<serde_json::Value>> {
     repository::unfollow(&state.db, me, target_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))

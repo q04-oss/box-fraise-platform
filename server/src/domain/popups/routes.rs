@@ -11,6 +11,7 @@ use crate::{
     error::{AppError, AppResult},
     http::extractors::{auth::RequireUser, json::AppJson},
     integrations::resend,
+    types::UserId,
 };
 use super::types::*;
 
@@ -252,7 +253,7 @@ async fn nominations(
 async fn nominate(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
-    Path((popup_id, nominee_id)): Path<(i32, i32)>,
+    Path((popup_id, nominee_id)): Path<(i32, UserId)>,
     AppJson(_): AppJson<NominateBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     if user_id == nominee_id {

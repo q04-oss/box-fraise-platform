@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::error::{AppError, AppResult};
+use crate::{error::{AppError, AppResult}, types::UserId};
 use super::types::OrderRow;
 
 const ORDER_COLS: &str =
@@ -19,7 +19,7 @@ pub async fn find_by_id(pool: &PgPool, id: i32) -> AppResult<Option<OrderRow>> {
         .map_err(AppError::Db)
 }
 
-pub async fn list_for_user(pool: &PgPool, user_id: i32) -> AppResult<Vec<OrderRow>> {
+pub async fn list_for_user(pool: &PgPool, user_id: UserId) -> AppResult<Vec<OrderRow>> {
     sqlx::query_as(&format!(
         "SELECT {ORDER_COLS} FROM orders
          WHERE user_id = $1
@@ -65,7 +65,7 @@ pub async fn decrement_stock(
 
 pub async fn create(
     tx:           &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    user_id:      Option<i32>,
+    user_id:      Option<UserId>,
     variety_id:   i32,
     location_id:  i32,
     time_slot_id: Option<i32>,
@@ -116,7 +116,7 @@ pub async fn set_status(pool: &PgPool, order_id: i32, status: &str) -> AppResult
     Ok(())
 }
 
-pub async fn set_rating(pool: &PgPool, order_id: i32, user_id: i32, rating: i32) -> AppResult<()> {
+pub async fn set_rating(pool: &PgPool, order_id: i32, user_id: UserId, rating: i32) -> AppResult<()> {
     let rows = sqlx::query(
         "UPDATE orders SET rating = $1
          WHERE id = $2 AND user_id = $3 AND status = 'collected' AND rating IS NULL",
@@ -138,7 +138,7 @@ pub async fn set_rating(pool: &PgPool, order_id: i32, user_id: i32, rating: i32)
 pub async fn collect_by_nfc(
     pool:      &PgPool,
     nfc_token: &str,
-    user_id:   Option<i32>,
+    user_id:   Option<UserId>,
 ) -> AppResult<Option<OrderRow>> {
     // If user_id supplied, restrict to that user (self-collection).
     let row: Option<OrderRow> = if let Some(uid) = user_id {
@@ -185,7 +185,7 @@ pub async fn increment_slot_booked(
 /// Check if a referral code is valid and the user hasn't placed an order before.
 pub async fn check_referral(
     pool:     &PgPool,
-    user_id:  i32,
+    user_id:  UserId,
     code:     &str,
 ) -> AppResult<bool> {
     // First order check.
@@ -214,7 +214,7 @@ pub async fn check_referral(
 /// Atomically deduct from ad_balance_cents. Returns false if insufficient funds.
 pub async fn deduct_balance(
     tx:          &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    user_id:     i32,
+    user_id:     UserId,
     amount_cents: i32,
 ) -> AppResult<bool> {
     let rows = sqlx::query(

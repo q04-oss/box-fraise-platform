@@ -8,6 +8,7 @@ use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::auth::RequireUser,
+    types::UserId,
 };
 
 use super::types::{
@@ -122,8 +123,8 @@ async fn confirm_evening_token(
 #[derive(sqlx::FromRow)]
 struct BookingLock {
     id:        i32,
-    user_id_1: i32,
-    user_id_2: i32,
+    user_id_1: UserId,
+    user_id_2: UserId,
     status:    String,
 }
 
@@ -299,8 +300,8 @@ async fn decline_trade(
 struct TradeOfferLock {
     id:           i32,
     token_id:     i32,
-    from_user_id: i32,
-    to_user_id:   i32,
+    from_user_id: UserId,
+    to_user_id:   UserId,
     status:       String,
 }
 

@@ -15,6 +15,7 @@ use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::{auth::RequireUser, json::AppJson},
+    types::UserId,
 };
 
 pub fn router() -> Router<AppState> {
@@ -26,13 +27,13 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct ConnectBody {
     /// The other user's ID (resolved by the app from the NFC tag).
-    other_user_id: i32,
+    other_user_id: UserId,
     location_id:   Option<i32>,
 }
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 struct ContactRow {
-    user_id:      i32,
+    user_id:      UserId,
     display_name: Option<String>,
     portrait_url: Option<String>,
     connected_at: NaiveDateTime,

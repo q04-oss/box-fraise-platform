@@ -1,6 +1,7 @@
 use crate::{
     app::AppState,
     error::{AppError, AppResult},
+    types::UserId,
 };
 use super::{
     repository,
@@ -13,7 +14,7 @@ const REFERRAL_DISCOUNT: f64 = 0.10; // 10 %
 
 pub async fn create_order(
     state:   &AppState,
-    user_id: i32,
+    user_id: UserId,
     body:    CreateOrderBody,
 ) -> AppResult<CreateOrderResponse> {
     // Validate variety and compute price inside a transaction so the stock
@@ -85,7 +86,7 @@ pub async fn create_order(
 
 // ── Confirm payment ───────────────────────────────────────────────────────────
 
-pub async fn confirm_order(state: &AppState, order_id: i32, user_id: i32) -> AppResult<OrderRow> {
+pub async fn confirm_order(state: &AppState, order_id: i32, user_id: UserId) -> AppResult<OrderRow> {
     let order = repository::find_by_id(&state.db, order_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -121,7 +122,7 @@ pub async fn confirm_order(state: &AppState, order_id: i32, user_id: i32) -> App
 
 pub async fn create_payment_intent(
     state:        &AppState,
-    user_id:      i32,
+    user_id:      UserId,
     variety_id:   i32,
     quantity:     i32,
     referral_code: Option<&str>,
@@ -165,7 +166,7 @@ pub async fn create_payment_intent(
 
 pub async fn pay_with_balance(
     state:   &AppState,
-    user_id: i32,
+    user_id: UserId,
     body:    super::types::CreateOrderBody,
 ) -> AppResult<OrderRow> {
     let mut tx = state.db.begin().await.map_err(AppError::Db)?;

@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use crate::error::{AppError, AppResult};
+use crate::{error::{AppError, AppResult}, types::UserId};
 use super::types::{ConversationSummary, MessageRow};
 
 const MSG_COLS: &str =
@@ -15,7 +15,7 @@ const MSG_COLS: &str =
 ///   1. Shop accounts can always receive messages.
 ///   2. Users who share an evening token (dinner date) can always message.
 ///   3. Otherwise: both must be verified AND have an NFC connection.
-pub async fn can_message(pool: &PgPool, from: i32, to: i32) -> AppResult<bool> {
+pub async fn can_message(pool: &PgPool, from: UserId, to: UserId) -> AppResult<bool> {
     // Rule 1: shop account.
     let is_shop: bool = sqlx::query_scalar(
         "SELECT COALESCE((SELECT is_shop FROM users WHERE id = $1), false)",
@@ -73,10 +73,10 @@ pub async fn can_message(pool: &PgPool, from: i32, to: i32) -> AppResult<bool> {
 
 pub async fn list_conversations(
     pool:    &PgPool,
-    user_id: i32,
+    user_id: UserId,
 ) -> AppResult<Vec<ConversationSummary>> {
     // Find all peers the user has exchanged messages with (excluding archived).
-    let peers: Vec<(i32, Option<String>)> = sqlx::query_as(
+    let peers: Vec<(UserId, Option<String>)> = sqlx::query_as(
         "SELECT DISTINCT
              CASE WHEN sender_id = $1 THEN recipient_id ELSE sender_id END AS peer_id,
              (SELECT display_name FROM users u WHERE u.id =
@@ -132,8 +132,8 @@ pub async fn list_conversations(
 
 pub async fn thread(
     pool:      &PgPool,
-    user_id:   i32,
-    peer_id:   i32,
+    user_id:   UserId,
+    peer_id:   UserId,
     before_id: Option<i32>,
     limit:     i64,
 ) -> AppResult<Vec<MessageRow>> {
@@ -184,8 +184,8 @@ pub async fn thread(
 
 pub async fn insert(
     pool:                &PgPool,
-    sender_id:           i32,
-    recipient_id:        i32,
+    sender_id:           UserId,
+    recipient_id:        UserId,
     body:                &str,
     encrypted:           bool,
     ephemeral_key:       Option<&str>,
@@ -213,7 +213,7 @@ pub async fn insert(
 
 // ── Archive ───────────────────────────────────────────────────────────────────
 
-pub async fn archive(pool: &PgPool, user_id: i32, peer_id: i32) -> AppResult<()> {
+pub async fn archive(pool: &PgPool, user_id: UserId, peer_id: UserId) -> AppResult<()> {
     sqlx::query(
         "UPDATE messages
          SET archived_by = $1

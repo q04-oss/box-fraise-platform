@@ -1,13 +1,15 @@
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
+use crate::types::UserId;
+
 // ── Stored rows ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct DeviceRow {
     pub id:             i32,
     pub device_address: String,
-    pub user_id:        i32,
+    pub user_id:        UserId,
     pub role:           String,
     pub created_at:     NaiveDateTime,
 }

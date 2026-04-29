@@ -3,12 +3,13 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use crate::{
     app::AppState,
     error::{AppError, AppResult},
+    types::UserId,
 };
 use super::{repository, types::DeviceRow};
 
 // ── Pairing ───────────────────────────────────────────────────────────────────
 
-pub async fn create_pair_token(state: &AppState, user_id: i32) -> AppResult<String> {
+pub async fn create_pair_token(state: &AppState, user_id: UserId) -> AppResult<String> {
     repository::create_pair_token(&state.db, user_id).await
 }
 
@@ -45,7 +46,7 @@ const VALID_ROLES: &[&str] = &["user", "employee", "chocolatier"];
 
 pub async fn update_role(
     state:           &AppState,
-    requesting_user: i32,
+    requesting_user: UserId,
     address:         &str,
     new_role:        &str,
 ) -> AppResult<()> {
@@ -76,7 +77,7 @@ pub async fn update_role(
 
 pub async fn store_attestation(
     state:        &AppState,
-    user_id:      i32,
+    user_id:      UserId,
     key_id:       &str,
     attestation:  &str,
     hmac_key_b64: &str,
