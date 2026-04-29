@@ -15,6 +15,7 @@ use axum::{
 use crate::{
     app::AppState,
     error::AppError,
+    integrations::resend,
 };
 
 pub fn router() -> Router<AppState> {
@@ -66,9 +67,12 @@ async fn handle_pi_succeeded(state: &AppState, event: &serde_json::Value) {
 
     match payment_type {
         "order" | "" => complete_order(state, pi_id).await,
-        "rsvp"       => complete_rsvp(state, pi_id).await,
-        "membership"  => complete_membership(state, pi, pi_id).await,
-        "tip"        => complete_tip(state, pi).await,
+        "rsvp"            => complete_rsvp(state, pi_id).await,
+        "membership"      => complete_membership(state, pi, pi_id).await,
+        "tip"             => complete_tip(state, pi).await,
+        "portal_access"   => complete_portal_access(state, pi).await,
+        "tournament_entry"=> complete_tournament_entry(state, pi).await,
+        "portrait_purchase"=> complete_portrait_purchase(state, pi).await,
         _            => {
             tracing::info!(pi_id, payment_type, "unhandled payment_intent.succeeded type");
         }
@@ -76,40 +80,76 @@ async fn handle_pi_succeeded(state: &AppState, event: &serde_json::Value) {
 }
 
 async fn complete_order(state: &AppState, pi_id: &str) {
-    let result = sqlx::query(
+    #[derive(sqlx::FromRow)]
+    struct OrderInfo {
+        id:           i32,
+        variety_name: String,
+        total_cents:  i64,
+        email:        Option<String>,
+    }
+
+    let result: Result<Option<OrderInfo>, _> = sqlx::query_as(
         "UPDATE orders SET status = 'paid'
-         WHERE stripe_payment_intent_id = $1 AND status = 'queued'",
+         WHERE stripe_payment_intent_id = $1 AND status = 'queued'
+         RETURNING
+             orders.id,
+             (SELECT name FROM catalog_varieties WHERE id = orders.variety_id) AS variety_name,
+             orders.total_cents,
+             (SELECT email FROM users WHERE id = orders.user_id) AS email",
     )
     .bind(pi_id)
-    .execute(&state.db)
+    .fetch_optional(&state.db)
     .await;
 
     match result {
-        Ok(r) if r.rows_affected() > 0 => {
-            tracing::info!(pi_id, "order marked paid via webhook");
-            // TODO: push notification + send_order_queued email
+        Ok(Some(info)) => {
+            tracing::info!(pi_id, order_id = info.id, "order marked paid via webhook");
+            if let (Some(email), Some(key)) = (info.email, state.cfg.resend_api_key.clone()) {
+                let http    = state.http.clone();
+                let variety = info.variety_name.clone();
+                let total   = info.total_cents as i32;
+                let oid     = info.id;
+                tokio::spawn(async move {
+                    let _ = resend::send_order_confirmation(&http, &key, &email, oid, &variety, total).await;
+                });
+            }
         }
-        Ok(_)  => tracing::warn!(pi_id, "no order found for webhook pi"),
-        Err(e) => tracing::error!(pi_id, error = %e, "complete_order failed"),
+        Ok(None)  => tracing::warn!(pi_id, "no order found for webhook pi"),
+        Err(e)    => tracing::error!(pi_id, error = %e, "complete_order failed"),
     }
 }
 
 async fn complete_rsvp(state: &AppState, pi_id: &str) {
-    let result = sqlx::query(
+    #[derive(sqlx::FromRow)]
+    struct RsvpInfo {
+        event_name: String,
+        email:      Option<String>,
+    }
+
+    let result: Result<Option<RsvpInfo>, _> = sqlx::query_as(
         "UPDATE popup_rsvps SET status = 'confirmed'
-         WHERE stripe_payment_intent_id = $1 AND status = 'pending'",
+         WHERE stripe_payment_intent_id = $1 AND status = 'pending'
+         RETURNING
+             (SELECT name FROM popup_events WHERE id = popup_rsvps.event_id) AS event_name,
+             (SELECT email FROM users WHERE id = popup_rsvps.user_id) AS email",
     )
     .bind(pi_id)
-    .execute(&state.db)
+    .fetch_optional(&state.db)
     .await;
 
     match result {
-        Ok(r) if r.rows_affected() > 0 => {
+        Ok(Some(info)) => {
             tracing::info!(pi_id, "RSVP confirmed via webhook");
-            // TODO: send_rsvp_confirmed email
+            if let (Some(email), Some(key)) = (info.email, state.cfg.resend_api_key.clone()) {
+                let http  = state.http.clone();
+                let event = info.event_name.clone();
+                tokio::spawn(async move {
+                    let _ = resend::send_rsvp_confirmed(&http, &key, &email, &event).await;
+                });
+            }
         }
-        Ok(_)  => tracing::warn!(pi_id, "no RSVP found for webhook pi"),
-        Err(e) => tracing::error!(pi_id, error = %e, "complete_rsvp failed"),
+        Ok(None)  => tracing::warn!(pi_id, "no RSVP found for webhook pi"),
+        Err(e)    => tracing::error!(pi_id, error = %e, "complete_rsvp failed"),
     }
 }
 
@@ -176,9 +216,159 @@ async fn complete_tip(state: &AppState, pi: &serde_json::Value) {
             .await;
 
             tracing::info!(worker_id, amount, "tip credited via webhook");
-            // TODO: send_tip_received email
+
+            if let Some(key) = state.cfg.resend_api_key.clone() {
+                let http = state.http.clone();
+                let db   = state.db.clone();
+                tokio::spawn(async move {
+                    let email: Option<String> = sqlx::query_scalar(
+                        "SELECT email FROM users WHERE id = $1",
+                    )
+                    .bind(worker_id)
+                    .fetch_optional(&db)
+                    .await
+                    .unwrap_or(None)
+                    .flatten();
+
+                    if let Some(addr) = email {
+                        let _ = resend::send_tip_received(&http, &key, &addr, amount).await;
+                    }
+                });
+            }
         }
     }
+}
+
+// ── portal_access ─────────────────────────────────────────────────────────────
+
+async fn complete_portal_access(state: &AppState, pi: &serde_json::Value) {
+    let buyer_id: Option<i32> = pi["metadata"]["buyer_id"]
+        .as_str()
+        .and_then(|s| s.parse().ok());
+    let owner_id: Option<i32> = pi["metadata"]["owner_id"]
+        .as_str()
+        .and_then(|s| s.parse().ok());
+
+    let (Some(buyer), Some(owner)) = (buyer_id, owner_id) else {
+        tracing::warn!("portal_access webhook missing buyer_id or owner_id");
+        return;
+    };
+
+    let result = sqlx::query(
+        "UPDATE portal_access SET status = 'active'
+         WHERE buyer_id = $1 AND owner_id = $2 AND status = 'pending'",
+    )
+    .bind(buyer)
+    .bind(owner)
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => {
+            tracing::info!(buyer, owner, "portal access activated via webhook");
+        }
+        Ok(_)  => tracing::warn!(buyer, owner, "no pending portal_access found"),
+        Err(e) => tracing::error!(error = %e, "complete_portal_access failed"),
+    }
+}
+
+// ── tournament_entry ──────────────────────────────────────────────────────────
+
+async fn complete_tournament_entry(state: &AppState, pi: &serde_json::Value) {
+    let user_id: Option<i32> = pi["metadata"]["user_id"]
+        .as_str()
+        .and_then(|s| s.parse().ok());
+    let tournament_id: Option<i32> = pi["metadata"]["tournament_id"]
+        .as_str()
+        .and_then(|s| s.parse().ok());
+
+    let (Some(uid), Some(tid)) = (user_id, tournament_id) else {
+        tracing::warn!("tournament_entry webhook missing user_id or tournament_id");
+        return;
+    };
+
+    let result = sqlx::query(
+        "UPDATE tournament_entries SET status = 'registered'
+         WHERE tournament_id = $1 AND user_id = $2 AND status = 'pending'",
+    )
+    .bind(tid)
+    .bind(uid)
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => {
+            tracing::info!(uid, tid, "tournament entry confirmed via webhook");
+        }
+        Ok(_)  => tracing::warn!(uid, tid, "no pending tournament entry found"),
+        Err(e) => tracing::error!(error = %e, "complete_tournament_entry failed"),
+    }
+}
+
+// ── portrait_purchase ─────────────────────────────────────────────────────────
+
+async fn complete_portrait_purchase(state: &AppState, pi: &serde_json::Value) {
+    let buyer_id: Option<i32> = pi["metadata"]["buyer_id"]
+        .as_str()
+        .and_then(|s| s.parse().ok());
+    let seller_id: Option<i32> = pi["metadata"]["seller_id"]
+        .as_str()
+        .and_then(|s| s.parse().ok());
+    let creator_id: Option<i32> = pi["metadata"]["creator_id"]
+        .as_str()
+        .and_then(|s| s.parse().ok());
+    let token_id: Option<i32> = pi["metadata"]["token_id"]
+        .as_str()
+        .and_then(|s| s.parse().ok());
+    let amount = pi["amount"].as_i64().unwrap_or(0);
+
+    let (Some(buyer), Some(seller), Some(creator), Some(token)) =
+        (buyer_id, seller_id, creator_id, token_id)
+    else {
+        tracing::warn!("portrait_purchase webhook missing required metadata");
+        return;
+    };
+
+    // Transfer ownership.
+    let transfer = sqlx::query(
+        "UPDATE portrait_tokens SET owner_id = $1
+         WHERE id = $2 AND owner_id = $3",
+    )
+    .bind(buyer)
+    .bind(token)
+    .bind(seller)
+    .execute(&state.db)
+    .await;
+
+    match transfer {
+        Ok(r) if r.rows_affected() == 0 => {
+            // Token already moved — idempotent, nothing to do.
+            tracing::warn!(buyer, token, "portrait token already transferred or seller mismatch");
+            return;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "portrait_purchase ownership transfer failed");
+            return;
+        }
+        Ok(_) => {}
+    }
+
+    tracing::info!(buyer, token, "portrait token transferred via webhook");
+
+    // Royalty: 15% to creator, 85% to seller (recorded; actual payout is manual / batched).
+    let creator_cut = (amount * 15) / 100;
+    let seller_cut  = amount - creator_cut;
+
+    let _ = sqlx::query(
+        "INSERT INTO earnings_ledger (user_id, amount_cents, type)
+         VALUES ($1, $2, 'portrait_royalty'), ($3, $4, 'portrait_sale')",
+    )
+    .bind(creator)
+    .bind(creator_cut)
+    .bind(seller)
+    .bind(seller_cut)
+    .execute(&state.db)
+    .await;
 }
 
 // ── identity.verification_session.verified ────────────────────────────────────

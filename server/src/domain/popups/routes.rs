@@ -8,6 +8,7 @@ use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::{auth::RequireUser, json::AppJson},
+    integrations::resend,
 };
 use super::types::*;
 
@@ -285,7 +286,37 @@ async fn nominate(
     .await
     .map_err(AppError::Db)?;
 
-    // TODO: send_nomination email + push to nominee
+    if let Some(key) = state.cfg.resend_api_key.clone() {
+        let http = state.http.clone();
+        let db   = state.db.clone();
+        let uid  = user_id;
+        tokio::spawn(async move {
+            #[derive(sqlx::FromRow)]
+            struct NomInfo {
+                nominee_email:  Option<String>,
+                nominator_name: Option<String>,
+                event_name:     String,
+            }
+
+            let info: Option<NomInfo> = sqlx::query_as(
+                "SELECT
+                     (SELECT email FROM users WHERE id = $2)         AS nominee_email,
+                     (SELECT display_name FROM users WHERE id = $1)  AS nominator_name,
+                     (SELECT name FROM popup_events WHERE id = $3)   AS event_name",
+            )
+            .bind(uid)
+            .bind(nominee_id)
+            .bind(popup_id)
+            .fetch_optional(&db)
+            .await
+            .unwrap_or(None);
+
+            if let Some(NomInfo { nominee_email: Some(email), nominator_name, event_name }) = info {
+                let nominator = nominator_name.as_deref().unwrap_or("Someone");
+                let _ = resend::send_nomination(&http, &key, &email, &event_name, nominator).await;
+            }
+        });
+    }
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }

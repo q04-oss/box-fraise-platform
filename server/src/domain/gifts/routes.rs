@@ -9,6 +9,7 @@ use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::{auth::RequireUser, json::AppJson},
+    integrations::resend,
 };
 use super::types::*;
 
@@ -69,7 +70,28 @@ async fn send(
     .await
     .map_err(AppError::Db)?;
 
-    // TODO: send gift notification email via integrations::resend
+    if let (Some(to_email), Some(key)) = (
+        row.recipient_email.clone(),
+        state.cfg.resend_api_key.clone(),
+    ) {
+        let http  = state.http.clone();
+        let db    = state.db.clone();
+        let token = claim_token.clone();
+        let uid   = user_id;
+        tokio::spawn(async move {
+            let from_name: Option<String> = sqlx::query_scalar(
+                "SELECT COALESCE(display_name, 'Someone') FROM users WHERE id = $1",
+            )
+            .bind(uid)
+            .fetch_optional(&db)
+            .await
+            .unwrap_or(None)
+            .flatten();
+
+            let sender = from_name.as_deref().unwrap_or("Someone");
+            let _ = resend::send_gift_notification(&http, &key, &to_email, sender, &token).await;
+        });
+    }
 
     Ok(Json(row))
 }
