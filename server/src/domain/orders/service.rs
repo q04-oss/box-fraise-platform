@@ -1,7 +1,7 @@
 use crate::{
     app::AppState,
     error::{AppError, AppResult},
-    types::{OrderId, UserId},
+    types::{OrderId, StripeCustomerId, UserId},
 };
 use super::{
     repository,
@@ -35,7 +35,7 @@ pub async fn create_order(
     let total_cents = price.0 * body.quantity;
 
     // Create Stripe payment intent with manual capture.
-    let user_row: Option<(Option<String>,)> =
+    let user_row: Option<(Option<StripeCustomerId>,)> =
         sqlx::query_as("SELECT stripe_customer_id FROM users WHERE id = $1")
             .bind(user_id)
             .fetch_optional(&mut *tx)
@@ -49,7 +49,7 @@ pub async fn create_order(
         .create_payment_intent(
             total_cents as i64,
             "cad",
-            customer_id.as_deref(),
+            customer_id.as_ref().map(|c| c.as_str()),
             &[("order_user_id", &user_id.to_string())],
         )
         .await?;

@@ -1,5 +1,7 @@
 use secrecy::ExposeSecret;
 use sqlx::PgPool;
+
+use crate::types::StripeCustomerId;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::info;
 
@@ -81,7 +83,7 @@ struct StandingOrder {
     total_cents:            i64,
     frequency:              String, // "daily" | "weekly" | "monthly"
     stripe_payment_method_id: String,
-    stripe_customer_id:     String,
+    stripe_customer_id:     StripeCustomerId,
     user_email:             Option<String>,
     variety_name:           String,
 }
@@ -132,7 +134,7 @@ async fn charge_standing_order(state: &AppState, order: &StandingOrder) {
         .charge_off_session(
             order.total_cents,
             "cad",
-            &order.stripe_customer_id,
+            order.stripe_customer_id.as_str(),
             &order.stripe_payment_method_id,
             &[
                 ("type",             "standing_order"),

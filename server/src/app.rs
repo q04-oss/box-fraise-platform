@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::{middleware, Router};
 use axum::http::{header, HeaderName, HeaderValue};
+use deadpool_redis::Pool as RedisPool;
 use secrecy::ExposeSecret;
 use sqlx::PgPool;
 use tower_http::{
@@ -32,7 +33,12 @@ pub struct AppState {
     pub db:      PgPool,
     pub cfg:     Arc<Config>,
     pub revoked: RevokedTokens,
+    /// In-process nonce cache — used as fallback when Redis is not configured.
+    /// Safe for single-instance deployments only. Ignored when `redis` is Some.
     pub nonces:  NonceCache,
+    /// Redis pool for distributed nonce deduplication.
+    /// None when REDIS_URL is not set — falls back to `nonces`.
+    pub redis:   Option<RedisPool>,
     pub rate:    SharedRateLimiter,
     /// Shared HTTP client — reuses the connection pool across all integration calls.
     pub http:    reqwest::Client,
@@ -46,11 +52,35 @@ impl AppState {
     }
 
     pub fn new(db: PgPool, cfg: Config) -> Self {
+        let redis = cfg.redis_url.as_ref().and_then(|url| {
+            let url_str = url.expose_secret().to_owned();
+            match deadpool_redis::Config::from_url(url_str)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            {
+                Ok(pool) => {
+                    tracing::info!("Redis nonce cache configured");
+                    Some(pool)
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Redis pool creation failed — check REDIS_URL");
+                    None
+                }
+            }
+        });
+
+        if redis.is_none() {
+            tracing::warn!(
+                "REDIS_URL not configured — nonce cache is in-process. \
+                 Safe for single instance only; set REDIS_URL before scaling."
+            );
+        }
+
         Self {
             db,
             cfg:     Arc::new(cfg),
             revoked: new_revoked_tokens(),
             nonces:  new_nonce_cache(),
+            redis,
             rate:    RateLimiter::new(),
             http:    reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))

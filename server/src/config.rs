@@ -24,6 +24,10 @@ pub struct Config {
     /// Threat: HMAC bypass — fallback key for non-attested iOS clients.
     /// If absent, requests without an attest key are rejected.
     pub hmac_shared_key: Option<SecretString>,
+    /// Redis URL for nonce deduplication. When set, nonces are stored with
+    /// `SET fraise:nonce:<uuid> EX 300 NX` — atomic and multi-instance safe.
+    /// When absent, an in-process HashMap is used (single instance only).
+    pub redis_url: Option<SecretString>,
 
     // ── Stripe ────────────────────────────────────────────────────────────────
     /// Threat: payment fraud — full Stripe API access with this key.
@@ -93,6 +97,7 @@ impl Config {
 
             // optional secrets
             hmac_shared_key:   optional_secret("FRAISE_HMAC_SHARED_KEY"),
+            redis_url:         optional_secret("REDIS_URL"),
             review_pin:        optional_secret("REVIEW_PIN"),
             apple_private_key: optional_secret("APPLE_PRIVATE_KEY"),
             resend_api_key:    optional_secret("RESEND_API_KEY"),

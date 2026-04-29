@@ -1,7 +1,7 @@
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
-use crate::types::UserId;
+use crate::types::{StripeCustomerId, UserId};
 
 // ── Database row ──────────────────────────────────────────────────────────────
 
@@ -19,7 +19,7 @@ pub struct UserRow {
     pub banned:                    bool,
     pub table_verified:            bool,
     pub is_dorotka:                bool,
-    pub stripe_customer_id:        Option<String>,
+    pub stripe_customer_id:        Option<StripeCustomerId>,
     pub stripe_connect_account_id: Option<String>,
     pub stripe_connect_onboarded:  bool,
     pub ad_balance_cents:          i32,

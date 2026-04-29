@@ -58,6 +58,11 @@ reqwest = { version = "0.12", features = ["json", "multipart"] }
 # ── Scheduling ────────────────────────────────────────────────────────────────
 tokio-cron-scheduler = "0.10"
 
+# ── Redis (nonce deduplication for replay prevention) ─────────────────────────
+# Opt-in: set REDIS_URL env var to activate. Falls back to in-process HashMap
+# (single instance only) when Redis is not configured.
+deadpool-redis = { version = "0.13", features = ["rt_tokio_1"] }
+
 # ── Utilities ─────────────────────────────────────────────────────────────────
 chrono    = { version = "0.4", features = ["serde"] }
 uuid      = { version = "1",   features = ["v4", "serde"] }
