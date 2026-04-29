@@ -17,6 +17,8 @@ use axum::{
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
+use secrecy::ExposeSecret;
+
 use crate::{
     app::AppState,
     error::{AppError, AppResult},
@@ -57,11 +59,11 @@ fn require_admin_pin(
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| AppError::bad_request("X-Admin-Pin header required"))?;
 
-    let role = if constant_time_eq(cfg.admin_pin.as_bytes(), pin.as_bytes()) {
+    let role = if constant_time_eq(cfg.admin_pin.expose_secret().as_bytes(), pin.as_bytes()) {
         AdminRole::Admin
-    } else if constant_time_eq(cfg.chocolatier_pin.as_bytes(), pin.as_bytes()) {
+    } else if constant_time_eq(cfg.chocolatier_pin.expose_secret().as_bytes(), pin.as_bytes()) {
         AdminRole::Chocolatier
-    } else if constant_time_eq(cfg.supplier_pin.as_bytes(), pin.as_bytes()) {
+    } else if constant_time_eq(cfg.supplier_pin.expose_secret().as_bytes(), pin.as_bytes()) {
         AdminRole::Supplier
     } else {
         // Log failed attempts — useful for detecting brute-force

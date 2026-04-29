@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::{middleware, Router};
 use axum::http::{header, HeaderName, HeaderValue};
+use secrecy::ExposeSecret;
 use sqlx::PgPool;
 use tower_http::{
     compression::CompressionLayer,
@@ -41,7 +42,7 @@ impl AppState {
     /// Borrow a Stripe client scoped to this request. Cheap — shares the
     /// underlying reqwest connection pool.
     pub fn stripe(&self) -> crate::integrations::stripe::StripeClient<'_> {
-        crate::integrations::stripe::StripeClient::new(&self.cfg.stripe_secret_key, &self.http)
+        crate::integrations::stripe::StripeClient::new(self.cfg.stripe_secret_key.expose_secret(), &self.http)
     }
 
     pub fn new(db: PgPool, cfg: Config) -> Self {

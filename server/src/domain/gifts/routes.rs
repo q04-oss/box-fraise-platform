@@ -3,6 +3,7 @@
     routing::{get, post},
     Json, Router,
 };
+use secrecy::ExposeSecret;
 use uuid::Uuid;
 
 use crate::{
@@ -72,7 +73,7 @@ async fn send(
 
     if let (Some(to_email), Some(key)) = (
         row.recipient_email.clone(),
-        state.cfg.resend_api_key.clone(),
+        state.cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned()),
     ) {
         let http  = state.http.clone();
         let db    = state.db.clone();

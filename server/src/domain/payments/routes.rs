@@ -12,6 +12,8 @@ use axum::{
     Router,
 };
 
+use secrecy::ExposeSecret;
+
 use crate::{
     app::AppState,
     integrations::resend,
@@ -34,7 +36,7 @@ async fn webhook(
 
     let event: serde_json::Value = match state
         .stripe()
-        .verify_webhook(&body, sig, &state.cfg.stripe_webhook_secret)
+        .verify_webhook(&body, sig, state.cfg.stripe_webhook_secret.expose_secret())
     {
         Ok(e)  => e,
         Err(_) => return StatusCode::UNAUTHORIZED,
@@ -103,7 +105,7 @@ async fn complete_order(state: &AppState, pi_id: &str) {
     match result {
         Ok(Some(info)) => {
             tracing::info!(pi_id, order_id = info.id, "order marked paid via webhook");
-            if let (Some(email), Some(key)) = (info.email, state.cfg.resend_api_key.clone()) {
+            if let (Some(email), Some(key)) = (info.email, state.cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned())) {
                 let http    = state.http.clone();
                 let variety = info.variety_name.clone();
                 let total   = info.total_cents as i32;
@@ -139,7 +141,7 @@ async fn complete_rsvp(state: &AppState, pi_id: &str) {
     match result {
         Ok(Some(info)) => {
             tracing::info!(pi_id, "RSVP confirmed via webhook");
-            if let (Some(email), Some(key)) = (info.email, state.cfg.resend_api_key.clone()) {
+            if let (Some(email), Some(key)) = (info.email, state.cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned())) {
                 let http  = state.http.clone();
                 let event = info.event_name.clone();
                 tokio::spawn(async move {
@@ -216,7 +218,7 @@ async fn complete_tip(state: &AppState, pi: &serde_json::Value) {
 
             tracing::info!(worker_id, amount, "tip credited via webhook");
 
-            if let Some(key) = state.cfg.resend_api_key.clone() {
+            if let Some(key) = state.cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned()) {
                 let http = state.http.clone();
                 let db   = state.db.clone();
                 tokio::spawn(async move {

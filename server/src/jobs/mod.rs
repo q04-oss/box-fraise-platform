@@ -1,3 +1,4 @@
+use secrecy::ExposeSecret;
 use sqlx::PgPool;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::info;
@@ -225,7 +226,7 @@ async fn send_standing_order_email(state: &AppState, order: &StandingOrder) {
     let Some(ref email) = order.user_email else { return };
 
     let http    = state.http.clone();
-    let key     = key.clone();
+    let key     = key.expose_secret().to_owned();
     let email   = email.clone();
     let variety = order.variety_name.clone();
     let total   = order.total_cents as i32;
@@ -271,7 +272,7 @@ async fn membership_reminders(state: &AppState) {
     for row in &rows {
         if let (Some(ref email), Some(ref key)) = (&row.email, &state.cfg.resend_api_key) {
             let http      = state.http.clone();
-            let key       = key.clone();
+            let key       = key.expose_secret().to_owned();
             let email     = email.clone();
             let tier      = row.tier.clone();
             let renews_at = row.renews_at;

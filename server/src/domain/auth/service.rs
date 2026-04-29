@@ -1,3 +1,4 @@
+use secrecy::ExposeSecret;
 use uuid::Uuid;
 
 use crate::{
@@ -64,7 +65,10 @@ pub async fn operator_login(
 // ── Demo (Apple App Review) ───────────────────────────────────────────────────
 
 pub async fn demo_login(state: &AppState, pin: &str) -> AppResult<AuthResponse> {
-    let expected = state.cfg.review_pin.as_deref().ok_or(AppError::Unauthorized)?;
+    let expected = state.cfg.review_pin
+        .as_ref()
+        .map(|s| s.expose_secret())
+        .ok_or(AppError::Unauthorized)?;
 
     // Constant-time comparison prevents timing oracle on the PIN.
     if !constant_time_eq(pin.as_bytes(), expected.as_bytes()) {

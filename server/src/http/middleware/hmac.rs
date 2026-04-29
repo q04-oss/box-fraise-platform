@@ -31,6 +31,8 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use ring::hmac as ring_hmac;
 use serde_json::json;
 
+use secrecy::ExposeSecret;
+
 use crate::{app::AppState, auth::apple_attest};
 
 const MAX_SKEW_SECS: u64 = 300; // 5-minute replay window
@@ -219,7 +221,7 @@ fn unix_now() -> u64 {
 }
 
 fn shared_key(state: &AppState) -> Option<Vec<u8>> {
-    state.cfg.hmac_shared_key.as_ref().map(|k| k.as_bytes().to_vec())
+    state.cfg.hmac_shared_key.as_ref().map(|k| k.expose_secret().as_bytes().to_vec())
 }
 
 /// Look up the per-device HMAC key stored at attestation time.

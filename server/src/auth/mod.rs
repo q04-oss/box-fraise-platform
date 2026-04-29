@@ -11,6 +11,8 @@ use std::{
 };
 use uuid::Uuid;
 
+use secrecy::ExposeSecret;
+
 use crate::{config::Config, error::AppError};
 
 // ── Claims ────────────────────────────────────────────────────────────────────
@@ -36,7 +38,7 @@ pub fn sign_token(user_id: i32, cfg: &Config) -> Result<String, AppError> {
     encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(cfg.jwt_secret.as_bytes()),
+        &EncodingKey::from_secret(cfg.jwt_secret.expose_secret().as_bytes()),
     )
     .map_err(|e| AppError::Internal(anyhow::anyhow!("token encoding failed: {e}")))
 }
@@ -44,7 +46,7 @@ pub fn sign_token(user_id: i32, cfg: &Config) -> Result<String, AppError> {
 pub fn verify_token(token: &str, cfg: &Config) -> Option<Claims> {
     decode::<Claims>(
         token,
-        &DecodingKey::from_secret(cfg.jwt_secret.as_bytes()),
+        &DecodingKey::from_secret(cfg.jwt_secret.expose_secret().as_bytes()),
         &Validation::default(),
     )
     .ok()

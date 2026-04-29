@@ -1,4 +1,5 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use secrecy::ExposeSecret;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -26,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg  = config::Config::load()?;
     let port = cfg.port;
-    let pool = db::connect(&cfg.database_url).await?;
+    let pool = db::connect(cfg.database_url.expose_secret()).await?;
 
     let state  = app::AppState::new(pool, cfg);
     let router = app::build(state.clone());

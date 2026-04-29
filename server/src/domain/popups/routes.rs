@@ -4,6 +4,8 @@
     Json, Router,
 };
 
+use secrecy::ExposeSecret;
+
 use crate::{
     app::AppState,
     error::{AppError, AppResult},
@@ -286,7 +288,7 @@ async fn nominate(
     .await
     .map_err(AppError::Db)?;
 
-    if let Some(key) = state.cfg.resend_api_key.clone() {
+    if let Some(key) = state.cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned()) {
         let http = state.http.clone();
         let db   = state.db.clone();
         let uid  = user_id;
