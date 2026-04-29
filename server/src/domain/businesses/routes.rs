@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     extract::{Path, State},
     routing::{get, post},
     Json, Router,
@@ -14,11 +14,11 @@ use super::{repository, types::*};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/businesses",          get(list))
-        .route("/api/businesses/:id",      get(find))
-        .route("/api/businesses/:id/tip",  post(tip))
+        .route("/api/businesses/{id}",      get(find))
+        .route("/api/businesses/{id}/tip",  post(tip))
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn list(State(state): State<AppState>) -> AppResult<Json<Vec<BusinessRow>>> {
     Ok(Json(repository::list(&state.db).await?))

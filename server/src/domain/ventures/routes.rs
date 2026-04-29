@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     extract::{Path, State},
     routing::{get, post},
     Json, Router,
@@ -14,9 +14,9 @@ use super::types::*;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/ventures",              get(list).post(create))
-        .route("/api/ventures/:id",          get(find))
-        .route("/api/ventures/:id/members",  get(members))
-        .route("/api/ventures/:id/posts",    get(posts).post(create_post))
+        .route("/api/ventures/{id}",          get(find))
+        .route("/api/ventures/{id}/members",  get(members))
+        .route("/api/ventures/{id}/posts",    get(posts).post(create_post))
 }
 
 async fn list(State(state): State<AppState>) -> AppResult<Json<Vec<VentureRow>>> {

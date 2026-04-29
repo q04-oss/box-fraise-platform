@@ -1,12 +1,12 @@
-/// Admin — operator-authenticated endpoints for shop management.
+﻿/// Admin â€” operator-authenticated endpoints for shop management.
 ///
 /// Security model:
 ///   - All routes require a valid user JWT (RequireUser) PLUS a PIN verified
 ///     at request time via constant-time comparison. The PIN is never stored in
-///     the JWT — it must be re-supplied on every admin request.
-///   - Admin PIN → full access.
-///   - Chocolatier PIN → catalog and order management only.
-///   - Supplier PIN → read-only order list.
+///     the JWT â€” it must be re-supplied on every admin request.
+///   - Admin PIN â†’ full access.
+///   - Chocolatier PIN â†’ catalog and order management only.
+///   - Supplier PIN â†’ read-only order list.
 ///   - PINs are hashed with bcrypt in production; the config holds the hash.
 ///     For the MVP the raw value is compared constant-time to avoid timing leaks.
 use axum::{
@@ -27,22 +27,22 @@ pub fn router() -> Router<AppState> {
     Router::new()
         // Orders
         .route("/api/admin/orders",              get(list_orders))
-        .route("/api/admin/orders/:id/status",   patch(set_order_status))
-        .route("/api/admin/orders/:id/assign",   post(assign_worker))
+        .route("/api/admin/orders/{id}/status",   patch(set_order_status))
+        .route("/api/admin/orders/{id}/assign",   post(assign_worker))
         // NFC
-        .route("/api/admin/nfc/verify/:device_id", post(admin_nfc_verify))
+        .route("/api/admin/nfc/verify/{device_id}", post(admin_nfc_verify))
         // Users
         .route("/api/admin/users",               get(list_users))
-        .route("/api/admin/users/:id/tier",      patch(set_user_tier))
+        .route("/api/admin/users/{id}/tier",      patch(set_user_tier))
         // Catalog
         .route("/api/admin/varieties",           get(list_varieties_admin))
-        .route("/api/admin/varieties/:id/stock", patch(set_stock))
+        .route("/api/admin/varieties/{id}/stock", patch(set_stock))
         // Businesses
         .route("/api/admin/businesses",          get(list_businesses_admin))
-        .route("/api/admin/businesses/:id/verify", post(verify_business))
+        .route("/api/admin/businesses/{id}/verify", post(verify_business))
 }
 
-// ── PIN extraction ────────────────────────────────────────────────────────────
+// â”€â”€ PIN extraction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Every admin request must include X-Admin-Pin header.
 fn require_admin_pin(
@@ -79,7 +79,7 @@ enum AdminRole {
     Admin,
 }
 
-// ── Order management ──────────────────────────────────────────────────────────
+// â”€â”€ Order management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[derive(Debug, Deserialize)]
 struct OrderFilter {
@@ -204,9 +204,9 @@ async fn assign_worker(
     Ok(Json(serde_json::json!({ "worker_id": body.worker_id })))
 }
 
-// ── NFC verification ──────────────────────────────────────────────────────────
+// â”€â”€ NFC verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// Admin-level NFC verification — marks a device as verified by a shop operator
+/// Admin-level NFC verification â€” marks a device as verified by a shop operator
 /// who has physically inspected the NFC tag.
 async fn admin_nfc_verify(
     State(state): State<AppState>,
@@ -236,7 +236,7 @@ async fn admin_nfc_verify(
     Ok(Json(serde_json::json!({ "nfc_verified": true })))
 }
 
-// ── User management ───────────────────────────────────────────────────────────
+// â”€â”€ User management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[derive(Debug, Deserialize)]
 struct UserFilter {
@@ -321,7 +321,7 @@ async fn set_user_tier(
     Ok(Json(serde_json::json!({ "tier": body.tier })))
 }
 
-// ── Catalog management ────────────────────────────────────────────────────────
+// â”€â”€ Catalog management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 struct AdminVarietyRow {
@@ -392,7 +392,7 @@ async fn set_stock(
     Ok(Json(serde_json::json!({ "stock": body.stock })))
 }
 
-// ── Business verification ─────────────────────────────────────────────────────
+// â”€â”€ Business verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 struct AdminBusinessRow {

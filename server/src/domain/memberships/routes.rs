@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     extract::{Path, State},
     routing::{get, post},
     Json, Router,
@@ -17,11 +17,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/memberships/me",             get(my_membership))
         .route("/api/memberships/waitlist",        post(join_waitlist))
         .route("/api/members",                    get(list_members))
-        .route("/api/fund/contribute/:user_id",   post(contribute))
-        .route("/api/fund/:user_id/contributors", get(contributors))
+        .route("/api/fund/contribute/{user_id}",   post(contribute))
+        .route("/api/fund/{user_id}/contributors", get(contributors))
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn payment_intent(
     State(state): State<AppState>,
@@ -30,11 +30,11 @@ async fn payment_intent(
 ) -> AppResult<Json<PaymentIntentResponse>> {
     let tier = body.tier.trim().to_lowercase();
 
-    // Hard gate — only three tiers may be purchased via Stripe.
+    // Hard gate â€” only three tiers may be purchased via Stripe.
     // Higher tiers require a manual invoice; this cannot be bypassed by the client.
     if !STRIPE_PAYABLE_TIERS.contains(&tier.as_str()) {
         return Err(AppError::bad_request(
-            "this membership tier requires a manual invoice — contact us directly",
+            "this membership tier requires a manual invoice â€” contact us directly",
         ));
     }
 

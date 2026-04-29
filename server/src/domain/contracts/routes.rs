@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     extract::{Path, State},
     routing::{get, patch},
     Json, Router,
@@ -15,8 +15,8 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/contracts/pending",       get(pending))
         .route("/api/contracts/active",        get(active))
-        .route("/api/contracts/:id/accept",    patch(accept))
-        .route("/api/contracts/:id/decline",   patch(decline))
+        .route("/api/contracts/{id}/accept",    patch(accept))
+        .route("/api/contracts/{id}/decline",   patch(decline))
 }
 
 async fn pending(

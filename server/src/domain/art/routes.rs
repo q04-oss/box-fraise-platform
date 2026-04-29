@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     extract::{Path, State},
     routing::{get, post},
     Json, Router,
@@ -16,8 +16,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/art",                      get(gallery))
         .route("/api/art/pitch",                post(pitch))
         .route("/api/art/auctions",             get(auctions))
-        .route("/api/art/auctions/:id/bid",     post(bid))
-        .route("/api/art/auctions/:id/bids",    get(auction_bids))
+        .route("/api/art/auctions/{id}/bid",     post(bid))
+        .route("/api/art/auctions/{id}/bids",    get(auction_bids))
 }
 
 async fn gallery(State(state): State<AppState>) -> AppResult<Json<Vec<ArtworkRow>>> {
@@ -125,7 +125,7 @@ async fn bid(
         ));
     }
 
-    // Create Stripe payment intent (manual capture — captured only if bid wins).
+    // Create Stripe payment intent (manual capture â€” captured only if bid wins).
     let pi = state
         .stripe()
         .create_payment_intent(

@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     extract::{Path, State},
     routing::{delete, get, post},
     Json, Router,
@@ -15,15 +15,15 @@ use super::types::*;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/popups",                           get(list))
-        .route("/api/popups/:id",                       get(find))
-        .route("/api/popups/:id/rsvp",                  post(rsvp).delete(cancel_rsvp))
-        .route("/api/popups/:id/rsvp-status",           get(rsvp_status))
-        .route("/api/popups/:id/checkin",               post(checkin))
-        .route("/api/popups/:id/nominations",           get(nominations))
-        .route("/api/popups/:id/nominate/:nominee_id",  post(nominate))
+        .route("/api/popups/{id}",                       get(find))
+        .route("/api/popups/{id}/rsvp",                  post(rsvp).delete(cancel_rsvp))
+        .route("/api/popups/{id}/rsvp-status",           get(rsvp_status))
+        .route("/api/popups/{id}/checkin",               post(checkin))
+        .route("/api/popups/{id}/nominations",           get(nominations))
+        .route("/api/popups/{id}/nominate/{nominee_id}",  post(nominate))
 }
 
-// ── List / find ───────────────────────────────────────────────────────────────
+// â”€â”€ List / find â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn list(State(state): State<AppState>) -> AppResult<Json<Vec<PopupRow>>> {
     let rows: Vec<PopupRow> = sqlx::query_as(
@@ -57,7 +57,7 @@ async fn find(
     .map(Json)
 }
 
-// ── RSVP ─────────────────────────────────────────────────────────────────────
+// â”€â”€ RSVP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn rsvp(
     State(state): State<AppState>,
@@ -89,7 +89,7 @@ async fn rsvp(
     let at_capacity = popup.capacity.map_or(false, |c| confirmed >= c as i64);
 
     if popup.entrance_fee_cents.unwrap_or(0) > 0 {
-        // Paid event — create Stripe PI, RSVP pending payment.
+        // Paid event â€” create Stripe PI, RSVP pending payment.
         let pi = state
             .stripe()
             .create_payment_intent(
@@ -124,7 +124,7 @@ async fn rsvp(
             "at_capacity":   at_capacity,
         })))
     } else {
-        // Free event — confirm immediately.
+        // Free event â€” confirm immediately.
         let status = if at_capacity { "waitlist" } else { "confirmed" };
 
         sqlx::query(
@@ -179,7 +179,7 @@ async fn rsvp_status(
     Ok(Json(serde_json::json!({ "status": status })))
 }
 
-// ── Check-in ──────────────────────────────────────────────────────────────────
+// â”€â”€ Check-in â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn checkin(
     State(state): State<AppState>,
@@ -228,7 +228,7 @@ async fn checkin(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-// ── Nominations ───────────────────────────────────────────────────────────────
+// â”€â”€ Nominations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn nominations(
     State(state): State<AppState>,

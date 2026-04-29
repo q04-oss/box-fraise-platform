@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     extract::{Path, State},
     routing::{get, post},
     Json, Router,
@@ -18,13 +18,13 @@ pub fn router() -> Router<AppState> {
         .route("/api/orders/pay-with-balance",     post(pay_with_balance))
         .route("/api/orders/scan-collect",         post(scan_collect))
         .route("/api/orders/clip",                 post(clip))
-        .route("/api/orders/:id/confirm",          post(confirm))
-        .route("/api/orders/:id/rate",             post(rate))
-        .route("/api/orders/:id/receipt",          get(receipt))
-        .route("/api/orders/:nfc_token/collect",   post(device_collect))
+        .route("/api/orders/{id}/confirm",          post(confirm))
+        .route("/api/orders/{id}/rate",             post(rate))
+        .route("/api/orders/{id}/receipt",          get(receipt))
+        .route("/api/orders/{nfc_token}/collect",   post(device_collect))
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn create(
     State(state): State<AppState>,
@@ -81,7 +81,7 @@ async fn rate(
     AppJson(body): AppJson<RateOrderBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     if !(1..=5).contains(&body.rating) {
-        return Err(AppError::bad_request("rating must be 1–5"));
+        return Err(AppError::bad_request("rating must be 1â€“5"));
     }
     repository::set_rating(&state.db, order_id, user_id, body.rating).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -153,7 +153,7 @@ async fn device_collect(
     Ok(Json(order))
 }
 
-/// App Clip guest order — creates a payment intent without requiring auth.
+/// App Clip guest order â€” creates a payment intent without requiring auth.
 async fn clip(
     State(state): State<AppState>,
     AppJson(body): AppJson<CreateOrderBody>,

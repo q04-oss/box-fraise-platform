@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     extract::{Path, State},
     routing::{get, post},
     Json, Router,
@@ -19,19 +19,19 @@ pub fn router() -> Router<AppState> {
     Router::new()
         // Evening tokens
         .route("/api/tokens/evening",                   get(list_evening_tokens))
-        .route("/api/tokens/evening/confirm/:booking_id", post(confirm_evening_token))
+        .route("/api/tokens/evening/confirm/{booking_id}", post(confirm_evening_token))
         // Content tokens
         .route("/api/tokens/content",                   get(list_content_tokens))
         .route("/api/tokens/content/trade",             post(create_trade_offer))
-        .route("/api/tokens/content/trade/:offer_id/accept",  post(accept_trade))
-        .route("/api/tokens/content/trade/:offer_id/decline", post(decline_trade))
+        .route("/api/tokens/content/trade/{offer_id}/accept",  post(accept_trade))
+        .route("/api/tokens/content/trade/{offer_id}/decline", post(decline_trade))
         // Portrait tokens
         .route("/api/tokens/portrait",                  get(list_portrait_tokens))
         .route("/api/tokens/portrait/mint",             post(mint_portrait))
-        .route("/api/tokens/portrait/:token_id/buy",    post(buy_portrait))
+        .route("/api/tokens/portrait/{token_id}/buy",    post(buy_portrait))
 }
 
-// ── Evening tokens ────────────────────────────────────────────────────────────
+// â”€â”€ Evening tokens â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// List all evening tokens for the authenticated user.
 async fn list_evening_tokens(
@@ -63,7 +63,7 @@ async fn confirm_evening_token(
 ) -> AppResult<Json<EveningTokenRow>> {
     let mut tx = state.db.begin().await.map_err(AppError::Db)?;
 
-    // Lock the booking row — prevents concurrent double-mint.
+    // Lock the booking row â€” prevents concurrent double-mint.
     let booking: Option<BookingLock> = sqlx::query_as(
         "SELECT id, user_id_1, user_id_2, status
          FROM bookings
@@ -86,7 +86,7 @@ async fn confirm_evening_token(
         return Err(AppError::bad_request("booking is not in completed status"));
     }
 
-    // Idempotent — return existing token if already minted.
+    // Idempotent â€” return existing token if already minted.
     let existing: Option<EveningTokenRow> = sqlx::query_as(
         "SELECT id, user_id_1, user_id_2, booking_id, minted_at
          FROM evening_tokens
@@ -127,7 +127,7 @@ struct BookingLock {
     status:    String,
 }
 
-// ── Content tokens ────────────────────────────────────────────────────────────
+// â”€â”€ Content tokens â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn list_content_tokens(
     State(state): State<AppState>,
@@ -157,7 +157,7 @@ async fn create_trade_offer(
         return Err(AppError::bad_request("cannot trade with yourself"));
     }
 
-    // Verify ownership without a transaction — the accept step re-verifies atomically.
+    // Verify ownership without a transaction â€” the accept step re-verifies atomically.
     let is_owner: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM content_tokens WHERE id = $1 AND owner_id = $2)",
     )
@@ -198,7 +198,7 @@ async fn create_trade_offer(
     Ok(Json(row))
 }
 
-/// Accept a trade offer — atomically transfers token ownership.
+/// Accept a trade offer â€” atomically transfers token ownership.
 async fn accept_trade(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
@@ -304,7 +304,7 @@ struct TradeOfferLock {
     status:       String,
 }
 
-// ── Portrait tokens ───────────────────────────────────────────────────────────
+// â”€â”€ Portrait tokens â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn list_portrait_tokens(
     State(state): State<AppState>,
@@ -324,7 +324,7 @@ async fn list_portrait_tokens(
     Ok(Json(rows))
 }
 
-/// Mint a portrait token — caller is the creator; subject_id becomes the owner.
+/// Mint a portrait token â€” caller is the creator; subject_id becomes the owner.
 async fn mint_portrait(
     State(state): State<AppState>,
     RequireUser(creator_id): RequireUser,
@@ -345,7 +345,7 @@ async fn mint_portrait(
     Ok(Json(row))
 }
 
-/// Buy a portrait token — transfers ownership and pays a royalty to the creator.
+/// Buy a portrait token â€” transfers ownership and pays a royalty to the creator.
 ///
 /// Royalty split: 85% to seller (current owner), 15% to original creator.
 /// Creates a Stripe PI for the full amount; royalty routing is handled at

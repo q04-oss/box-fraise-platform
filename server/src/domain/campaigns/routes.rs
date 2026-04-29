@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     extract::{Path, State},
     routing::{delete, get, post},
     Json, Router,
@@ -14,8 +14,8 @@ use super::{repository, types::*};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/campaigns",                get(list))
-        .route("/api/campaigns/:id",            get(find))
-        .route("/api/campaigns/:id/signup",     post(signup).delete(cancel))
+        .route("/api/campaigns/{id}",            get(find))
+        .route("/api/campaigns/{id}/signup",     post(signup).delete(cancel))
 }
 
 async fn list(State(state): State<AppState>) -> AppResult<Json<Vec<CampaignRow>>> {

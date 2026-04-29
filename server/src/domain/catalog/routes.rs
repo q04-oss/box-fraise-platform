@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     extract::{Path, Query, State},
     routing::get,
     Json, Router,
@@ -16,12 +16,12 @@ pub fn router() -> Router<AppState> {
         .route("/api/varieties",                    get(varieties))
         .route("/api/varieties/passport",           get(passport))
         .route("/api/locations",                    get(locations))
-        .route("/api/locations/:id/batch-status",   get(batch_status))
+        .route("/api/locations/{id}/batch-status",   get(batch_status))
         .route("/api/slots",                        get(slots))
         .route("/api/time-slots",                   get(time_slots))
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn varieties(State(state): State<AppState>) -> AppResult<Json<Vec<VarietyRow>>> {
     Ok(Json(repository::list_varieties(&state.db).await?))

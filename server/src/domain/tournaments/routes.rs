@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     extract::{Path, State},
     routing::{get, post},
     Json, Router,
@@ -18,15 +18,15 @@ use super::types::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/tournaments",                             get(list_tournaments))
-        .route("/api/tournaments/:id",                         get(get_tournament))
-        .route("/api/tournaments/:id/enter",                   post(enter))
-        .route("/api/tournaments/:id/deck",                    post(register_deck))
-        .route("/api/tournaments/:id/play",                    post(play_card))
-        .route("/api/tournaments/:id/standings",               get(standings))
-        .route("/api/tournaments/:id/declare/:winner_id",      post(declare_winner))
+        .route("/api/tournaments/{id}",                         get(get_tournament))
+        .route("/api/tournaments/{id}/enter",                   post(enter))
+        .route("/api/tournaments/{id}/deck",                    post(register_deck))
+        .route("/api/tournaments/{id}/play",                    post(play_card))
+        .route("/api/tournaments/{id}/standings",               get(standings))
+        .route("/api/tournaments/{id}/declare/{winner_id}",      post(declare_winner))
 }
 
-// ── List / detail ─────────────────────────────────────────────────────────────
+// â”€â”€ List / detail â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn list_tournaments(
     State(state): State<AppState>,
@@ -76,13 +76,13 @@ async fn get_tournament(
     })))
 }
 
-// ── Enter ─────────────────────────────────────────────────────────────────────
+// â”€â”€ Enter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Enter a tournament by paying the entry fee via Stripe.
 ///
 /// If entry_fee_cents is 0, the entry row is created immediately as 'registered'.
 /// Otherwise a Stripe PI is returned for the client to complete payment, and the
-/// entry is pre-created as 'pending' — confirmed by webhook.
+/// entry is pre-created as 'pending' â€” confirmed by webhook.
 async fn enter(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
@@ -120,7 +120,7 @@ async fn enter(
         }
     }
 
-    // Idempotency — reject duplicate entry.
+    // Idempotency â€” reject duplicate entry.
     let already_entered: bool = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1 FROM tournament_entries
@@ -139,7 +139,7 @@ async fn enter(
     }
 
     if tournament.entry_fee_cents == 0 {
-        // Free entry — create immediately.
+        // Free entry â€” create immediately.
         let entry: TournamentEntryRow = sqlx::query_as(
             "INSERT INTO tournament_entries (tournament_id, user_id, deck_json, status)
              VALUES ($1, $2, $3, 'registered')
@@ -155,7 +155,7 @@ async fn enter(
         return Ok(Json(serde_json::json!({ "entry": entry })));
     }
 
-    // Paid entry — create Stripe PI then pre-create pending entry.
+    // Paid entry â€” create Stripe PI then pre-create pending entry.
     let pi = state
         .stripe()
         .create_payment_intent(
@@ -188,7 +188,7 @@ async fn enter(
     })))
 }
 
-// ── Deck registration ─────────────────────────────────────────────────────────
+// â”€â”€ Deck registration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Register or update the player's deck before the tournament starts.
 async fn register_deck(
@@ -211,16 +211,16 @@ async fn register_deck(
 
     if result.rows_affected() == 0 {
         return Err(AppError::bad_request(
-            "no registered entry found — enter the tournament first",
+            "no registered entry found â€” enter the tournament first",
         ));
     }
 
     Ok(Json(serde_json::json!({ "status": "deck_registered" })))
 }
 
-// ── Play ──────────────────────────────────────────────────────────────────────
+// â”€â”€ Play â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// Record a card play — validates the player is still active in the tournament.
+/// Record a card play â€” validates the player is still active in the tournament.
 async fn play_card(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
@@ -275,7 +275,7 @@ async fn play_card(
     Ok(Json(row))
 }
 
-// ── Standings ─────────────────────────────────────────────────────────────────
+// â”€â”€ Standings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn standings(
     State(state): State<AppState>,
@@ -303,12 +303,12 @@ async fn standings(
     Ok(Json(rows))
 }
 
-// ── Declare winner ────────────────────────────────────────────────────────────
+// â”€â”€ Declare winner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Declare a tournament winner and distribute prize pool.
 ///
 /// Prize = sum of all entry fees (handled outside Stripe as platform credits
-/// or via off-session charges). This endpoint is admin / operator only —
+/// or via off-session charges). This endpoint is admin / operator only â€”
 /// production auth will gate it to an admin role. For now it verifies the
 /// tournament is active and the winner is a participant, then marks the
 /// tournament completed.

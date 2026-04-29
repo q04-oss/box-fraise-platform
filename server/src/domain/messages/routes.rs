@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     extract::{Path, Query, State},
     routing::{get, post},
     Json, Router,
@@ -14,12 +14,12 @@ use super::{repository, types::*};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/messages/conversations",               get(conversations))
-        .route("/api/messages/conversations/:userId/archive", post(archive))
-        .route("/api/messages/:userId",                     get(thread))
+        .route("/api/messages/conversations/{userId}/archive", post(archive))
+        .route("/api/messages/{userId}",                     get(thread))
         .route("/api/messages",                             post(send))
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn conversations(
     State(state): State<AppState>,

@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     extract::{Path, State},
     routing::{get, post},
     Json, Router,
@@ -16,7 +16,7 @@ use super::types::*;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/gifts",               get(list).post(send))
-        .route("/api/gifts/claim/:token",  post(claim))
+        .route("/api/gifts/claim/{token}",  post(claim))
 }
 
 async fn list(
