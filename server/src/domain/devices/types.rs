@@ -16,11 +16,8 @@ pub struct DeviceRow {
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterDeviceBody {
-    /// Device's Ethereum address (0x…).
     pub device_address: String,
-    /// Signature over the pairing token using the device's private key.
     pub signature:      String,
-    /// The 8-character pairing code from `/api/devices/pair-token`.
     pub pairing_token:  String,
 }
 
@@ -31,11 +28,11 @@ pub struct UpdateRoleBody {
 
 #[derive(Debug, Deserialize)]
 pub struct AttestBody {
-    /// App Attest key ID (from DCAppAttestService).
     pub key_id:      String,
-    /// Raw attestation object (CBOR, base64).
     pub attestation: String,
-    /// Per-device HMAC signing key (32 random bytes, base64) — generated on-device.
+    /// Per-device HMAC signing key (32 random bytes, base64).
+    /// Sensitive — never logged or included in error responses.
+    #[serde(rename = "hmac_key")]
     pub hmac_key:    String,
 }
 

@@ -1,42 +1,42 @@
 use std::env;
 
 /// All runtime configuration loaded from environment variables at startup.
-/// Required fields panic-fail fast; optional fields are `Option<String>`.
+/// Required fields fail fast at boot; optional fields are `Option<String>`.
 #[derive(Debug, Clone)]
 pub struct Config {
-    // ── Core ────────────────────────────────────────────────────────────────
+    // ── Core ─────────────────────────────────────────────────────────────────
     pub database_url: String,
     pub jwt_secret:   String,
     pub port:         u16,
 
-    // ── iOS request signing ──────────────────────────────────────────────────
+    // ── iOS request signing ───────────────────────────────────────────────────
     /// Fallback HMAC key for non-attested iOS clients.
-    /// If absent, unauthenticated requests are rejected outright.
+    /// If absent, requests without an attest key are rejected.
     pub hmac_shared_key: Option<String>,
 
-    // ── Stripe ───────────────────────────────────────────────────────────────
+    // ── Stripe ────────────────────────────────────────────────────────────────
     pub stripe_secret_key:     String,
     pub stripe_webhook_secret: String,
 
-    // ── Operator PINs ────────────────────────────────────────────────────────
+    // ── Operator PINs ─────────────────────────────────────────────────────────
     pub admin_pin:       String,
     pub chocolatier_pin: String,
     pub supplier_pin:    String,
     pub review_pin:      Option<String>,
 
-    // ── Apple ────────────────────────────────────────────────────────────────
+    // ── Apple ─────────────────────────────────────────────────────────────────
     pub apple_team_id:     Option<String>,
     pub apple_key_id:      Option<String>,
     pub apple_private_key: Option<String>,
     pub apple_client_id:   Option<String>,
 
-    // ── Resend (email) ───────────────────────────────────────────────────────
+    // ── Resend (email) ────────────────────────────────────────────────────────
     pub resend_api_key: Option<String>,
 
-    // ── Anthropic ────────────────────────────────────────────────────────────
+    // ── Anthropic ─────────────────────────────────────────────────────────────
     pub anthropic_api_key: Option<String>,
 
-    // ── Cloudinary ───────────────────────────────────────────────────────────
+    // ── Cloudinary ────────────────────────────────────────────────────────────
     pub cloudinary_cloud_name: Option<String>,
     pub cloudinary_api_key:    Option<String>,
     pub cloudinary_api_secret:  Option<String>,
@@ -44,10 +44,15 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> anyhow::Result<Self> {
+        let jwt_secret = require("JWT_SECRET")?;
+        if jwt_secret.len() < 32 {
+            anyhow::bail!("JWT_SECRET must be at least 32 characters");
+        }
+
         Ok(Self {
             // required
             database_url:          require("DATABASE_URL")?,
-            jwt_secret:            require("JWT_SECRET")?,
+            jwt_secret,
             stripe_secret_key:     require("STRIPE_SECRET_KEY")?,
             stripe_webhook_secret: require("STRIPE_WEBHOOK_SECRET")?,
             admin_pin:             require("ADMIN_PIN")?,

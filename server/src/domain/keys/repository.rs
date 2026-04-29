@@ -5,7 +5,6 @@ use super::types::{OtpkRow, UserKeysRow};
 
 // ── Challenges ────────────────────────────────────────────────────────────────
 
-/// Issue a fresh challenge and persist it.
 pub async fn create_challenge(pool: &PgPool, user_id: i32) -> AppResult<String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     use rand::RngCore;
@@ -31,7 +30,6 @@ pub async fn create_challenge(pool: &PgPool, user_id: i32) -> AppResult<String> 
 }
 
 /// Atomically consume the most recent valid challenge for the user.
-/// Returns the challenge string on success, None if none is available.
 pub async fn consume_challenge(pool: &PgPool, user_id: i32) -> AppResult<Option<String>> {
     let row: Option<(String,)> = sqlx::query_as(
         "UPDATE key_challenges
@@ -100,26 +98,31 @@ pub async fn find_user_keys(pool: &PgPool, user_id: i32) -> AppResult<Option<Use
 
 // ── One-time pre-keys ─────────────────────────────────────────────────────────
 
+/// Batch-insert OPKs using unnest — one round-trip regardless of key count.
 pub async fn insert_otpks(
     pool:    &PgPool,
     user_id: i32,
-    keys:    &[(i32, String)], // (key_id, public_key)
+    keys:    &[(i32, String)],
 ) -> AppResult<()> {
-    // Batch insert — one statement per key to keep it simple and avoid
-    // unnest/array gymnastics. Volume is low (≤ 100 keys per upload).
-    for (key_id, public_key) in keys {
-        sqlx::query(
-            "INSERT INTO one_time_pre_keys (user_id, key_id, public_key)
-             VALUES ($1, $2, $3)
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(user_id)
-        .bind(key_id)
-        .bind(public_key)
-        .execute(pool)
-        .await
-        .map_err(AppError::Db)?;
+    if keys.is_empty() {
+        return Ok(());
     }
+
+    let key_ids:     Vec<i32>    = keys.iter().map(|(id, _)| *id).collect();
+    let public_keys: Vec<String> = keys.iter().map(|(_, k)| k.clone()).collect();
+
+    sqlx::query(
+        "INSERT INTO one_time_pre_keys (user_id, key_id, public_key)
+         SELECT $1, unnest($2::int4[]), unnest($3::text[])
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(user_id)
+    .bind(&key_ids)
+    .bind(&public_keys)
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
     Ok(())
 }
 
@@ -133,9 +136,8 @@ pub async fn count_otpks(pool: &PgPool, user_id: i32) -> AppResult<i64> {
     Ok(count)
 }
 
-/// Atomically claim the oldest unused OPK for a user. Returns None if the
-/// user has no remaining OPKs — the caller should still serve the bundle
-/// without one (the receiver falls back to the signed pre-key).
+/// Atomically claim the oldest unused OPK. Returns None if the user has
+/// no remaining OPKs — the caller serves the bundle without one.
 pub async fn claim_otpk(pool: &PgPool, user_id: i32) -> AppResult<Option<OtpkRow>> {
     sqlx::query_as(
         "UPDATE one_time_pre_keys
@@ -156,7 +158,6 @@ pub async fn claim_otpk(pool: &PgPool, user_id: i32) -> AppResult<Option<OtpkRow
 
 // ── Bundle lookup ─────────────────────────────────────────────────────────────
 
-/// Find a user_id by their 6-character user_code.
 pub async fn user_id_by_code(pool: &PgPool, code: &str) -> AppResult<Option<i32>> {
     let row: Option<(i32,)> =
         sqlx::query_as("SELECT id FROM users WHERE UPPER(user_code) = UPPER($1)")

@@ -13,9 +13,9 @@ use super::{
 // ── Apple Sign In ─────────────────────────────────────────────────────────────
 
 pub async fn apple_sign_in(
-    state:         &AppState,
+    state:          &AppState,
     identity_token: &str,
-    display_name:  Option<&str>,
+    display_name:   Option<&str>,
 ) -> AppResult<AuthResponse> {
     let claims = crate::auth::apple::verify_identity_token(
         identity_token,
@@ -32,12 +32,10 @@ pub async fn apple_sign_in(
         return Err(AppError::Forbidden);
     }
 
-    // Fire-and-forget: auto-verify table_verified if email matches a confirmed booking.
     if is_new {
-        if let Some(email) = &claims.email {
+        if let Some(email) = claims.email {
             let pool = state.db.clone();
-            let email = email.clone();
-            let uid   = user.id;
+            let uid  = user.id;
             tokio::spawn(async move {
                 repository::maybe_verify_from_booking(&pool, uid, &email).await;
             });
@@ -67,7 +65,9 @@ pub async fn operator_login(
 
 pub async fn demo_login(state: &AppState, pin: &str) -> AppResult<AuthResponse> {
     let expected = state.cfg.review_pin.as_deref().ok_or(AppError::Unauthorized)?;
-    if pin != expected {
+
+    // Constant-time comparison prevents timing oracle on the PIN.
+    if !constant_time_eq(pin.as_bytes(), expected.as_bytes()) {
         return Err(AppError::Unauthorized);
     }
 
@@ -87,14 +87,11 @@ pub async fn register(
     password:     &str,
     display_name: Option<&str>,
 ) -> AppResult<AuthResponse> {
-    // Reject if email already exists.
-    if repository::find_by_email(&state.db, email).await?.is_some() {
-        return Err(AppError::conflict("email already in use"));
-    }
-
     let hash = bcrypt::hash(password, 10)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("bcrypt: {e}")))?;
 
+    // create_email_user uses INSERT ON CONFLICT DO NOTHING, so duplicate emails
+    // return AppError::Conflict rather than a DB error.
     let user = repository::create_email_user(&state.db, email, &hash, display_name).await?;
 
     // TODO: send welcome email via integrations::resend
@@ -127,13 +124,13 @@ pub async fn login(state: &AppState, email: &str, password: &str) -> AppResult<A
 // ── Password reset ────────────────────────────────────────────────────────────
 
 pub async fn forgot_password(state: &AppState, email: &str) -> AppResult<()> {
-    // Look up user silently — don't reveal whether the email exists.
     if let Some(user) = repository::find_by_email(&state.db, email).await? {
         let token = Uuid::new_v4().to_string();
         repository::create_reset_token(&state.db, user.id, &token).await?;
-        // TODO: send reset email via integrations::resend::send_password_reset(&state.http, email, &token)
+        // TODO: integrations::resend::send_password_reset(&state.http, &cfg, email, &token)
         tracing::info!(user_id = user.id, "password reset token generated");
     }
+    // Intentionally silent whether the email exists — prevents enumeration.
     Ok(())
 }
 
@@ -150,8 +147,8 @@ pub async fn reset_password(state: &AppState, token: &str, new_password: &str) -
 
 // ── Require active user ───────────────────────────────────────────────────────
 
-/// Fetch and validate a user by ID. Call this in handlers that need the full
-/// UserRow — the `RequireUser` extractor only decodes the JWT.
+/// Fetch and validate a user by ID. Call in handlers that need the full UserRow —
+/// the `RequireUser` extractor only decodes the JWT.
 pub async fn require_active(state: &AppState, user_id: i32) -> AppResult<UserRow> {
     let user = repository::find_by_id(&state.db, user_id)
         .await?
@@ -162,4 +159,11 @@ pub async fn require_active(state: &AppState, user_id: i32) -> AppResult<UserRow
     }
 
     Ok(user)
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() { return false; }
+    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }

@@ -23,24 +23,29 @@ pub async fn register_keys(
     user_id: i32,
     body:    RegisterKeysBody,
 ) -> AppResult<()> {
-    // Verify proof-of-possession if the client provided a signing key + signature.
-    // Degrade gracefully for older clients that don't support PoP yet.
-    if let Some(signing_key_b64) = &body.identity_signing_key {
-        if let Some(sig_b64) = &body.challenge_sig {
+    match (&body.identity_signing_key, &body.challenge_sig) {
+        // Both present — perform proof-of-possession.
+        (Some(signing_key_b64), Some(sig_b64)) => {
             let challenge = repository::consume_challenge(&state.db, user_id)
                 .await?
-                .ok_or_else(|| AppError::bad_request("no valid challenge found"))?;
+                .ok_or_else(|| AppError::bad_request("no valid challenge found — request one first"))?;
 
             verify_ed25519(challenge.as_bytes(), sig_b64, signing_key_b64)?;
-        } else {
-            tracing::warn!(
-                user_id,
-                "identity_signing_key provided without challenge_sig — PoP skipped"
-            );
         }
+
+        // Signing key provided but no signature — reject.
+        // Accepting the key without PoP would allow an attacker to substitute any
+        // identity_signing_key and impersonate the user.
+        (Some(_), None) => {
+            return Err(AppError::bad_request(
+                "challenge_sig is required when identity_signing_key is provided",
+            ));
+        }
+
+        // Neither provided — register keys without signing key (older clients).
+        _ => {}
     }
 
-    // Persist key material.
     repository::upsert_user_keys(
         &state.db,
         user_id,
@@ -51,7 +56,6 @@ pub async fn register_keys(
     )
     .await?;
 
-    // Persist any accompanying one-time pre-keys.
     if !body.one_time_pre_keys.is_empty() {
         let pairs: Vec<(i32, String)> = body
             .one_time_pre_keys
@@ -113,9 +117,8 @@ pub async fn fetch_bundle_by_code(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Verify an Ed25519 signature.
-/// `message` is the raw bytes being verified (the challenge string as UTF-8).
-/// `sig_b64` and `pubkey_b64` are standard base64.
+/// Verify an Ed25519 signature over `message` bytes.
+/// `sig_b64` and `pubkey_b64` are standard base64-encoded.
 fn verify_ed25519(message: &[u8], sig_b64: &str, pubkey_b64: &str) -> AppResult<()> {
     let sig = STANDARD
         .decode(sig_b64)

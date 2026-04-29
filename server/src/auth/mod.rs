@@ -5,14 +5,14 @@ use chrono::Utc;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     sync::{Arc, Mutex},
 };
 use uuid::Uuid;
 
 use crate::{config::Config, error::AppError};
 
-// ── Claims ───────────────────────────────────────────────────────────────────
+// ── Claims ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
@@ -22,7 +22,7 @@ pub struct Claims {
     pub jti:     String,
 }
 
-// ── Token operations ─────────────────────────────────────────────────────────
+// ── Token operations ──────────────────────────────────────────────────────────
 
 pub fn sign_token(user_id: i32, cfg: &Config) -> Result<String, AppError> {
     let exp = Utc::now()
@@ -30,11 +30,7 @@ pub fn sign_token(user_id: i32, cfg: &Config) -> Result<String, AppError> {
         .unwrap()
         .timestamp() as usize;
 
-    let claims = Claims {
-        user_id,
-        exp,
-        jti: Uuid::new_v4().to_string(),
-    };
+    let claims = Claims { user_id, exp, jti: Uuid::new_v4().to_string() };
 
     encode(
         &Header::default(),
@@ -54,20 +50,25 @@ pub fn verify_token(token: &str, cfg: &Config) -> Option<Claims> {
     .map(|d| d.claims)
 }
 
-// ── Revocation list ──────────────────────────────────────────────────────────
+// ── Revocation list ───────────────────────────────────────────────────────────
 
-/// In-process JWT revocation set keyed by JTI.
-/// Move to Redis before running multiple server instances.
-pub type RevokedTokens = Arc<Mutex<HashSet<String>>>;
+/// JTI → Unix expiry. Entries are self-pruning: once a token's `exp` has
+/// passed it can no longer be valid regardless, so it is removed on the next
+/// access rather than stored forever.
+pub type RevokedTokens = Arc<Mutex<HashMap<String, usize>>>;
 
 pub fn new_revoked_tokens() -> RevokedTokens {
-    Arc::new(Mutex::new(HashSet::new()))
+    Arc::new(Mutex::new(HashMap::new()))
 }
 
-pub fn revoke(list: &RevokedTokens, jti: &str) {
-    list.lock().unwrap().insert(jti.to_owned());
+pub fn revoke(list: &RevokedTokens, jti: &str, exp: usize) {
+    list.lock().unwrap().insert(jti.to_owned(), exp);
 }
 
 pub fn is_revoked(list: &RevokedTokens, jti: &str) -> bool {
-    list.lock().unwrap().contains(jti)
+    let now = Utc::now().timestamp() as usize;
+    let mut map = list.lock().unwrap();
+    // Prune entries whose tokens have already expired — they cannot be replayed.
+    map.retain(|_, &mut exp| exp > now);
+    map.contains_key(jti)
 }

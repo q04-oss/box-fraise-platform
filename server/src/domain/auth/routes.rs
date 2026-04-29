@@ -9,15 +9,11 @@ use crate::{
     auth,
     error::{AppError, AppResult},
     http::extractors::{
-        auth::RequireUser,
+        auth::{RequireClaims, RequireUser},
         json::AppJson,
     },
 };
-use super::{
-    repository,
-    service,
-    types::*,
-};
+use super::{repository, service, types::*};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -69,7 +65,8 @@ async fn register(
     AppJson(body): AppJson<RegisterBody>,
 ) -> AppResult<Json<AuthResponse>> {
     Ok(Json(
-        service::register(&state, &body.email, &body.password, body.display_name.as_deref()).await?,
+        service::register(&state, &body.email, &body.password, body.display_name.as_deref())
+            .await?,
     ))
 }
 
@@ -105,8 +102,10 @@ async fn display_name(
     RequireUser(user_id): RequireUser,
     AppJson(body): AppJson<DisplayNameBody>,
 ) -> AppResult<Json<serde_json::Value>> {
+    // Use char count, not byte length, so multi-byte characters aren't penalised.
     let trimmed = body.display_name.trim();
-    if trimmed.is_empty() || trimmed.len() > 50 {
+    let char_count = trimmed.chars().count();
+    if char_count == 0 || char_count > 50 {
         return Err(AppError::bad_request("display_name must be 1–50 characters"));
     }
     repository::set_display_name(&state.db, user_id, trimmed).await?;
@@ -117,7 +116,7 @@ async fn forgot_password(
     State(state): State<AppState>,
     AppJson(body): AppJson<ForgotPasswordBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    // Always returns 200 to avoid email enumeration.
+    // Always 200 to avoid email enumeration.
     service::forgot_password(&state, &body.email).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -141,9 +140,8 @@ async fn claim_booking(
 
 async fn logout(
     State(state): State<AppState>,
-    crate::http::extractors::auth::RequireClaims(claims):
-        crate::http::extractors::auth::RequireClaims,
+    RequireClaims(claims): RequireClaims,
 ) -> AppResult<Json<serde_json::Value>> {
-    auth::revoke(&state.revoked, &claims.jti);
+    auth::revoke(&state.revoked, &claims.jti, claims.exp);
     Ok(Json(serde_json::json!({ "ok": true })))
 }

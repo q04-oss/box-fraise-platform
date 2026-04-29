@@ -1,3 +1,4 @@
+use rand::Rng;
 use sqlx::PgPool;
 
 use crate::error::{AppError, AppResult};
@@ -6,15 +7,10 @@ use super::types::DeviceRow;
 // ── Pairing tokens ────────────────────────────────────────────────────────────
 
 pub async fn create_pair_token(pool: &PgPool, user_id: i32) -> AppResult<String> {
-    use rand::distributions::Alphanumeric;
-    use rand::Rng;
-
-    let token: String = rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(8)
-        .map(char::from)
-        .collect::<String>()
-        .to_uppercase();
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let token: String = (0..8)
+        .map(|_| CHARSET[rand::thread_rng().gen_range(0..CHARSET.len())] as char)
+        .collect();
 
     let expires_at = chrono::Utc::now().naive_utc() + chrono::Duration::minutes(5);
 
@@ -94,12 +90,19 @@ pub async fn list_devices(pool: &PgPool, user_id: i32) -> AppResult<Vec<DeviceRo
 }
 
 pub async fn set_role(pool: &PgPool, address: &str, role: &str) -> AppResult<()> {
-    sqlx::query("UPDATE devices SET role = $1 WHERE LOWER(device_address) = LOWER($2)")
-        .bind(role)
-        .bind(address)
-        .execute(pool)
-        .await
-        .map_err(AppError::Db)?;
+    let result = sqlx::query(
+        "UPDATE devices SET role = $1 WHERE LOWER(device_address) = LOWER($2)",
+    )
+    .bind(role)
+    .bind(address)
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+
     Ok(())
 }
 
