@@ -36,6 +36,12 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Borrow a Stripe client scoped to this request. Cheap — shares the
+    /// underlying reqwest connection pool.
+    pub fn stripe(&self) -> crate::integrations::stripe::StripeClient<'_> {
+        crate::integrations::stripe::StripeClient::new(&self.cfg.stripe_secret_key, &self.http)
+    }
+
     pub fn new(db: PgPool, cfg: Config) -> Self {
         Self {
             db,
@@ -61,6 +67,9 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::auth::routes::router())
         .merge(crate::domain::keys::routes::router())
         .merge(crate::domain::devices::routes::router())
+        .merge(crate::domain::catalog::routes::router())
+        .merge(crate::domain::orders::routes::router())
+        .merge(crate::domain::messages::routes::router())
         // additional domains merged here as they are ported
 
         // ── Security middleware (innermost — applied last, runs first) ─────
