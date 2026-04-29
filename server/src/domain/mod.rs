@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod art;
 pub mod auth;
 pub mod businesses;
@@ -16,4 +17,6 @@ pub mod popups;
 pub mod portal;
 pub mod search;
 pub mod users;
+pub mod tokens;
+pub mod tournaments;
 pub mod ventures;
