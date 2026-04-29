@@ -57,10 +57,11 @@ pub fn build(state: AppState) -> Router {
     Router::new()
         // ── Platform-level routes ─────────────────────────────────────────
         .merge(meta::router())
-        // ── Domain routes merged here as each domain is ported ────────────
-        // .merge(domain::auth::routes::router())
-        // .merge(domain::orders::routes::router())
-        // ...
+        // ── Domain routes ─────────────────────────────────────────────────
+        .merge(crate::domain::auth::routes::router())
+        .merge(crate::domain::keys::routes::router())
+        .merge(crate::domain::devices::routes::router())
+        // additional domains merged here as they are ported
 
         // ── Security middleware (innermost — applied last, runs first) ─────
         .layer(middleware::from_fn_with_state(
