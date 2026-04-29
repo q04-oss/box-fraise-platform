@@ -1,0 +1,11 @@
+# Rust
+target/
+
+# Environment
+.env
+.env.*
+
+# Editor
+.vscode/
+.idea/
+*.swp
