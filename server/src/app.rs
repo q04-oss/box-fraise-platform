@@ -1,25 +1,89 @@
-use axum::{middleware, routing::{get, post}, Extension, Router};
+use std::sync::Arc;
+
+use axum::{middleware, Router};
 use sqlx::PgPool;
-use tower_http::trace::TraceLayer;
+use tower_http::{
+    compression::CompressionLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+};
+use tracing::Level;
+
 use crate::{
     auth::{new_revoked_tokens, RevokedTokens},
-    middleware::{hmac, rate_limit::{self, SharedRateLimiter}},
+    config::Config,
+    http::{
+        middleware::{
+            hmac::{new_nonce_cache, NonceCache},
+            rate_limit::{RateLimiter, SharedRateLimiter},
+        },
+        routes::meta,
+    },
 };
 
-pub fn build(pool: PgPool) -> Router {
-    let nonce_cache   = hmac::new_nonce_cache();
-    let revoked       = new_revoked_tokens();
-    let rate_limiter  = rate_limit::RateLimiter::new();
+// ── AppState ──────────────────────────────────────────────────────────────────
 
+/// Shared application state — cheap to clone (all heap data is Arc-backed).
+#[derive(Clone)]
+pub struct AppState {
+    pub db:      PgPool,
+    pub cfg:     Arc<Config>,
+    pub revoked: RevokedTokens,
+    pub nonces:  NonceCache,
+    pub rate:    SharedRateLimiter,
+    /// Shared HTTP client — reuses the connection pool across all integration calls.
+    pub http:    reqwest::Client,
+}
+
+impl AppState {
+    pub fn new(db: PgPool, cfg: Config) -> Self {
+        Self {
+            db,
+            cfg:     Arc::new(cfg),
+            revoked: new_revoked_tokens(),
+            nonces:  new_nonce_cache(),
+            rate:    RateLimiter::new(),
+            http:    reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("reqwest client is infallible"),
+        }
+    }
+}
+
+// ── Router ────────────────────────────────────────────────────────────────────
+
+pub fn build(state: AppState) -> Router {
     Router::new()
-        .route("/health", get(crate::routes::health::get))
-        .route("/api/auth/logout", post(crate::routes::auth::logout))
-        // ── layers (innermost first) ─────────────────────────────────────
-        .layer(middleware::from_fn(hmac::validate))
-        .layer(Extension(pool))
-        .layer(Extension(nonce_cache))
-        .layer(Extension::<RevokedTokens>(revoked))
-        .layer(middleware::from_fn(rate_limit::check))
-        .layer(Extension::<SharedRateLimiter>(rate_limiter))
-        .layer(TraceLayer::new_for_http())
+        // ── Platform-level routes ─────────────────────────────────────────
+        .merge(meta::router())
+        // ── Domain routes merged here as each domain is ported ────────────
+        // .merge(domain::auth::routes::router())
+        // .merge(domain::orders::routes::router())
+        // ...
+
+        // ── Security middleware (innermost — applied last, runs first) ─────
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::http::middleware::hmac::validate,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::http::middleware::rate_limit::check,
+        ))
+
+        // ── Observability ─────────────────────────────────────────────────
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+
+        // ── Transport ─────────────────────────────────────────────────────
+        .layer(CompressionLayer::new())
+
+        // ── State ─────────────────────────────────────────────────────────
+        .with_state(state)
 }

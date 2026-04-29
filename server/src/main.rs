@@ -1,18 +1,20 @@
-use dotenvy::dotenv;
-use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod app;
 mod auth;
+mod config;
 mod db;
+mod domain;
 mod error;
-mod middleware;
-mod routes;
+mod http;
+mod integrations;
+mod jobs;
 
 #[tokio::main]
-async fn main() {
-    dotenv().ok();
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
 
     tracing_subscriber::registry()
         .with(
@@ -22,16 +24,22 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let pool   = db::connect().await.expect("failed to connect to database");
-    let router = app::build(pool);
+    let cfg  = config::Config::load()?;
+    let port = cfg.port;
+    let pool = db::connect(&cfg.database_url).await?;
 
-    let addr: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 3001));
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    info!("box fraise server listening on {addr}");
+    let state  = app::AppState::new(pool, cfg);
+    let router = app::build(state);
+
+    let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!("box fraise listening on {addr}");
+
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .await
-    .unwrap();
+    .await?;
+
+    Ok(())
 }
