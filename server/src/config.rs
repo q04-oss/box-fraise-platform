@@ -49,15 +49,23 @@ impl Config {
             anyhow::bail!("JWT_SECRET must be at least 32 characters");
         }
 
+        let admin_pin       = require("ADMIN_PIN")?;
+        let chocolatier_pin = require("CHOCOLATIER_PIN")?;
+        let supplier_pin    = require("SUPPLIER_PIN")?;
+
+        validate_pin("ADMIN_PIN",       &admin_pin)?;
+        validate_pin("CHOCOLATIER_PIN", &chocolatier_pin)?;
+        validate_pin("SUPPLIER_PIN",    &supplier_pin)?;
+
         Ok(Self {
             // required
             database_url:          require("DATABASE_URL")?,
             jwt_secret,
             stripe_secret_key:     require("STRIPE_SECRET_KEY")?,
             stripe_webhook_secret: require("STRIPE_WEBHOOK_SECRET")?,
-            admin_pin:             require("ADMIN_PIN")?,
-            chocolatier_pin:       require("CHOCOLATIER_PIN")?,
-            supplier_pin:          require("SUPPLIER_PIN")?,
+            admin_pin,
+            chocolatier_pin,
+            supplier_pin,
 
             // optional with default
             port: optional_parse("PORT", 3001)?,
@@ -95,4 +103,17 @@ where
         Ok(v)  => v.parse::<T>().map_err(|e| anyhow::anyhow!("`{key}` is invalid: {e}")),
         Err(_) => Ok(default),
     }
+}
+
+/// Reject weak PINs at startup so misconfigured deployments fail fast.
+/// Requirements: at least 8 characters, not all the same character.
+fn validate_pin(key: &str, pin: &str) -> anyhow::Result<()> {
+    if pin.len() < 8 {
+        anyhow::bail!("`{key}` must be at least 8 characters");
+    }
+    let first = pin.chars().next().unwrap();
+    if pin.chars().all(|c| c == first) {
+        anyhow::bail!("`{key}` must not be all the same character (e.g. '11111111')");
+    }
+    Ok(())
 }

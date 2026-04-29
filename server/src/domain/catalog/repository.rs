@@ -1,4 +1,3 @@
-use rand::Rng;
 use sqlx::PgPool;
 
 use crate::error::{AppError, AppResult};

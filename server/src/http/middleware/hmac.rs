@@ -31,7 +31,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use ring::hmac as ring_hmac;
 use serde_json::json;
 
-use crate::app::AppState;
+use crate::{app::AppState, auth::apple_attest};
 
 const MAX_SKEW_SECS: u64 = 300; // 5-minute replay window
 
@@ -114,7 +114,7 @@ pub async fn validate(
 
     // ── Key resolution ────────────────────────────────────────────────────────
     let key_bytes: Vec<u8> = match kid {
-        Some(kid) => match resolve_device_key(&kid, &state).await {
+        Some(ref kid) => match resolve_device_key(kid, &state).await {
             Ok(k)  => k,
             Err(r) => {
                 state.nonces.lock().unwrap().remove(&sig);
@@ -148,6 +148,41 @@ pub async fn validate(
     if !constant_time_eq(expected_b64.as_bytes(), sig.as_bytes()) {
         state.nonces.lock().unwrap().remove(&sig);
         return reject("invalid signature");
+    }
+
+    // ── App Attest assertion verification ─────────────────────────────────────
+    // X-Fraise-Assertion is present on every request from an attested device.
+    // If we have a stored public key for this device, verify the assertion.
+    // This provides a second trust layer: HMAC proves the signing key matches;
+    // the assertion proves the binary is unmodified on genuine Apple hardware.
+    if let Some(kid) = &kid {
+        let assertion_header = parts
+            .headers
+            .get("x-fraise-assertion")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+
+        if let Some(assertion) = assertion_header {
+            match resolve_public_key(kid, &state).await {
+                Some(pub_key_der) => {
+                    // Reuse the same message bytes computed for HMAC above.
+                    let mut msg_for_attest = format!("{method}{path_qs}{ts}").into_bytes();
+                    msg_for_attest.extend_from_slice(&body_bytes);
+
+                    if apple_attest::verify_assertion(&assertion, &pub_key_der, &msg_for_attest)
+                        .is_err()
+                    {
+                        state.nonces.lock().unwrap().remove(&sig);
+                        return reject("assertion_invalid");
+                    }
+                }
+                None => {
+                    // No public key stored yet (device attested before this column existed).
+                    // Allow through — HMAC provides sufficient integrity for legacy devices.
+                    tracing::debug!(kid, "no public key for device — skipping assertion check");
+                }
+            }
+        }
     }
 
     // Nonce was already reserved; verification passed — forward the request.
@@ -226,4 +261,21 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         return false;
     }
     a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Fetch the DER-encoded public key for an attested device.
+/// Returns `None` if the device has no public key stored (pre-attestation or legacy).
+async fn resolve_public_key(kid: &str, state: &AppState) -> Option<Vec<u8>> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT public_key FROM device_attestations \
+         WHERE key_id = $1 AND public_key IS NOT NULL \
+         LIMIT 1",
+    )
+    .bind(kid)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    row.and_then(|(b64,)| STANDARD.decode(&b64).ok())
 }

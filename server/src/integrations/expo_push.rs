@@ -1,5 +1,5 @@
 /// Expo push notification client.
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
 

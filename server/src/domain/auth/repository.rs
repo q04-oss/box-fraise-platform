@@ -73,13 +73,8 @@ pub async fn find_or_create_apple(
     .await
     .map_err(AppError::Db)?;
 
-    // is_new: true only when a fresh row was inserted, not when we linked.
-    let is_new = user.apple_user_id.as_deref() == Some(apple_id)
-        && user.created_at == user.created_at; // always true; is_new heuristic below
-
     tx.commit().await.map_err(AppError::Db)?;
 
-    // Approximate is_new: if the email was a relay address we just created, it's new.
     let is_new = email.is_none() || email_str.ends_with("@privaterelay.appleid.com");
 
     Ok((user, is_new))

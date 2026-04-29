@@ -45,31 +45,58 @@ pub fn router() -> Router<AppState> {
 // â”€â”€ PIN extraction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Every admin request must include X-Admin-Pin header.
+/// On success, emits a structured audit event (method + path + role).
 fn require_admin_pin(
     headers: &axum::http::HeaderMap,
-    cfg: &crate::config::Config,
+    cfg:     &crate::config::Config,
+    method:  &str,
+    path:    &str,
 ) -> AppResult<AdminRole> {
     let pin = headers
         .get("x-admin-pin")
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| AppError::bad_request("X-Admin-Pin header required"))?;
 
-    if constant_time_eq(cfg.admin_pin.as_bytes(), pin.as_bytes()) {
-        return Ok(AdminRole::Admin);
-    }
-    if constant_time_eq(cfg.chocolatier_pin.as_bytes(), pin.as_bytes()) {
-        return Ok(AdminRole::Chocolatier);
-    }
-    if constant_time_eq(cfg.supplier_pin.as_bytes(), pin.as_bytes()) {
-        return Ok(AdminRole::Supplier);
-    }
+    let role = if constant_time_eq(cfg.admin_pin.as_bytes(), pin.as_bytes()) {
+        AdminRole::Admin
+    } else if constant_time_eq(cfg.chocolatier_pin.as_bytes(), pin.as_bytes()) {
+        AdminRole::Chocolatier
+    } else if constant_time_eq(cfg.supplier_pin.as_bytes(), pin.as_bytes()) {
+        AdminRole::Supplier
+    } else {
+        // Log failed attempts — useful for detecting brute-force
+        tracing::warn!(method, path, "admin PIN rejected");
+        return Err(AppError::Forbidden);
+    };
 
-    Err(AppError::Forbidden)
+    // Structured audit event — role is logged, PIN is never logged.
+    tracing::info!(method, path, role = ?role, "admin action authorised");
+
+    Ok(role)
 }
 
+/// Constant-time secret comparison that eliminates length-based timing side-channels.
+///
+/// `ring::constant_time::verify_slices_are_equal` is constant-time for equal-length
+/// inputs but returns immediately when lengths differ, leaking PIN length.
+/// HMAC-normalising both inputs (same random key → fixed 32-byte MACs) removes
+/// that oracle: the final comparison is always between 32-byte values.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    use ring::constant_time::verify_slices_are_equal;
-    verify_slices_are_equal(a, b).is_ok()
+    use ring::{
+        hmac::{self, Key, HMAC_SHA256},
+        rand::{SecureRandom, SystemRandom},
+    };
+    let rng = SystemRandom::new();
+    let mut key_bytes = [0u8; 32];
+    // Fill can only fail if the OS entropy source fails — treat that as non-equal.
+    if rng.fill(&mut key_bytes).is_err() {
+        return false;
+    }
+    let key   = Key::new(HMAC_SHA256, &key_bytes);
+    let mac_a = hmac::sign(&key, a);
+    let mac_b = hmac::sign(&key, b);
+    // Both MACs are 32 bytes — XOR-accumulate is provably constant-time for equal-length slices.
+    mac_a.as_ref().iter().zip(mac_b.as_ref()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -105,9 +132,11 @@ async fn list_orders(
     State(state): State<AppState>,
     RequireUser(_user_id): RequireUser,
     Query(filter): Query<OrderFilter>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
 ) -> AppResult<Json<Vec<AdminOrderRow>>> {
-    let role = require_admin_pin(&headers, &state.cfg)?;
+    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
     // Suppliers and above can read orders.
     let _ = role;
 
@@ -143,10 +172,12 @@ async fn set_order_status(
     State(state): State<AppState>,
     RequireUser(_user_id): RequireUser,
     Path(order_id): Path<i32>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
     Json(body): Json<SetStatusBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let role = require_admin_pin(&headers, &state.cfg)?;
+    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
     if role < AdminRole::Chocolatier {
         return Err(AppError::Forbidden);
     }
@@ -180,10 +211,12 @@ async fn assign_worker(
     State(state): State<AppState>,
     RequireUser(_user_id): RequireUser,
     Path(order_id): Path<i32>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
     Json(body): Json<AssignWorkerBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let role = require_admin_pin(&headers, &state.cfg)?;
+    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
     if role < AdminRole::Chocolatier {
         return Err(AppError::Forbidden);
     }
@@ -212,9 +245,11 @@ async fn admin_nfc_verify(
     State(state): State<AppState>,
     RequireUser(_user_id): RequireUser,
     Path(device_id): Path<i32>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
 ) -> AppResult<Json<serde_json::Value>> {
-    let role = require_admin_pin(&headers, &state.cfg)?;
+    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
     if role < AdminRole::Admin {
         return Err(AppError::Forbidden);
     }
@@ -258,9 +293,11 @@ async fn list_users(
     State(state): State<AppState>,
     RequireUser(_user_id): RequireUser,
     Query(filter): Query<UserFilter>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
 ) -> AppResult<Json<Vec<AdminUserRow>>> {
-    let role = require_admin_pin(&headers, &state.cfg)?;
+    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
     if role < AdminRole::Admin {
         return Err(AppError::Forbidden);
     }
@@ -295,10 +332,12 @@ async fn set_user_tier(
     State(state): State<AppState>,
     RequireUser(_user_id): RequireUser,
     Path(target_id): Path<i32>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
     Json(body): Json<SetTierBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let role = require_admin_pin(&headers, &state.cfg)?;
+    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
     if role < AdminRole::Admin {
         return Err(AppError::Forbidden);
     }
@@ -336,9 +375,11 @@ struct AdminVarietyRow {
 async fn list_varieties_admin(
     State(state): State<AppState>,
     RequireUser(_user_id): RequireUser,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
 ) -> AppResult<Json<Vec<AdminVarietyRow>>> {
-    let role = require_admin_pin(&headers, &state.cfg)?;
+    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
     if role < AdminRole::Chocolatier {
         return Err(AppError::Forbidden);
     }
@@ -364,10 +405,12 @@ async fn set_stock(
     State(state): State<AppState>,
     RequireUser(_user_id): RequireUser,
     Path(variety_id): Path<i32>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
     Json(body): Json<SetStockBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let role = require_admin_pin(&headers, &state.cfg)?;
+    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
     if role < AdminRole::Chocolatier {
         return Err(AppError::Forbidden);
     }
@@ -406,9 +449,11 @@ struct AdminBusinessRow {
 async fn list_businesses_admin(
     State(state): State<AppState>,
     RequireUser(_user_id): RequireUser,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
 ) -> AppResult<Json<Vec<AdminBusinessRow>>> {
-    let role = require_admin_pin(&headers, &state.cfg)?;
+    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
     if role < AdminRole::Admin {
         return Err(AppError::Forbidden);
     }
@@ -430,9 +475,11 @@ async fn verify_business(
     State(state): State<AppState>,
     RequireUser(_user_id): RequireUser,
     Path(business_id): Path<i32>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
 ) -> AppResult<Json<serde_json::Value>> {
-    let role = require_admin_pin(&headers, &state.cfg)?;
+    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
     if role < AdminRole::Admin {
         return Err(AppError::Forbidden);
     }

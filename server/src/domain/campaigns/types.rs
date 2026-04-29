@@ -1,5 +1,5 @@
 use chrono::NaiveDateTime;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct CampaignRow {

@@ -7,7 +7,7 @@
 use crate::{
     app::AppState,
     error::{AppError, AppResult},
-    http::extractors::{auth::{DeviceInfo, RequireDevice, RequireUser}, json::AppJson},
+    http::extractors::{auth::{RequireDevice, RequireUser}, json::AppJson},
 };
 use super::{repository, service, types::*};
 

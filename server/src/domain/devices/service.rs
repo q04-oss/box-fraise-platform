@@ -3,7 +3,6 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use crate::{
     app::AppState,
     error::{AppError, AppResult},
-    auth::device::{parse_auth_header, verify_signature},
 };
 use super::{repository, types::DeviceRow};
 
@@ -76,27 +75,49 @@ pub async fn update_role(
 // ── App Attest ────────────────────────────────────────────────────────────────
 
 pub async fn store_attestation(
-    state:       &AppState,
-    user_id:     i32,
-    key_id:      &str,
-    attestation: &str,
+    state:        &AppState,
+    user_id:      i32,
+    key_id:       &str,
+    attestation:  &str,
     hmac_key_b64: &str,
+    challenge:    Option<&str>,
 ) -> AppResult<()> {
-    // Validate that the HMAC key is exactly 32 bytes.
+    // Validate HMAC key: must be exactly 32 bytes (256-bit).
     let key_bytes = STANDARD
         .decode(hmac_key_b64)
         .map_err(|_| AppError::bad_request("hmac_key must be base64"))?;
-
     if key_bytes.len() != 32 {
         return Err(AppError::bad_request("hmac_key must be 32 bytes"));
     }
 
-    // TODO: full App Attest certificate chain verification against Apple's
-    // root CA using ciborium (CBOR decode) + x509-parser (cert chain).
-    // Until implemented, we store the attestation blob verbatim.
-    // Tracking: verify_attestation_chain(attestation, key_id)
+    // If a challenge was provided, consume it from the DB — verifies it was server-issued.
+    if let Some(ch) = challenge {
+        let consumed = repository::consume_attest_challenge(&state.db, ch).await?;
+        if !consumed {
+            return Err(AppError::bad_request(
+                "invalid or expired challenge — call GET /api/devices/attest-challenge first",
+            ));
+        }
+    }
 
-    repository::upsert_attestation(&state.db, user_id, key_id, attestation, hmac_key_b64).await
+    // Parse the attestation object and extract the leaf certificate's public key.
+    // This verifies the authData rpIdHash matches our App ID, and extracts the
+    // EC public key for future per-request assertion verification.
+    let rp_id = state.cfg.apple_client_id.as_deref().unwrap_or("com.boxfraise.app");
+    let challenge_bytes = challenge.and_then(|c| base64::engine::general_purpose::STANDARD.decode(c).ok());
+    let attest_data = crate::auth::apple_attest::parse_attestation(
+        attestation,
+        key_id,
+        challenge_bytes.as_deref(),
+        rp_id,
+    )?;
+
+    let public_key_b64 = STANDARD.encode(&attest_data.public_key_der);
+
+    repository::upsert_attestation(
+        &state.db, user_id, key_id, attestation, hmac_key_b64, &public_key_b64,
+    )
+    .await
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

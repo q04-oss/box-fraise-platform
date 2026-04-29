@@ -34,6 +34,9 @@ pub struct AttestBody {
     /// Sensitive — never logged or included in error responses.
     #[serde(rename = "hmac_key")]
     pub hmac_key:    String,
+    /// Server-issued challenge (base64). Obtained from GET /api/devices/attest-challenge.
+    /// Optional for backwards compatibility with clients pre-dating challenge enforcement.
+    pub challenge:   Option<String>,
 }
 
 // ── Response bodies ───────────────────────────────────────────────────────────

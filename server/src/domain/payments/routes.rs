@@ -14,7 +14,6 @@ use axum::{
 
 use crate::{
     app::AppState,
-    error::AppError,
     integrations::resend,
 };
 

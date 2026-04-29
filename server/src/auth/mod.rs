@@ -1,4 +1,5 @@
 pub mod apple;
+pub mod apple_attest;
 pub mod device;
 
 use chrono::Utc;

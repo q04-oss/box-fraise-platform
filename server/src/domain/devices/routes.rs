@@ -3,6 +3,7 @@
     routing::{get, patch, post},
     Json, Router,
 };
+use serde_json::json;
 
 use crate::{
     app::AppState,
@@ -13,12 +14,13 @@ use super::{repository, service, types::*};
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/devices/pair-token",      post(pair_token))
-        .route("/api/devices/register",        post(register))
-        .route("/api/devices/me",              get(device_me))
-        .route("/api/devices/{address}/role",   patch(update_role))
-        .route("/api/devices",                 get(list))
-        .route("/api/devices/attest",          post(attest))
+        .route("/api/devices/pair-token",        post(pair_token))
+        .route("/api/devices/register",          post(register))
+        .route("/api/devices/me",                get(device_me))
+        .route("/api/devices/{address}/role",     patch(update_role))
+        .route("/api/devices",                   get(list))
+        .route("/api/devices/attest-challenge",  get(attest_challenge))
+        .route("/api/devices/attest",            post(attest))
 }
 
 // â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -46,7 +48,7 @@ async fn register(
 }
 
 async fn device_me(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     RequireDevice(info): RequireDevice,
 ) -> AppResult<Json<serde_json::Value>> {
     Ok(Json(serde_json::json!({
@@ -75,6 +77,16 @@ async fn list(
     Ok(Json(devices))
 }
 
+/// GET /api/devices/attest-challenge — returns a server-issued single-use challenge.
+/// The iOS client fetches this before calling DCAppAttestService.attestKey() so the
+/// server can verify the attestation was bound to a challenge it generated.
+async fn attest_challenge(
+    State(state): State<AppState>,
+) -> AppResult<Json<serde_json::Value>> {
+    let challenge = repository::create_attest_challenge(&state.db).await?;
+    Ok(Json(json!({ "challenge": challenge })))
+}
+
 async fn attest(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
@@ -86,7 +98,8 @@ async fn attest(
         &body.key_id,
         &body.attestation,
         &body.hmac_key,
+        body.challenge.as_deref(),
     )
     .await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(json!({ "ok": true })))
 }

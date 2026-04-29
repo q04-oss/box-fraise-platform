@@ -1,4 +1,4 @@
-use rand::Rng;
+use ring::rand::{SecureRandom, SystemRandom};
 use sqlx::PgPool;
 
 use crate::error::{AppError, AppResult};
@@ -8,8 +8,12 @@ use super::types::DeviceRow;
 
 pub async fn create_pair_token(pool: &PgPool, user_id: i32) -> AppResult<String> {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let token: String = (0..8)
-        .map(|_| CHARSET[rand::thread_rng().gen_range(0..CHARSET.len())] as char)
+    let rng = SystemRandom::new();
+    let mut buf = [0u8; 8];
+    rng.fill(&mut buf).map_err(|_| crate::error::AppError::Internal(anyhow::anyhow!("rng failed")))?;
+    let token: String = buf
+        .iter()
+        .map(|&b| CHARSET[b as usize % CHARSET.len()] as char)
         .collect();
 
     let expires_at = chrono::Utc::now().naive_utc() + chrono::Duration::minutes(5);
@@ -114,12 +118,14 @@ pub async fn upsert_attestation(
     key_id:      &str,
     attestation: &str,
     hmac_key:    &str,
+    public_key:  &str,
 ) -> AppResult<()> {
     sqlx::query(
-        "INSERT INTO device_attestations (key_id, attestation, user_id, hmac_key)
-         VALUES ($1, $2, $3, $4)
+        "INSERT INTO device_attestations (key_id, attestation, user_id, hmac_key, public_key)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (key_id) DO UPDATE
-         SET hmac_key    = COALESCE(EXCLUDED.hmac_key, device_attestations.hmac_key),
+         SET hmac_key    = COALESCE(EXCLUDED.hmac_key,   device_attestations.hmac_key),
+             public_key  = COALESCE(EXCLUDED.public_key, device_attestations.public_key),
              attestation = EXCLUDED.attestation,
              user_id     = EXCLUDED.user_id",
     )
@@ -127,8 +133,49 @@ pub async fn upsert_attestation(
     .bind(attestation)
     .bind(user_id)
     .bind(hmac_key)
+    .bind(public_key)
     .execute(pool)
     .await
     .map_err(AppError::Db)?;
     Ok(())
+}
+
+// ── Attestation challenges ────────────────────────────────────────────────────
+
+/// Store a freshly generated challenge and return its base64 value.
+/// The challenge expires in 5 minutes.
+pub async fn create_attest_challenge(pool: &PgPool) -> AppResult<String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let rng = SystemRandom::new();
+    let mut raw = [0u8; 32];
+    rng.fill(&mut raw)
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("rng failed")))?;
+    let challenge = STANDARD.encode(raw);
+    let expires_at = chrono::Utc::now().naive_utc() + chrono::Duration::minutes(5);
+
+    sqlx::query(
+        "INSERT INTO attest_challenges (challenge, expires_at) VALUES ($1, $2)
+         ON CONFLICT (challenge) DO NOTHING",
+    )
+    .bind(&challenge)
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    Ok(challenge)
+}
+
+/// Consume a challenge: DELETE and return true if valid and unexpired.
+pub async fn consume_attest_challenge(pool: &PgPool, challenge: &str) -> AppResult<bool> {
+    let result = sqlx::query(
+        "DELETE FROM attest_challenges
+         WHERE challenge = $1 AND expires_at > NOW()",
+    )
+    .bind(challenge)
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    Ok(result.rows_affected() > 0)
 }
