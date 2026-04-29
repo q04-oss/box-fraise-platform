@@ -43,16 +43,19 @@ pub async fn send(
 
 // ── Email templates ───────────────────────────────────────────────────────────
 
+/// `order_ref` is formatted as a display string in the email body. It accepts
+/// `OrderId` for real orders or an `i32` standing-order reference from the
+/// cron job, which does not yet have a real order ID at send time.
 pub async fn send_order_confirmation(
-    http:    &reqwest::Client,
-    api_key: &str,
-    to:      &str,
-    order_id: i32,
-    variety:  &str,
+    http:      &reqwest::Client,
+    api_key:   &str,
+    to:        &str,
+    order_ref: impl std::fmt::Display,
+    variety:   &str,
     total_cents: i32,
 ) -> AppResult<()> {
     let html = base_template(&format!(
-        "<p>Your order #{order_id} for <strong>{variety}</strong> has been placed.</p>
+        "<p>Your order #{order_ref} for <strong>{variety}</strong> has been placed.</p>
          <p>Total: <strong>{}</strong></p>
          <p>We'll notify you when your box is ready.</p>",
         format_cents(total_cents),

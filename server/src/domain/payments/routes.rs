@@ -17,6 +17,7 @@ use secrecy::ExposeSecret;
 use crate::{
     app::AppState,
     integrations::resend,
+    types::OrderId,
 };
 
 pub fn router() -> Router<AppState> {
@@ -83,7 +84,7 @@ async fn handle_pi_succeeded(state: &AppState, event: &serde_json::Value) {
 async fn complete_order(state: &AppState, pi_id: &str) {
     #[derive(sqlx::FromRow)]
     struct OrderInfo {
-        id:           i32,
+        id:           OrderId,
         variety_name: String,
         total_cents:  i64,
         email:        Option<String>,
@@ -104,7 +105,7 @@ async fn complete_order(state: &AppState, pi_id: &str) {
 
     match result {
         Ok(Some(info)) => {
-            tracing::info!(pi_id, order_id = info.id, "order marked paid via webhook");
+            tracing::info!(pi_id, order_id = %info.id, "order marked paid via webhook");
             if let (Some(email), Some(key)) = (info.email, state.cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned())) {
                 let http    = state.http.clone();
                 let variety = info.variety_name.clone();

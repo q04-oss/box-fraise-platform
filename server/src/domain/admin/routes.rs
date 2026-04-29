@@ -23,6 +23,7 @@ use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::auth::RequireUser,
+    types::{OrderId, UserId},
 };
 
 pub fn router() -> Router<AppState> {
@@ -118,8 +119,8 @@ struct OrderFilter {
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 struct AdminOrderRow {
-    id:           i32,
-    user_id:      i32,
+    id:           OrderId,
+    user_id:      UserId,
     variety_id:   i32,
     variety_name: String,
     quantity:     i32,
@@ -173,7 +174,7 @@ const VALID_ORDER_STATUSES: &[&str] = &["pending", "confirmed", "preparing", "re
 async fn set_order_status(
     State(state): State<AppState>,
     RequireUser(_user_id): RequireUser,
-    Path(order_id): Path<i32>,
+    Path(order_id): Path<OrderId>,
     method: axum::http::Method,
     uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
@@ -212,7 +213,7 @@ struct AssignWorkerBody {
 async fn assign_worker(
     State(state): State<AppState>,
     RequireUser(_user_id): RequireUser,
-    Path(order_id): Path<i32>,
+    Path(order_id): Path<OrderId>,
     method: axum::http::Method,
     uri: axum::http::Uri,
     headers: axum::http::HeaderMap,

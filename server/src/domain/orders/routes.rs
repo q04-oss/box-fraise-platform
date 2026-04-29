@@ -8,6 +8,7 @@ use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::{auth::{RequireDevice, RequireUser}, json::AppJson},
+    types::OrderId,
 };
 use super::{repository, service, types::*};
 
@@ -69,7 +70,7 @@ async fn pay_with_balance(
 async fn confirm(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
-    Path(order_id): Path<i32>,
+    Path(order_id): Path<OrderId>,
 ) -> AppResult<Json<OrderRow>> {
     Ok(Json(service::confirm_order(&state, order_id, user_id).await?))
 }
@@ -77,7 +78,7 @@ async fn confirm(
 async fn rate(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
-    Path(order_id): Path<i32>,
+    Path(order_id): Path<OrderId>,
     AppJson(body): AppJson<RateOrderBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     if !(1..=5).contains(&body.rating) {
@@ -90,7 +91,7 @@ async fn rate(
 async fn receipt(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
-    Path(order_id): Path<i32>,
+    Path(order_id): Path<OrderId>,
 ) -> AppResult<Json<OrderRow>> {
     let order = repository::find_by_id(&state.db, order_id)
         .await?

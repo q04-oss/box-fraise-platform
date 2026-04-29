@@ -1,7 +1,7 @@
 use crate::{
     app::AppState,
     error::{AppError, AppResult},
-    types::UserId,
+    types::{OrderId, UserId},
 };
 use super::{
     repository,
@@ -86,7 +86,7 @@ pub async fn create_order(
 
 // ── Confirm payment ───────────────────────────────────────────────────────────
 
-pub async fn confirm_order(state: &AppState, order_id: i32, user_id: UserId) -> AppResult<OrderRow> {
+pub async fn confirm_order(state: &AppState, order_id: OrderId, user_id: UserId) -> AppResult<OrderRow> {
     let order = repository::find_by_id(&state.db, order_id)
         .await?
         .ok_or(AppError::NotFound)?;

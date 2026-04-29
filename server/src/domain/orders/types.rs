@@ -1,13 +1,13 @@
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
-use crate::types::UserId;
+use crate::types::{OrderId, UserId};
 
 // ── Stored row ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct OrderRow {
-    pub id:                        i32,
+    pub id:                        OrderId,
     pub user_id:                   Option<UserId>,
     pub variety_id:                i32,
     pub location_id:               i32,

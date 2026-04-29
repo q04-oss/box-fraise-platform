@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{error::{AppError, AppResult}, types::UserId};
+use crate::{error::{AppError, AppResult}, types::{OrderId, UserId}};
 use super::types::OrderRow;
 
 const ORDER_COLS: &str =
@@ -11,7 +11,7 @@ const ORDER_COLS: &str =
 
 // ── Reads ─────────────────────────────────────────────────────────────────────
 
-pub async fn find_by_id(pool: &PgPool, id: i32) -> AppResult<Option<OrderRow>> {
+pub async fn find_by_id(pool: &PgPool, id: OrderId) -> AppResult<Option<OrderRow>> {
     sqlx::query_as(&format!("SELECT {ORDER_COLS} FROM orders WHERE id = $1"))
         .bind(id)
         .fetch_optional(pool)
@@ -106,7 +106,7 @@ pub async fn create(
 
 // ── Status transitions ────────────────────────────────────────────────────────
 
-pub async fn set_status(pool: &PgPool, order_id: i32, status: &str) -> AppResult<()> {
+pub async fn set_status(pool: &PgPool, order_id: OrderId, status: &str) -> AppResult<()> {
     sqlx::query("UPDATE orders SET status = $1 WHERE id = $2")
         .bind(status)
         .bind(order_id)
@@ -116,7 +116,7 @@ pub async fn set_status(pool: &PgPool, order_id: i32, status: &str) -> AppResult
     Ok(())
 }
 
-pub async fn set_rating(pool: &PgPool, order_id: i32, user_id: UserId, rating: i32) -> AppResult<()> {
+pub async fn set_rating(pool: &PgPool, order_id: OrderId, user_id: UserId, rating: i32) -> AppResult<()> {
     let rows = sqlx::query(
         "UPDATE orders SET rating = $1
          WHERE id = $2 AND user_id = $3 AND status = 'collected' AND rating IS NULL",
