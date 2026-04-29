@@ -80,6 +80,9 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::gifts::routes::router())
         .merge(crate::domain::art::routes::router())
         .merge(crate::domain::ventures::routes::router())
+        .merge(crate::domain::payments::routes::router())
+        .merge(crate::domain::popups::routes::router())
+        .merge(crate::domain::portal::routes::router())
 
         // ── Security middleware (innermost — applied last, runs first) ─────
         .layer(middleware::from_fn_with_state(
