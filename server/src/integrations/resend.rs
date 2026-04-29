@@ -152,6 +152,20 @@ pub async fn send_tip_received(
     send(http, api_key, to, "Tip received — Maison Fraise", &html).await
 }
 
+pub fn renewal_reminder_html(
+    tier:      &str,
+    renews_at: chrono::NaiveDateTime,
+    days_left: i64,
+) -> String {
+    base_template(&format!(
+        "<p>Your <strong>{tier}</strong> membership renews in <strong>{days_left} day{s}</strong>.</p>
+         <p>Renewal date: <strong>{date}</strong></p>
+         <p>Open the app to manage your membership.</p>",
+        s    = if days_left == 1 { "" } else { "s" },
+        date = renews_at.format("%B %-d, %Y"),
+    ))
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn format_cents(cents: i32) -> String {

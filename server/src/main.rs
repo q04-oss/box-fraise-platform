@@ -28,11 +28,11 @@ async fn main() -> anyhow::Result<()> {
     let port = cfg.port;
     let pool = db::connect(&cfg.database_url).await?;
 
-    let state  = app::AppState::new(pool.clone(), cfg);
-    let router = app::build(state);
+    let state  = app::AppState::new(pool, cfg);
+    let router = app::build(state.clone());
 
     // Background cron jobs — non-fatal if scheduler fails to start.
-    if let Err(e) = jobs::start(pool).await {
+    if let Err(e) = jobs::start(state).await {
         tracing::warn!(error = %e, "cron scheduler failed to start");
     }
 

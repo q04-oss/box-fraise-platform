@@ -46,6 +46,35 @@ impl<'a> StripeClient<'a> {
         self.post_form("/payment_intents", &params).await
     }
 
+    /// Charge a saved payment method off-session (standing orders, renewals).
+    ///
+    /// Uses auto-capture (`capture_method` defaults to `automatic`) since these
+    /// are unattended charges — there is no client present to complete a manual
+    /// capture window.
+    pub async fn charge_off_session(
+        &self,
+        amount_cents:    i64,
+        currency:        &str,
+        customer_id:     &str,
+        payment_method:  &str,
+        metadata:        &[(&str, &str)],
+    ) -> AppResult<PaymentIntent> {
+        let mut params: Vec<(&str, String)> = vec![
+            ("amount",         amount_cents.to_string()),
+            ("currency",       currency.to_string()),
+            ("customer",       customer_id.to_string()),
+            ("payment_method", payment_method.to_string()),
+            ("confirm",        "true".to_string()),
+            ("off_session",    "true".to_string()),
+        ];
+
+        for (k, v) in metadata {
+            params.push((k, v.to_string()));
+        }
+
+        self.post_form("/payment_intents", &params).await
+    }
+
     pub async fn get_payment_intent(&self, id: &str) -> AppResult<PaymentIntent> {
         self.get(&format!("/payment_intents/{id}")).await
     }
