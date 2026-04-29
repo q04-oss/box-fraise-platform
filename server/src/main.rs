@@ -28,8 +28,13 @@ async fn main() -> anyhow::Result<()> {
     let port = cfg.port;
     let pool = db::connect(&cfg.database_url).await?;
 
-    let state  = app::AppState::new(pool, cfg);
+    let state  = app::AppState::new(pool.clone(), cfg);
     let router = app::build(state);
+
+    // Background cron jobs — non-fatal if scheduler fails to start.
+    if let Err(e) = jobs::start(pool).await {
+        tracing::warn!(error = %e, "cron scheduler failed to start");
+    }
 
     let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
