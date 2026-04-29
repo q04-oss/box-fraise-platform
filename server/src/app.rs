@@ -70,7 +70,10 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::catalog::routes::router())
         .merge(crate::domain::orders::routes::router())
         .merge(crate::domain::messages::routes::router())
-        // additional domains merged here as they are ported
+        .merge(crate::domain::users::routes::router())
+        .merge(crate::domain::businesses::routes::router())
+        .merge(crate::domain::memberships::routes::router())
+        .merge(crate::domain::search::routes::router())
 
         // ── Security middleware (innermost — applied last, runs first) ─────
         .layer(middleware::from_fn_with_state(
