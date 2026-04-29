@@ -76,40 +76,66 @@ pub async fn validate(
         return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "request expired" }))).into_response();
     }
 
-    // Replay check
+    // Replay check — single lock acquisition so check-and-reserve is atomic.
     {
         let mut cache = nonce_cache.lock().unwrap();
         cache.retain(|_, exp| *exp > now);
         if cache.contains_key(&sig) {
             return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "request replayed" }))).into_response();
         }
+        // Reserve slot immediately; overwritten with real expiry after sig verification.
+        cache.insert(sig.clone(), now + MAX_SKEW_SECS);
     }
 
     // Collect body bytes for signing (axum requires consuming then reconstructing)
     let (parts, body) = req.into_parts();
     let body_bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
         Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "body too large" }))).into_response(),
+        Err(_) => {
+            nonce_cache.lock().unwrap().remove(&sig);
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": "body too large" }))).into_response();
+        }
     };
 
-    // Resolve signing key
+    // Resolve signing key — fail closed on any DB error for attested devices.
     let signing_key_bytes: Vec<u8> = if let Some(kid) = attest_key {
-        let row: Option<(String,)> = sqlx::query_as(
+        let row: Option<(String,)> = match sqlx::query_as(
             "SELECT hmac_key FROM device_attestations WHERE key_id = $1 AND hmac_key IS NOT NULL LIMIT 1"
         )
         .bind(&kid)
         .fetch_optional(&*pool)
         .await
-        .unwrap_or(None);
+        {
+            Ok(r) => r,
+            Err(_) => {
+                // Remove the pre-reserved nonce slot on rejection.
+                nonce_cache.lock().unwrap().remove(&sig);
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "internal error" }))).into_response();
+            }
+        };
 
-        if let Some((key_b64,)) = row {
-            use base64::{Engine, engine::general_purpose::STANDARD};
-            STANDARD.decode(&key_b64).unwrap_or_else(|_| shared_key_bytes())
-        } else {
-            shared_key_bytes()
+        match row {
+            Some((key_b64,)) => {
+                use base64::{Engine, engine::general_purpose::STANDARD};
+                match STANDARD.decode(&key_b64) {
+                    Ok(k) => k,
+                    Err(_) => {
+                        nonce_cache.lock().unwrap().remove(&sig);
+                        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "internal error" }))).into_response();
+                    }
+                }
+            }
+            // Attested key-ID not found — reject rather than fall back.
+            None => {
+                nonce_cache.lock().unwrap().remove(&sig);
+                return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unknown device" }))).into_response();
+            }
         }
     } else {
-        shared_key_bytes()
+        match shared_key_bytes() {
+            Some(k) => k,
+            None => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "internal error" }))).into_response(),
+        }
     };
 
     // Compute expected HMAC
@@ -125,23 +151,18 @@ pub async fn validate(
     let expected_b64 = STANDARD.encode(expected.as_ref());
 
     if !constant_time_eq(expected_b64.as_bytes(), sig.as_bytes()) {
+        // Signature invalid — remove the pre-reserved slot so the client can retry with a new ts.
+        nonce_cache.lock().unwrap().remove(&sig);
         return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "invalid signature" }))).into_response();
     }
-
-    // Cache nonce
-    {
-        let mut cache = nonce_cache.lock().unwrap();
-        cache.insert(sig.clone(), now + MAX_SKEW_SECS);
-    }
+    // Nonce slot was already inserted at the replay-check step; nothing more to do.
 
     let req = Request::from_parts(parts, Body::from(body_bytes));
     next.run(req).await
 }
 
-fn shared_key_bytes() -> Vec<u8> {
-    env::var("FRAISE_HMAC_SHARED_KEY")
-        .unwrap_or_else(|_| "fraise-request-signing-v1".into())
-        .into_bytes()
+fn shared_key_bytes() -> Option<Vec<u8>> {
+    env::var("FRAISE_HMAC_SHARED_KEY").ok().map(|s| s.into_bytes())
 }
 
 // Constant-time comparison to prevent timing attacks on HMAC verification.
