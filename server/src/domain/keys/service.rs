@@ -85,10 +85,25 @@ pub async fn otpk_count(state: &AppState, user_id: UserId) -> AppResult<i64> {
 
 // ── Key bundle (X3DH) ─────────────────────────────────────────────────────────
 
+// Keys registered before identity_signing_key was required have a NULL signing key.
+// These cannot be used to establish verifiable E2E sessions. The client must re-publish
+// before sessions can begin. After KEY_REFRESH_GRACE_DAYS, treat as permanently expired.
+const KEY_REFRESH_GRACE_DAYS: i64 = 30;
+
 pub async fn fetch_bundle(state: &AppState, target_id: UserId) -> AppResult<KeyBundleResponse> {
     let keys = repository::find_user_keys(&state.db, target_id)
         .await?
         .ok_or(AppError::NotFound)?;
+
+    if keys.identity_signing_key.is_none() {
+        let age_days = (chrono::Utc::now().naive_utc() - keys.updated_at).num_days();
+        if age_days >= KEY_REFRESH_GRACE_DAYS {
+            // Grace period elapsed — contact must re-register to message.
+            return Err(AppError::Unprocessable("keys_expired".to_string()));
+        }
+        // Within grace period — signal client to retry after contact re-publishes.
+        return Err(AppError::Conflict("keys_need_refresh".to_string()));
+    }
 
     let otpk = repository::claim_otpk(&state.db, target_id).await?.map(|r| OtpkResponse {
         key_id:     r.key_id,

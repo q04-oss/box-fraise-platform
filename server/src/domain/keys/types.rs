@@ -11,6 +11,7 @@ pub struct UserKeysRow {
     pub identity_signing_key: Option<String>,
     pub signed_pre_key:       String,
     pub signed_pre_key_sig:   String,
+    pub updated_at:           chrono::NaiveDateTime,
 }
 
 #[derive(Debug, sqlx::FromRow)]

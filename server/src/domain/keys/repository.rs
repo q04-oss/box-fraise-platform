@@ -86,7 +86,7 @@ pub async fn upsert_user_keys(
 
 pub async fn find_user_keys(pool: &PgPool, user_id: UserId) -> AppResult<Option<UserKeysRow>> {
     sqlx::query_as(
-        "SELECT user_id, identity_key, identity_signing_key, signed_pre_key, signed_pre_key_sig
+        "SELECT user_id, identity_key, identity_signing_key, signed_pre_key, signed_pre_key_sig, updated_at
          FROM user_keys
          WHERE user_id = $1",
     )
