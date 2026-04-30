@@ -142,11 +142,22 @@ enum StampPageState<'a> {
     Error(&'a str),
 }
 
+/// Escapes the five HTML metacharacters. Applied to every value interpolated
+/// into HTML responses — user display names, operator-configured strings, and
+/// error messages — so injection is structurally impossible regardless of content.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+     .replace('<', "&lt;")
+     .replace('>', "&gt;")
+     .replace('"', "&quot;")
+     .replace('\'', "&#x27;")
+}
+
 fn stamp_page(state: StampPageState) -> Html<String> {
     let (icon, heading, body_html) = match &state {
         StampPageState::Ok(r) => {
             let reward_line = if r.reward_available {
-                format!("<p class=\"reward\">🎁 Reward available: {}</p>", r.reward_description)
+                format!("<p class=\"reward\">🎁 Reward available: {}</p>", html_escape(&r.reward_description))
             } else {
                 String::new()
             };
@@ -157,7 +168,7 @@ fn stamp_page(state: StampPageState) -> Html<String> {
                     "<p class=\"name\">{}</p>\
                      <p class=\"balance\">{} steeps</p>\
                      {reward_line}",
-                    r.customer_name, r.new_balance,
+                    html_escape(&r.customer_name), r.new_balance,
                 ),
             )
         }
@@ -169,7 +180,7 @@ fn stamp_page(state: StampPageState) -> Html<String> {
         StampPageState::Error(msg) => (
             "✗",
             "Could not record steep",
-            format!("<p class=\"error\">{msg}</p>"),
+            format!("<p class=\"error\">{}</p>", html_escape(msg)),
         ),
     };
 
