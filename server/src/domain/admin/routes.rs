@@ -1,106 +1,113 @@
-﻿/// Admin â€” operator-authenticated endpoints for shop management.
+/// Admin — operator-authenticated endpoints for shop management.
 ///
 /// Security model:
 ///   - All routes require a valid user JWT (RequireUser) PLUS a PIN verified
-///     at request time via constant-time comparison. The PIN is never stored in
-///     the JWT â€” it must be re-supplied on every admin request.
-///   - Admin PIN â†’ full access.
-///   - Chocolatier PIN â†’ catalog and order management only.
-///   - Supplier PIN â†’ read-only order list.
-///   - PINs are hashed with bcrypt in production; the config holds the hash.
-///     For the MVP the raw value is compared constant-time to avoid timing leaks.
+///     at request time via bcrypt. PINs are hashed at startup in AppState::new()
+///     so raw PIN values are never read after server boot.
+///   - Admin PIN → full access.
+///   - Chocolatier PIN → catalog and order management only.
+///   - Supplier PIN → read-only order list.
+///   - Failed PIN attempts are written to audit_events for brute-force detection.
 use axum::{
     extract::{Path, Query, State},
+    http::HeaderMap,
     routing::{get, patch, post},
     Json, Router,
 };
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
-use secrecy::ExposeSecret;
-
 use crate::{
     app::AppState,
+    audit,
     error::{AppError, AppResult},
-    http::extractors::auth::RequireUser,
+    http::{extractors::auth::RequireUser, middleware::rate_limit::client_ip},
     types::{OrderId, UserId},
 };
 
 pub fn router() -> Router<AppState> {
     Router::new()
         // Orders
-        .route("/api/admin/orders",              get(list_orders))
-        .route("/api/admin/orders/{id}/status",   patch(set_order_status))
-        .route("/api/admin/orders/{id}/assign",   post(assign_worker))
+        .route("/api/admin/orders", get(list_orders))
+        .route("/api/admin/orders/{id}/status", patch(set_order_status))
+        .route("/api/admin/orders/{id}/assign", post(assign_worker))
         // NFC
         .route("/api/admin/nfc/verify/{device_id}", post(admin_nfc_verify))
         // Users
-        .route("/api/admin/users",               get(list_users))
-        .route("/api/admin/users/{id}/tier",      patch(set_user_tier))
+        .route("/api/admin/users", get(list_users))
+        .route("/api/admin/users/{id}/tier", patch(set_user_tier))
         // Catalog
-        .route("/api/admin/varieties",           get(list_varieties_admin))
+        .route("/api/admin/varieties", get(list_varieties_admin))
         .route("/api/admin/varieties/{id}/stock", patch(set_stock))
         // Businesses
-        .route("/api/admin/businesses",                       get(list_businesses_admin))
-        .route("/api/admin/businesses/{id}/verify",           post(verify_business))
-        .route("/api/admin/businesses/{id}/loyalty-config",   post(set_loyalty_config))
+        .route("/api/admin/businesses", get(list_businesses_admin))
+        .route("/api/admin/businesses/{id}/verify", post(verify_business))
+        .route(
+            "/api/admin/businesses/{id}/loyalty-config",
+            post(set_loyalty_config),
+        )
 }
 
-// â”€â”€ PIN extraction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── PIN extraction ────────────────────────────────────────────────────────────
 
 /// Every admin request must include X-Admin-Pin header.
-/// On success, emits a structured audit event (method + path + role).
-fn require_admin_pin(
-    headers: &axum::http::HeaderMap,
-    cfg:     &crate::config::Config,
-    method:  &str,
-    path:    &str,
+///
+/// Uses bcrypt::verify against hashes pre-computed in AppState::new() — the raw
+/// PIN strings from Config are never accessed at request time. bcrypt::verify is
+/// CPU-bound (~100 ms) so it runs inside spawn_blocking.
+///
+/// On rejection: writes to audit_events (queryable for brute-force detection)
+/// and logs at WARN. On success: logs at INFO with the resolved role.
+async fn require_admin_pin(
+    headers: &HeaderMap,
+    state: &AppState,
+    method: &str,
+    path: &str,
 ) -> AppResult<AdminRole> {
     let pin = headers
         .get("x-admin-pin")
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| AppError::bad_request("X-Admin-Pin header required"))?;
+        .ok_or_else(|| AppError::bad_request("X-Admin-Pin header required"))?
+        .to_owned();
 
-    let role = if constant_time_eq(cfg.admin_pin.expose_secret().as_bytes(), pin.as_bytes()) {
-        AdminRole::Admin
-    } else if constant_time_eq(cfg.chocolatier_pin.expose_secret().as_bytes(), pin.as_bytes()) {
-        AdminRole::Chocolatier
-    } else if constant_time_eq(cfg.supplier_pin.expose_secret().as_bytes(), pin.as_bytes()) {
-        AdminRole::Supplier
-    } else {
-        // Log failed attempts — useful for detecting brute-force
-        tracing::warn!(method, path, "admin PIN rejected");
-        return Err(AppError::Forbidden);
-    };
+    let admin_hash = state.pin_hashes.admin.clone();
+    let chocolatier_hash = state.pin_hashes.chocolatier.clone();
+    let supplier_hash = state.pin_hashes.supplier.clone();
 
-    // Structured audit event — role is logged, PIN is never logged.
-    tracing::info!(method, path, role = ?role, "admin action authorised");
+    let role: Option<AdminRole> = tokio::task::spawn_blocking(move || {
+        if bcrypt::verify(&pin, &admin_hash).unwrap_or(false) {
+            Some(AdminRole::Admin)
+        } else if bcrypt::verify(&pin, &chocolatier_hash).unwrap_or(false) {
+            Some(AdminRole::Chocolatier)
+        } else if bcrypt::verify(&pin, &supplier_hash).unwrap_or(false) {
+            Some(AdminRole::Supplier)
+        } else {
+            None
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("bcrypt verify: {e}")))?;
 
-    Ok(role)
-}
-
-/// Constant-time secret comparison that eliminates length-based timing side-channels.
-///
-/// `ring::constant_time::verify_slices_are_equal` is constant-time for equal-length
-/// inputs but returns immediately when lengths differ, leaking PIN length.
-/// HMAC-normalising both inputs (same random key → fixed 32-byte MACs) removes
-/// that oracle: the final comparison is always between 32-byte values.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    use ring::{
-        hmac::{self, Key, HMAC_SHA256},
-        rand::{SecureRandom, SystemRandom},
-    };
-    let rng = SystemRandom::new();
-    let mut key_bytes = [0u8; 32];
-    // Fill can only fail if the OS entropy source fails — treat that as non-equal.
-    if rng.fill(&mut key_bytes).is_err() {
-        return false;
+    match role {
+        Some(r) => {
+            tracing::info!(method, path, role = ?r, "admin action authorised");
+            Ok(r)
+        }
+        None => {
+            let ip = client_ip(headers, None);
+            tracing::warn!(method, path, "admin PIN rejected");
+            audit::write(
+                &state.db,
+                None,
+                None,
+                "admin.pin_rejected",
+                serde_json::json!({ "method": method, "path": path }),
+                Some(ip),
+            )
+            .await;
+            Err(AppError::Forbidden)
+        }
     }
-    let key   = Key::new(HMAC_SHA256, &key_bytes);
-    let mac_a = hmac::sign(&key, a);
-    let mac_b = hmac::sign(&key, b);
-    // Both MACs are 32 bytes — XOR-accumulate is provably constant-time for equal-length slices.
-    mac_a.as_ref().iter().zip(mac_b.as_ref()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -110,26 +117,26 @@ enum AdminRole {
     Admin,
 }
 
-// â”€â”€ Order management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Order management ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct OrderFilter {
     status: Option<String>,
-    limit:  Option<i64>,
+    limit: Option<i64>,
 }
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 struct AdminOrderRow {
-    id:           OrderId,
-    user_id:      UserId,
-    variety_id:   i32,
+    id: OrderId,
+    user_id: UserId,
+    variety_id: i32,
     variety_name: String,
-    quantity:     i32,
-    total_cents:  i64,
-    status:       String,
-    worker_id:    Option<i32>,
-    slot_time:    Option<String>,
-    created_at:   NaiveDateTime,
+    quantity: i32,
+    total_cents: i64,
+    status: String,
+    worker_id: Option<i32>,
+    slot_time: Option<String>,
+    created_at: NaiveDateTime,
 }
 
 async fn list_orders(
@@ -138,11 +145,10 @@ async fn list_orders(
     Query(filter): Query<OrderFilter>,
     method: axum::http::Method,
     uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
 ) -> AppResult<Json<Vec<AdminOrderRow>>> {
-    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
-    // Suppliers and above can read orders.
-    let _ = role;
+    let role = require_admin_pin(&headers, &state, method.as_str(), uri.path()).await?;
+    let _ = role; // Suppliers and above can read orders.
 
     let limit = filter.limit.unwrap_or(100).min(500);
 
@@ -170,7 +176,14 @@ struct SetStatusBody {
     status: String,
 }
 
-const VALID_ORDER_STATUSES: &[&str] = &["pending", "confirmed", "preparing", "ready", "collected", "cancelled"];
+const VALID_ORDER_STATUSES: &[&str] = &[
+    "pending",
+    "confirmed",
+    "preparing",
+    "ready",
+    "collected",
+    "cancelled",
+];
 
 async fn set_order_status(
     State(state): State<AppState>,
@@ -178,10 +191,10 @@ async fn set_order_status(
     Path(order_id): Path<OrderId>,
     method: axum::http::Method,
     uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     Json(body): Json<SetStatusBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
+    let role = require_admin_pin(&headers, &state, method.as_str(), uri.path()).await?;
     if role < AdminRole::Chocolatier {
         return Err(AppError::Forbidden);
     }
@@ -190,14 +203,12 @@ async fn set_order_status(
         return Err(AppError::bad_request("invalid status value"));
     }
 
-    let result = sqlx::query(
-        "UPDATE orders SET status = $1 WHERE id = $2",
-    )
-    .bind(&body.status)
-    .bind(order_id)
-    .execute(&state.db)
-    .await
-    .map_err(AppError::Db)?;
+    let result = sqlx::query("UPDATE orders SET status = $1 WHERE id = $2")
+        .bind(&body.status)
+        .bind(order_id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::Db)?;
 
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound);
@@ -217,22 +228,20 @@ async fn assign_worker(
     Path(order_id): Path<OrderId>,
     method: axum::http::Method,
     uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     Json(body): Json<AssignWorkerBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
+    let role = require_admin_pin(&headers, &state, method.as_str(), uri.path()).await?;
     if role < AdminRole::Chocolatier {
         return Err(AppError::Forbidden);
     }
 
-    let result = sqlx::query(
-        "UPDATE orders SET worker_id = $1 WHERE id = $2",
-    )
-    .bind(body.worker_id)
-    .bind(order_id)
-    .execute(&state.db)
-    .await
-    .map_err(AppError::Db)?;
+    let result = sqlx::query("UPDATE orders SET worker_id = $1 WHERE id = $2")
+        .bind(body.worker_id)
+        .bind(order_id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::Db)?;
 
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound);
@@ -241,19 +250,17 @@ async fn assign_worker(
     Ok(Json(serde_json::json!({ "worker_id": body.worker_id })))
 }
 
-// â”€â”€ NFC verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── NFC verification ──────────────────────────────────────────────────────────
 
-/// Admin-level NFC verification â€” marks a device as verified by a shop operator
-/// who has physically inspected the NFC tag.
 async fn admin_nfc_verify(
     State(state): State<AppState>,
     RequireUser(_user_id): RequireUser,
     Path(device_id): Path<i32>,
     method: axum::http::Method,
     uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
 ) -> AppResult<Json<serde_json::Value>> {
-    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
+    let role = require_admin_pin(&headers, &state, method.as_str(), uri.path()).await?;
     if role < AdminRole::Admin {
         return Err(AppError::Forbidden);
     }
@@ -275,22 +282,22 @@ async fn admin_nfc_verify(
     Ok(Json(serde_json::json!({ "nfc_verified": true })))
 }
 
-// â”€â”€ User management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── User management ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct UserFilter {
-    q:     Option<String>,
+    q: Option<String>,
     limit: Option<i64>,
 }
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 struct AdminUserRow {
-    id:                i32,
-    email:             Option<String>,
-    display_name:      Option<String>,
-    tier:              Option<String>,
+    id: i32,
+    email: Option<String>,
+    display_name: Option<String>,
+    tier: Option<String>,
     identity_verified: bool,
-    created_at:        NaiveDateTime,
+    created_at: NaiveDateTime,
 }
 
 async fn list_users(
@@ -299,9 +306,9 @@ async fn list_users(
     Query(filter): Query<UserFilter>,
     method: axum::http::Method,
     uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
 ) -> AppResult<Json<Vec<AdminUserRow>>> {
-    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
+    let role = require_admin_pin(&headers, &state, method.as_str(), uri.path()).await?;
     if role < AdminRole::Admin {
         return Err(AppError::Forbidden);
     }
@@ -330,7 +337,14 @@ struct SetTierBody {
     tier: String,
 }
 
-const VALID_TIERS: &[&str] = &["explorer", "maison", "reserve", "atelier", "distillery", "commune"];
+const VALID_TIERS: &[&str] = &[
+    "explorer",
+    "maison",
+    "reserve",
+    "atelier",
+    "distillery",
+    "commune",
+];
 
 async fn set_user_tier(
     State(state): State<AppState>,
@@ -338,10 +352,10 @@ async fn set_user_tier(
     Path(target_id): Path<i32>,
     method: axum::http::Method,
     uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     Json(body): Json<SetTierBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
+    let role = require_admin_pin(&headers, &state, method.as_str(), uri.path()).await?;
     if role < AdminRole::Admin {
         return Err(AppError::Forbidden);
     }
@@ -364,16 +378,16 @@ async fn set_user_tier(
     Ok(Json(serde_json::json!({ "tier": body.tier })))
 }
 
-// â”€â”€ Catalog management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Catalog management ────────────────────────────────────────────────────────
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 struct AdminVarietyRow {
-    id:           i32,
-    name:         String,
-    price_cents:  i64,
-    stock:        i32,
-    available:    bool,
-    business_id:  Option<i32>,
+    id: i32,
+    name: String,
+    price_cents: i64,
+    stock: i32,
+    available: bool,
+    business_id: Option<i32>,
 }
 
 async fn list_varieties_admin(
@@ -381,9 +395,9 @@ async fn list_varieties_admin(
     RequireUser(_user_id): RequireUser,
     method: axum::http::Method,
     uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
 ) -> AppResult<Json<Vec<AdminVarietyRow>>> {
-    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
+    let role = require_admin_pin(&headers, &state, method.as_str(), uri.path()).await?;
     if role < AdminRole::Chocolatier {
         return Err(AppError::Forbidden);
     }
@@ -411,10 +425,10 @@ async fn set_stock(
     Path(variety_id): Path<i32>,
     method: axum::http::Method,
     uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     Json(body): Json<SetStockBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
+    let role = require_admin_pin(&headers, &state, method.as_str(), uri.path()).await?;
     if role < AdminRole::Chocolatier {
         return Err(AppError::Forbidden);
     }
@@ -423,14 +437,12 @@ async fn set_stock(
         return Err(AppError::bad_request("stock cannot be negative"));
     }
 
-    let result = sqlx::query(
-        "UPDATE catalog_varieties SET stock = $1 WHERE id = $2",
-    )
-    .bind(body.stock)
-    .bind(variety_id)
-    .execute(&state.db)
-    .await
-    .map_err(AppError::Db)?;
+    let result = sqlx::query("UPDATE catalog_varieties SET stock = $1 WHERE id = $2")
+        .bind(body.stock)
+        .bind(variety_id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::Db)?;
 
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound);
@@ -439,12 +451,12 @@ async fn set_stock(
     Ok(Json(serde_json::json!({ "stock": body.stock })))
 }
 
-// â”€â”€ Business verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Business verification ─────────────────────────────────────────────────────
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 struct AdminBusinessRow {
-    id:       i32,
-    name:     String,
+    id: i32,
+    name: String,
     verified: bool,
     owner_id: i32,
     created_at: NaiveDateTime,
@@ -455,9 +467,9 @@ async fn list_businesses_admin(
     RequireUser(_user_id): RequireUser,
     method: axum::http::Method,
     uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
 ) -> AppResult<Json<Vec<AdminBusinessRow>>> {
-    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
+    let role = require_admin_pin(&headers, &state, method.as_str(), uri.path()).await?;
     if role < AdminRole::Admin {
         return Err(AppError::Forbidden);
     }
@@ -481,20 +493,18 @@ async fn verify_business(
     Path(business_id): Path<i32>,
     method: axum::http::Method,
     uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
 ) -> AppResult<Json<serde_json::Value>> {
-    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
+    let role = require_admin_pin(&headers, &state, method.as_str(), uri.path()).await?;
     if role < AdminRole::Admin {
         return Err(AppError::Forbidden);
     }
 
-    let result = sqlx::query(
-        "UPDATE businesses SET verified = true WHERE id = $1",
-    )
-    .bind(business_id)
-    .execute(&state.db)
-    .await
-    .map_err(AppError::Db)?;
+    let result = sqlx::query("UPDATE businesses SET verified = true WHERE id = $1")
+        .bind(business_id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::Db)?;
 
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound);
@@ -507,28 +517,28 @@ async fn verify_business(
 
 #[derive(Deserialize)]
 struct SetLoyaltyConfigBody {
-    steeps_per_reward:  i32,
+    steeps_per_reward: i32,
     reward_description: String,
 }
 
-/// Creates or replaces the loyalty programme configuration for a business.
-/// Required before any customer can earn steeps at that business.
 async fn set_loyalty_config(
-    State(state):      State<AppState>,
+    State(state): State<AppState>,
     RequireUser(_uid): RequireUser,
     Path(business_id): Path<i32>,
-    method:            axum::http::Method,
-    uri:               axum::http::Uri,
-    headers:           axum::http::HeaderMap,
-    Json(body):        Json<SetLoyaltyConfigBody>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    Json(body): Json<SetLoyaltyConfigBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
+    let role = require_admin_pin(&headers, &state, method.as_str(), uri.path()).await?;
     if role < AdminRole::Admin {
         return Err(AppError::Forbidden);
     }
 
     if body.steeps_per_reward < 1 || body.steeps_per_reward > 100 {
-        return Err(AppError::bad_request("steeps_per_reward must be between 1 and 100"));
+        return Err(AppError::bad_request(
+            "steeps_per_reward must be between 1 and 100",
+        ));
     }
     let description = body.reward_description.trim();
     if description.is_empty() {
@@ -541,7 +551,7 @@ async fn set_loyalty_config(
          ON CONFLICT (business_id) DO UPDATE
              SET steeps_per_reward  = EXCLUDED.steeps_per_reward,
                  reward_description = EXCLUDED.reward_description,
-                 updated_at         = now()"
+                 updated_at         = now()",
     )
     .bind(business_id)
     .bind(body.steeps_per_reward)

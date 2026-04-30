@@ -3,7 +3,24 @@
 -- Captured from the live Railway database (PostgreSQL 18.3) via pg_dump.
 -- This establishes the baseline schema before the numbered migrations (001+)
 -- are applied. Run sqlx migrate run from a clean database to reproduce the
--- full schema from this file plus migrations 001-007.
+-- full schema from this file plus all later migrations.
+--
+-- WARNING: Do not split this file. It is recorded by checksum in _sqlx_migrations
+-- on the live database. Splitting or renaming it will break the next deploy.
+-- See migrations/README.md for the logical domain structure.
+--
+-- Domain sections in this file (search for "-- === DOMAIN:" to jump):
+--   === DOMAIN: TYPES           — ENUM types used across the schema
+--   === DOMAIN: AUTH            — users, sessions, push tokens
+--   === DOMAIN: DEVICES         — device_attestations, device_pairing_tokens, devices
+--   === DOMAIN: BUSINESSES      — businesses, locations, employment_contracts
+--   === DOMAIN: ORDERS          — orders, catalog_varieties, time_slots, batches
+--   === DOMAIN: LOYALTY         — loyalty_events (see also migrations 004, 006)
+--   === DOMAIN: SOCIAL          — connections, collectifs, campaigns, events
+--   === DOMAIN: ART             — artworks, drops, art_*, portrait_tokens
+--   === DOMAIN: FINANCIAL       — earnings_ledger, credit_transactions, memberships
+--   === DOMAIN: MESSAGING       — conversation_archives, platform_messages
+--   === DOMAIN: CONSTRAINTS     — all ALTER TABLE / FK / INDEX statements
 --
 -- Railway-specific artifacts removed: \restrict token, drizzle migration
 -- tracking schema (__drizzle_migrations), search_path override.

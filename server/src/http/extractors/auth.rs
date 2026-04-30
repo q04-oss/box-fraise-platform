@@ -20,9 +20,9 @@ use sqlx::FromRow;
 
 use crate::{
     app::AppState,
-    auth::{self, Claims},
     auth::device::{parse_auth_header, verify_signature},
     auth::staff::{self as staff_auth, StaffClaims},
+    auth::{self, Claims},
     error::AppError,
     types::UserId,
 };
@@ -46,8 +46,7 @@ where
             .await
             .map_err(|_| AppError::Unauthorized)?;
 
-        let claims = auth::verify_token(bearer.token(), &app.cfg)
-            .ok_or(AppError::Unauthorized)?;
+        let claims = auth::verify_token(bearer.token(), &app.cfg).ok_or(AppError::Unauthorized)?;
 
         if auth::check_revoked(&app.redis, &app.revoked, &claims.jti).await {
             return Err(AppError::Unauthorized);
@@ -88,7 +87,7 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, AppError> {
         match RequireUser::from_request_parts(parts, state).await {
             Ok(RequireUser(id)) => Ok(OptionalAuth(Some(id))),
-            Err(_)              => Ok(OptionalAuth(None)),
+            Err(_) => Ok(OptionalAuth(None)),
         }
     }
 }
@@ -97,10 +96,11 @@ where
 
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
-    pub id:      i32,
+    pub id: i32,
     pub address: String,
-    pub role:    String,
+    pub role: String,
     pub user_id: Option<UserId>,
+    pub business_id: Option<i32>,
 }
 
 pub struct RequireDevice(pub DeviceInfo);
@@ -127,13 +127,14 @@ where
 
         #[derive(FromRow)]
         struct Row {
-            id:      i32,
-            role:    String,
+            id: i32,
+            role: String,
             user_id: Option<UserId>,
+            business_id: Option<i32>,
         }
 
         let row: Option<Row> = sqlx::query_as(
-            "SELECT id, role, user_id \
+            "SELECT id, role, user_id, business_id \
              FROM devices \
              WHERE LOWER(device_address) = LOWER($1) \
              LIMIT 1",
@@ -146,10 +147,11 @@ where
         let row = row.ok_or(AppError::Unauthorized)?;
 
         Ok(RequireDevice(DeviceInfo {
-            id:      row.id,
+            id: row.id,
             address: recovered,
-            role:    row.role,
+            role: row.role,
             user_id: row.user_id,
+            business_id: row.business_id,
         }))
     }
 }
@@ -164,8 +166,12 @@ where
 pub struct RequireStaff(pub StaffClaims);
 
 impl RequireStaff {
-    pub fn user_id(&self)     -> UserId { self.0.user_id }
-    pub fn business_id(&self) -> i32    { self.0.business_id }
+    pub fn user_id(&self) -> UserId {
+        self.0.user_id
+    }
+    pub fn business_id(&self) -> i32 {
+        self.0.business_id
+    }
 }
 
 impl<S> FromRequestParts<S> for RequireStaff

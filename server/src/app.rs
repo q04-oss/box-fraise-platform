@@ -1,10 +1,19 @@
 use std::sync::Arc;
 
-use axum::{middleware, Router};
 use axum::http::{header, HeaderName, HeaderValue};
+use axum::{middleware, Router};
 use deadpool_redis::Pool as RedisPool;
 use secrecy::ExposeSecret;
 use sqlx::PgPool;
+
+/// bcrypt hashes of the three operator PINs, computed once at startup.
+/// Storing hashes means the raw PIN values from `Config` are never read
+/// after `AppState::new()` returns — only the hashes travel with the state.
+pub struct PinHashes {
+    pub admin: String,
+    pub chocolatier: String,
+    pub supplier: String,
+}
 use tower_cookies::CookieManagerLayer;
 use tower_http::{
     compression::CompressionLayer,
@@ -31,25 +40,30 @@ use crate::{
 /// Shared application state — cheap to clone (all heap data is Arc-backed).
 #[derive(Clone)]
 pub struct AppState {
-    pub db:      PgPool,
-    pub cfg:     Arc<Config>,
+    pub db: PgPool,
+    pub cfg: Arc<Config>,
     pub revoked: RevokedTokens,
     /// In-process nonce cache — used as fallback when Redis is not configured.
     /// Safe for single-instance deployments only. Ignored when `redis` is Some.
-    pub nonces:  NonceCache,
+    pub nonces: NonceCache,
     /// Redis pool for distributed nonce deduplication.
     /// None when REDIS_URL is not set — falls back to `nonces`.
-    pub redis:   Option<RedisPool>,
-    pub rate:    SharedRateLimiter,
+    pub redis: Option<RedisPool>,
+    pub rate: SharedRateLimiter,
     /// Shared HTTP client — reuses the connection pool across all integration calls.
-    pub http:    reqwest::Client,
+    pub http: reqwest::Client,
+    /// bcrypt hashes of operator PINs. Raw PIN values are not kept in AppState.
+    pub pin_hashes: Arc<PinHashes>,
 }
 
 impl AppState {
     /// Borrow a Stripe client scoped to this request. Cheap — shares the
     /// underlying reqwest connection pool.
     pub fn stripe(&self) -> crate::integrations::stripe::StripeClient<'_> {
-        crate::integrations::stripe::StripeClient::new(self.cfg.stripe_secret_key.expose_secret(), &self.http)
+        crate::integrations::stripe::StripeClient::new(
+            self.cfg.stripe_secret_key.expose_secret(),
+            &self.http,
+        )
     }
 
     pub fn new(db: PgPool, cfg: Config) -> Self {
@@ -76,17 +90,32 @@ impl AppState {
             );
         }
 
+        // Hash PINs at startup (bcrypt cost 10, ~100 ms each).
+        // After this point the raw PIN strings in `cfg` are never read again.
+        let pin_hashes = {
+            let h = |secret: &secrecy::SecretString| -> String {
+                bcrypt::hash(secret.expose_secret(), 10)
+                    .expect("bcrypt hash of operator PIN failed — check PIN entropy")
+            };
+            Arc::new(PinHashes {
+                admin: h(&cfg.admin_pin),
+                chocolatier: h(&cfg.chocolatier_pin),
+                supplier: h(&cfg.supplier_pin),
+            })
+        };
+
         Self {
             db,
-            cfg:     Arc::new(cfg),
+            cfg: Arc::new(cfg),
             revoked: new_revoked_tokens(),
-            nonces:  new_nonce_cache(),
+            nonces: new_nonce_cache(),
             redis,
-            rate:    RateLimiter::new(),
-            http:    reqwest::Client::builder()
+            rate: RateLimiter::new(),
+            http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("reqwest client is infallible"),
+            pin_hashes,
         }
     }
 }
@@ -125,7 +154,6 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::tokens::routes::router())
         .merge(crate::domain::tournaments::routes::router())
         .merge(crate::domain::dorotka::routes::router())
-
         // ── Security middleware (innermost — applied last, runs first) ─────
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -140,7 +168,6 @@ pub fn build(state: AppState) -> Router {
             state.clone(),
             crate::http::middleware::log_rejections::log_rejections,
         ))
-
         // ── Observability ─────────────────────────────────────────────────
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(
@@ -149,10 +176,8 @@ pub fn build(state: AppState) -> Router {
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-
         // ── Transport ─────────────────────────────────────────────────────
         .layer(CompressionLayer::new())
-
         // ── Security headers ──────────────────────────────────────────────
         // Applied at the outermost layer so every response carries them.
         .layer(SetResponseHeaderLayer::overriding(
@@ -194,15 +219,13 @@ pub fn build(state: AppState) -> Router {
                  img-src 'self' data: blob:; \
                  connect-src 'self'; \
                  media-src 'self' blob:; \
-                 frame-ancestors 'none'"
+                 frame-ancestors 'none'",
             ),
         ))
-
         // ── Cookies ───────────────────────────────────────────────────────
         // Must wrap the full router so Cookies extractor is available in
         // all handlers, including the staff web app.
         .layer(CookieManagerLayer::new())
-
         // ── State ─────────────────────────────────────────────────────────
         .with_state(state)
 }

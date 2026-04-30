@@ -1,11 +1,14 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{error::{AppError, AppResult}, types::{OrderId, UserId}};
 use super::types::OrderRow;
+use crate::{
+    error::{AppError, AppResult},
+    types::{OrderId, UserId},
+};
 
 const ORDER_COLS: &str =
-    "id, user_id, variety_id, location_id, time_slot_id, batch_id, quantity,
+    "id, user_id, variety_id, location_id, business_id, time_slot_id, batch_id, quantity,
      chocolate, finish, is_gift, total_cents, stripe_payment_intent_id,
      status, nfc_token, rating, created_at";
 
@@ -35,22 +38,21 @@ pub async fn list_for_user(pool: &PgPool, user_id: UserId) -> AppResult<Vec<Orde
 
 /// Returns the current stock for a variety, locked for update.
 pub async fn lock_variety_stock(
-    tx:         &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     variety_id: i32,
 ) -> AppResult<i32> {
-    let (stock,): (i32,) =
-        sqlx::query_as("SELECT stock FROM varieties WHERE id = $1 FOR UPDATE")
-            .bind(variety_id)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(AppError::Db)?;
+    let (stock,): (i32,) = sqlx::query_as("SELECT stock FROM varieties WHERE id = $1 FOR UPDATE")
+        .bind(variety_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(AppError::Db)?;
     Ok(stock)
 }
 
 pub async fn decrement_stock(
-    tx:         &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     variety_id: i32,
-    qty:        i32,
+    qty: i32,
 ) -> AppResult<()> {
     sqlx::query("UPDATE varieties SET stock = stock - $1 WHERE id = $2")
         .bind(qty)
@@ -64,32 +66,34 @@ pub async fn decrement_stock(
 // ── Create ────────────────────────────────────────────────────────────────────
 
 pub async fn create(
-    tx:           &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    user_id:      Option<UserId>,
-    variety_id:   i32,
-    location_id:  i32,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Option<UserId>,
+    variety_id: i32,
+    location_id: i32,
+    business_id: Option<i32>,
     time_slot_id: Option<i32>,
-    quantity:     i32,
-    chocolate:    Option<&str>,
-    finish:       Option<&str>,
-    is_gift:      bool,
-    total_cents:  i32,
-    pi_id:        Option<&str>,
-    status:       &str,
+    quantity: i32,
+    chocolate: Option<&str>,
+    finish: Option<&str>,
+    is_gift: bool,
+    total_cents: i32,
+    pi_id: Option<&str>,
+    status: &str,
 ) -> AppResult<OrderRow> {
     let nfc_token = Uuid::new_v4().to_string();
 
     sqlx::query_as(&format!(
         "INSERT INTO orders
-             (user_id, variety_id, location_id, time_slot_id, quantity,
+             (user_id, variety_id, location_id, business_id, time_slot_id, quantity,
               chocolate, finish, is_gift, total_cents, stripe_payment_intent_id,
               status, nfc_token)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          RETURNING {ORDER_COLS}"
     ))
     .bind(user_id)
     .bind(variety_id)
     .bind(location_id)
+    .bind(business_id)
     .bind(time_slot_id)
     .bind(quantity)
     .bind(chocolate)
@@ -116,7 +120,12 @@ pub async fn set_status(pool: &PgPool, order_id: OrderId, status: &str) -> AppRe
     Ok(())
 }
 
-pub async fn set_rating(pool: &PgPool, order_id: OrderId, user_id: UserId, rating: i32) -> AppResult<()> {
+pub async fn set_rating(
+    pool: &PgPool,
+    order_id: OrderId,
+    user_id: UserId,
+    rating: i32,
+) -> AppResult<()> {
     let rows = sqlx::query(
         "UPDATE orders SET rating = $1
          WHERE id = $2 AND user_id = $3 AND status = 'collected' AND rating IS NULL",
@@ -129,16 +138,18 @@ pub async fn set_rating(pool: &PgPool, order_id: OrderId, user_id: UserId, ratin
     .map_err(AppError::Db)?;
 
     if rows.rows_affected() == 0 {
-        return Err(AppError::bad_request("order not found, not yours, not collected, or already rated"));
+        return Err(AppError::bad_request(
+            "order not found, not yours, not collected, or already rated",
+        ));
     }
     Ok(())
 }
 
 /// Atomically collect an order by NFC token. Returns the updated order.
 pub async fn collect_by_nfc(
-    pool:      &PgPool,
+    pool: &PgPool,
     nfc_token: &str,
-    user_id:   Option<UserId>,
+    user_id: Option<UserId>,
 ) -> AppResult<Option<OrderRow>> {
     // If user_id supplied, restrict to that user (self-collection).
     let row: Option<OrderRow> = if let Some(uid) = user_id {
@@ -169,7 +180,7 @@ pub async fn collect_by_nfc(
 // ── Time slot ─────────────────────────────────────────────────────────────────
 
 pub async fn increment_slot_booked(
-    tx:          &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     time_slot_id: i32,
 ) -> AppResult<()> {
     sqlx::query("UPDATE time_slots SET booked_count = booked_count + 1 WHERE id = $1")
@@ -183,11 +194,7 @@ pub async fn increment_slot_booked(
 // ── Referral ──────────────────────────────────────────────────────────────────
 
 /// Check if a referral code is valid and the user hasn't placed an order before.
-pub async fn check_referral(
-    pool:     &PgPool,
-    user_id:  UserId,
-    code:     &str,
-) -> AppResult<bool> {
+pub async fn check_referral(pool: &PgPool, user_id: UserId, code: &str) -> AppResult<bool> {
     // First order check.
     let has_orders: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM orders WHERE user_id = $1)")
@@ -196,15 +203,18 @@ pub async fn check_referral(
             .await
             .map_err(AppError::Db)?;
 
-    if has_orders { return Ok(false); }
+    if has_orders {
+        return Ok(false);
+    }
 
     // Valid referral code check.
-    let valid: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM referral_codes WHERE code = $1 AND active = true)")
-            .bind(code)
-            .fetch_one(pool)
-            .await
-            .map_err(AppError::Db)?;
+    let valid: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM referral_codes WHERE code = $1 AND active = true)",
+    )
+    .bind(code)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Db)?;
 
     Ok(valid)
 }
@@ -213,8 +223,8 @@ pub async fn check_referral(
 
 /// Atomically deduct from ad_balance_cents. Returns false if insufficient funds.
 pub async fn deduct_balance(
-    tx:          &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    user_id:     UserId,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: UserId,
     amount_cents: i32,
 ) -> AppResult<bool> {
     let rows = sqlx::query(

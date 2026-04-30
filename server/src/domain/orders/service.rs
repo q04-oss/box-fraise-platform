@@ -1,11 +1,11 @@
+use super::{
+    repository,
+    types::{CreateOrderBody, CreateOrderResponse, OrderRow, PaymentIntentResponse},
+};
 use crate::{
     app::AppState,
     error::{AppError, AppResult},
     types::{OrderId, StripeCustomerId, UserId},
-};
-use super::{
-    repository,
-    types::{CreateOrderBody, CreateOrderResponse, OrderRow, PaymentIntentResponse},
 };
 
 const REFERRAL_DISCOUNT: f64 = 0.10; // 10 %
@@ -13,9 +13,9 @@ const REFERRAL_DISCOUNT: f64 = 0.10; // 10 %
 // ── Create order ──────────────────────────────────────────────────────────────
 
 pub async fn create_order(
-    state:   &AppState,
+    state: &AppState,
     user_id: UserId,
-    body:    CreateOrderBody,
+    body: CreateOrderBody,
 ) -> AppResult<CreateOrderResponse> {
     // Validate variety and compute price inside a transaction so the stock
     // check and decrement are atomic.
@@ -60,11 +60,20 @@ pub async fn create_order(
         repository::increment_slot_booked(&mut tx, slot_id).await?;
     }
 
+    let business_id: Option<i32> =
+        sqlx::query_scalar("SELECT business_id FROM locations WHERE id = $1")
+            .bind(body.location_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(AppError::Db)?
+            .flatten();
+
     let order = repository::create(
         &mut tx,
         Some(user_id),
         body.variety_id,
         body.location_id,
+        business_id,
         body.time_slot_id,
         body.quantity,
         body.chocolate.as_deref(),
@@ -86,7 +95,11 @@ pub async fn create_order(
 
 // ── Confirm payment ───────────────────────────────────────────────────────────
 
-pub async fn confirm_order(state: &AppState, order_id: OrderId, user_id: UserId) -> AppResult<OrderRow> {
+pub async fn confirm_order(
+    state: &AppState,
+    order_id: OrderId,
+    user_id: UserId,
+) -> AppResult<OrderRow> {
     let order = repository::find_by_id(&state.db, order_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -121,20 +134,19 @@ pub async fn confirm_order(state: &AppState, order_id: OrderId, user_id: UserId)
 // ── Payment intent (without creating order) ───────────────────────────────────
 
 pub async fn create_payment_intent(
-    state:        &AppState,
-    user_id:      UserId,
-    variety_id:   i32,
-    quantity:     i32,
+    state: &AppState,
+    user_id: UserId,
+    variety_id: i32,
+    quantity: i32,
     referral_code: Option<&str>,
 ) -> AppResult<PaymentIntentResponse> {
-    let (stock, price): (i32, i32) = sqlx::query_as(
-        "SELECT stock, price_cents FROM varieties WHERE id = $1 AND active = true",
-    )
-    .bind(variety_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(AppError::Db)?
-    .ok_or(AppError::NotFound)?;
+    let (stock, price): (i32, i32) =
+        sqlx::query_as("SELECT stock, price_cents FROM varieties WHERE id = $1 AND active = true")
+            .bind(variety_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(AppError::Db)?
+            .ok_or(AppError::NotFound)?;
 
     if stock < quantity {
         return Err(AppError::bad_request("insufficient stock"));
@@ -165,9 +177,9 @@ pub async fn create_payment_intent(
 // ── Pay with ad_balance_cents ─────────────────────────────────────────────────
 
 pub async fn pay_with_balance(
-    state:   &AppState,
+    state: &AppState,
     user_id: UserId,
-    body:    super::types::CreateOrderBody,
+    body: super::types::CreateOrderBody,
 ) -> AppResult<OrderRow> {
     let mut tx = state.db.begin().await.map_err(AppError::Db)?;
 
@@ -191,11 +203,20 @@ pub async fn pay_with_balance(
 
     repository::decrement_stock(&mut tx, body.variety_id, body.quantity).await?;
 
+    let business_id: Option<i32> =
+        sqlx::query_scalar("SELECT business_id FROM locations WHERE id = $1")
+            .bind(body.location_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(AppError::Db)?
+            .flatten();
+
     let order = repository::create(
         &mut tx,
         Some(user_id),
         body.variety_id,
         body.location_id,
+        business_id,
         body.time_slot_id,
         body.quantity,
         body.chocolate.as_deref(),
