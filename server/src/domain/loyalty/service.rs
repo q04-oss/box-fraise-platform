@@ -8,7 +8,7 @@ use crate::{
     error::{AppError, AppResult},
     types::UserId,
 };
-use super::{repository, types::*};
+use super::{repository, types::{LoyaltyEventSource, *}};
 
 // Redis key namespacing --------------------------------------------------------
 // fraise:stamp:{uuid}           → "{business_id}:{user_id}"   (QR token)
@@ -204,7 +204,7 @@ pub async fn stamp_via_qr(
         other => other?,
     };
 
-    record_steep(state, customer_id, token_business, "qr_stamp", qr_token, Some(staff_user_id), ip).await
+    record_steep(state, customer_id, token_business, LoyaltyEventSource::QrStamp, qr_token, Some(staff_user_id), ip).await
 }
 
 // ── Stamp via HTML page (fallback — camera scan without app) ─────────────────
@@ -237,7 +237,7 @@ pub async fn stamp_via_html(
         return Err(e);
     }
     let (customer_id, token_business) = consume_qr_token_for_business(state, qr_token, claimed_bid).await?;
-    record_steep(state, customer_id, token_business, "qr_stamp", qr_token, None, ip).await
+    record_steep(state, customer_id, token_business, LoyaltyEventSource::QrStamp, qr_token, None, ip).await
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -301,7 +301,7 @@ async fn record_steep(
     state:       &AppState,
     customer_id: UserId,
     business_id: i32,
-    source:      &str,
+    source:      LoyaltyEventSource,
     idem_key:    &str,
     actor_id:    Option<UserId>,
     ip:          Option<std::net::IpAddr>,
@@ -342,7 +342,7 @@ async fn record_steep(
             "customer_id":    i32::from(customer_id),
             "new_balance":    current_balance,
             "reward_available": reward_available,
-            "source":         source,
+            "source":         source.as_str(),
         }),
         ip,
     ).await;
@@ -463,7 +463,7 @@ pub async fn redeem_nfc_sticker(
 
     // Idempotency key: sticker_uuid — unique per activation window (re-activation generates a new window).
     let result = record_steep(
-        state, user_id, business_id, "nfc_tap", sticker_uuid, None, ip,
+        state, user_id, business_id, LoyaltyEventSource::NfcTap, sticker_uuid, None, ip,
     ).await?;
 
     let _ = repository::increment_nfc_taps(&state.db, sticker_uuid).await;
@@ -494,7 +494,7 @@ pub async fn record_steep_from_webhook(
         &state.db,
         user_id,
         business_id,
-        "stripe_webhook",
+        LoyaltyEventSource::StripeWebhook,
         idempotency_key,
         serde_json::json!({ "stripe_payment_intent_id": idempotency_key }),
     ).await?;

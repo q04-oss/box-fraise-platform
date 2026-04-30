@@ -33,6 +33,37 @@ pub struct LoyaltyBalance {
     pub email_verified:     bool,
 }
 
+// ── Event source ─────────────────────────────────────────────────────────────
+
+/// The mechanism by which a loyalty steep was earned.
+///
+/// Must stay in sync with the CHECK constraint on loyalty_events.source.
+/// Adding a new variant requires both updating this enum AND a migration that
+/// extends the constraint. The enum enforces valid values at compile time;
+/// the constraint provides defense in depth at the database level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoyaltyEventSource {
+    /// Staff scanned the customer's QR code via the iOS app or staff PWA.
+    QrStamp,
+    /// Customer tapped an NFC sticker activated by staff.
+    NfcTap,
+    /// Auto-stamp credited on a confirmed in-app Stripe payment.
+    StripeWebhook,
+    /// Operator-initiated manual adjustment.
+    Manual,
+}
+
+impl LoyaltyEventSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::QrStamp       => "qr_stamp",
+            Self::NfcTap        => "nfc_tap",
+            Self::StripeWebhook => "stripe_webhook",
+            Self::Manual        => "manual",
+        }
+    }
+}
+
 // ── Events ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, sqlx::FromRow, Serialize)]

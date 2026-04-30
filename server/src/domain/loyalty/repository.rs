@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 
 use crate::{error::{AppError, AppResult}, types::UserId};
-use super::types::{LoyaltyConfig, LoyaltyEventRow};
+use super::types::{LoyaltyConfig, LoyaltyEventRow, LoyaltyEventSource};
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -113,11 +113,11 @@ pub async fn insert_steep(
     pool:            &PgPool,
     customer_id:     UserId,
     business_id:     i32,
-    source:          &str,
+    source:          LoyaltyEventSource,
     idempotency_key: &str,
     metadata:        serde_json::Value,
 ) -> AppResult<i64> {
-    insert_event(pool, customer_id, business_id, "steep_earned", source, idempotency_key, metadata)
+    insert_event(pool, customer_id, business_id, "steep_earned", source.as_str(), idempotency_key, metadata)
         .await
         .map_err(|e| match e {
             AppError::Db(sqlx::Error::Database(ref db)) if db.is_unique_violation() => {
