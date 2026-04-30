@@ -71,9 +71,12 @@ pub fn sanitise(raw: &str) -> anyhow::Result<String> {
         anyhow::bail!("query exceeds {MAX_CHARS} character limit");
     }
 
+    // Replace newlines and tabs with spaces — they are valid Unicode but create
+    // prompt injection surface by allowing attackers to append fake "system"
+    // turns or role separators within the user message.
     let clean: String = stripped
         .chars()
-        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+        .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
 
     Ok(clean)

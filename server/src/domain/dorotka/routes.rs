@@ -94,9 +94,11 @@ async fn ask(
 async fn rate_check(state: &AppState, ip: std::net::IpAddr) -> AppResult<()> {
     use deadpool_redis::redis;
 
+    // Fail closed — if Redis is unavailable, deny the request rather than
+    // allowing unlimited Anthropic calls. A Redis outage is a plausible
+    // attack precondition, not just an ops failure.
     let Some(pool) = state.redis.as_ref() else {
-        // No Redis — skip rate limiting. The global IP limiter is still active.
-        return Ok(());
+        return Err(AppError::Unprocessable("service temporarily unavailable".into()));
     };
 
     let key = format!("fraise:rate:dorotka:{ip}");
@@ -110,9 +112,14 @@ async fn rate_check(state: &AppState, ip: std::net::IpAddr) -> AppResult<()> {
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis INCR: {e}")))?;
 
     if count == 1 {
-        let _: () = redis::cmd("EXPIRE")
+        // If EXPIRE fails the key has no TTL and will block this IP forever —
+        // log the failure so it surfaces in ops rather than silently breaking.
+        if let Err(e) = redis::cmd("EXPIRE")
             .arg(&key).arg(60u64)
-            .query_async(&mut *conn).await.unwrap_or(());
+            .query_async::<_, ()>(&mut *conn).await
+        {
+            tracing::error!(key = %key, error = %e, "dorotka rate limit EXPIRE failed — key has no TTL");
+        }
     }
 
     if count > RATE_LIMIT {
