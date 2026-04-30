@@ -90,6 +90,7 @@ tokio              = { version = "1",   features = ["full"] }
 tower              = { version = "0.5", features = ["util"] }
 testcontainers     = "0.23"
 testcontainers-modules = { version = "0.11", features = ["redis"] }
+wiremock               = "0.6"
 
 [profile.release]
 opt-level     = 3

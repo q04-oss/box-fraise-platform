@@ -25,7 +25,7 @@ use crate::{
     app::AppState,
     crypto,
     error::{AppError, AppResult},
-    integrations::square::OAuthClient,
+    integrations::square::{ApiClient, OAuthClient},
 };
 use super::repository::{self, EncryptedTokenRow};
 
@@ -95,12 +95,17 @@ pub async fn connect_url(
 // ── Callback ──────────────────────────────────────────────────────────────────
 
 /// Handles the OAuth callback: validates CSRF state, exchanges the code for
-/// tokens, encrypts and stores them, writes audit event.
+/// tokens, resolves the merchant's active location, encrypts and stores them,
+/// writes audit event.
+///
+/// `square_base` is the Square API base URL. Production always passes
+/// `crate::integrations::square::BASE`. Tests pass a mock server URL.
 pub async fn handle_callback(
-    state:      &AppState,
-    code:       &str,
+    state:       &AppState,
+    code:        &str,
     state_token: &str,
-    ip:         Option<std::net::IpAddr>,
+    ip:          Option<std::net::IpAddr>,
+    square_base: &str,
 ) -> AppResult<i32> {
     // ── 1. Validate and consume CSRF state ────────────────────────────────────
     let business_id = consume_state(state, state_token).await?;
@@ -113,18 +118,17 @@ pub async fn handle_callback(
     let redirect_url = state.cfg.square_oauth_redirect_url.as_deref()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("SQUARE_OAUTH_REDIRECT_URL missing")))?;
 
-    let client = OAuthClient::new(app_id, app_secret.expose_secret(), redirect_url, &state.http);
+    let client = OAuthClient::new_with_base(
+        app_id, app_secret.expose_secret(), redirect_url, &state.http, square_base,
+    );
     let tokens = client.exchange_code(code).await?;
 
-    // ── 3. Square doesn't return the location ID in the token response.
-    //       The business must have SQUARE_LOCATION_ID configured, or we default
-    //       to the merchant's first location fetched on first order creation.
-    //       For now we store an empty string and populate on first use.
-    let square_location_id = state.cfg
-        .square_oauth_redirect_url // reusing this as a placeholder — see TODO below
-        .as_deref()
-        .map(|_| "") // TODO: call GET /v2/locations and pick the right one
-        .unwrap_or("");
+    // ── 3. Resolve the merchant's primary Square location ─────────────────────
+    // GET /v2/locations using the new access token — take the first ACTIVE one.
+    // If Square returns no active locations, fail with 502 so the operator
+    // knows their connection didn't fully complete and what to fix.
+    let api_client = ApiClient::new_with_base(&tokens.access_token, &state.http, square_base);
+    let square_location_id = api_client.get_first_active_location().await?;
 
     // ── 4. Encrypt and store ──────────────────────────────────────────────────
     let enc_key = encryption_key(state)?;

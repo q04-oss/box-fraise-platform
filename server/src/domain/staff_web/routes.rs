@@ -180,47 +180,128 @@ async fn scan_page(State(state): State<AppState>, cookies: Cookies) -> Response 
                     : 'scan the QR on the cup sticker';
             }}
 
-            // Start camera
-            navigator.mediaDevices.getUserMedia({{ video: {{ facingMode: 'environment' }} }})
-                .then(stream => {{ video.srcObject = stream; startScan(); }})
-                .catch(() => {{ statusEl.textContent = 'camera access denied'; }});
+            // Feature detection: BarcodeDetector is available on Chrome, Android, and Edge.
+            // iOS Safari does not support it — the file-input fallback handles those devices.
+            //
+            // Manual test steps for the iOS fallback:
+            //   1. Open /staff/scan on an iPhone in Safari (or iOS Chrome)
+            //   2. Confirm the camera viewfinder is replaced by a "scan QR code" button
+            //   3. Tap the button — iOS should open the camera in capture mode
+            //   4. Point at a customer QR stamp token → confirm stamp is recorded
+            //   5. Switch to "activate cup" mode → scan an NFC companion QR → confirm activation
+            if ('BarcodeDetector' in window) {{
+                navigator.mediaDevices.getUserMedia({{ video: {{ facingMode: 'environment' }} }})
+                    .then(stream => {{ video.srcObject = stream; startNativeScanner(); }})
+                    .catch(() => {{ statusEl.textContent = 'camera access denied'; }});
+            }} else {{
+                startFallbackScanner();
+            }}
 
-            function startScan() {{
-                if (!('BarcodeDetector' in window)) {{
-                    statusEl.textContent = 'QR scanning not supported — use Chrome or Safari 16+';
-                    return;
-                }}
+            // ── Native scanner (BarcodeDetector — Chrome, Android, Edge) ─────
+            function startNativeScanner() {{
                 const detector = new BarcodeDetector({{ formats: ['qr_code'] }});
                 async function tick() {{
                     if (!scanning) return;
                     try {{
                         const codes = await detector.detect(video);
                         for (const code of codes) {{
-                            let url;
-                            try {{ url = new URL(code.rawValue); }} catch {{ continue; }}
-
-                            if (mode === 'stamp') {{
-                                const t = url.searchParams.get('t');
-                                const b = parseInt(url.searchParams.get('b'));
-                                if (t && b === businessId) {{
-                                    scanning = false;
-                                    await doStamp(t);
-                                    return;
-                                }}
-                            }} else {{
-                                // activate cup — detect /nfc/{{uuid}} companion QR
-                                const match = url.pathname.match(/^\/nfc\/([a-f0-9-]{{36}})$/i);
-                                if (match) {{
-                                    scanning = false;
-                                    await doActivate(match[1]);
-                                    return;
-                                }}
-                            }}
+                            if (await handleCode(code.rawValue)) return;
                         }}
                     }} catch (_) {{}}
                     requestAnimationFrame(tick);
                 }}
                 requestAnimationFrame(tick);
+            }}
+
+            // ── Fallback scanner (file input + jsqr — iOS Safari) ─────────────
+            // <input type="file" capture="environment"> opens the device camera directly
+            // on iOS and returns the captured photo. jsqr decodes the QR from the image.
+            function startFallbackScanner() {{
+                video.style.display = 'none';
+                document.querySelector('.viewfinder').style.display = 'none';
+                statusEl.textContent = '';
+
+                const wrap = document.querySelector('.video-wrap');
+
+                const fileInput   = document.createElement('input');
+                fileInput.type    = 'file';
+                fileInput.accept  = 'image/*';
+                fileInput.capture = 'environment';
+                fileInput.id      = 'qr-file';
+                fileInput.style.display = 'none';
+                wrap.appendChild(fileInput);
+
+                const btn = document.createElement('button');
+                btn.textContent   = '\u{1F4F7}  scan QR code';
+                btn.style.cssText =
+                    'position:absolute;inset:0;width:100%;background:#1C1C1E;' +
+                    'color:#F7F5F2;border:none;border-radius:14px;font-size:.95rem;cursor:pointer';
+                btn.onclick = () => fileInput.click();
+                wrap.appendChild(btn);
+
+                fileInput.addEventListener('change', async (e) => {{
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    statusEl.textContent = 'decoding…';
+                    try {{
+                        const raw = await decodeQrFromImage(file);
+                        if (!await handleCode(raw)) {{
+                            statusEl.textContent = 'no matching QR found — tap to try again';
+                            e.target.value = '';
+                        }}
+                    }} catch (_) {{
+                        statusEl.textContent = 'could not read QR — tap to try again';
+                        e.target.value = '';
+                    }}
+                }});
+            }}
+
+            // Renders the captured image to a canvas and decodes with jsqr.
+            // jsQR is the global exported by the jsqr UMD bundle in <head>.
+            function decodeQrFromImage(file) {{
+                return new Promise((resolve, reject) => {{
+                    const img = new Image();
+                    const url = URL.createObjectURL(file);
+                    img.onload = () => {{
+                        URL.revokeObjectURL(url);
+                        const canvas  = document.createElement('canvas');
+                        canvas.width  = img.naturalWidth;
+                        canvas.height = img.naturalHeight;
+                        const ctx     = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0);
+                        const pixels  = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                        const code    = jsQR(pixels.data, pixels.width, pixels.height);
+                        if (code) {{ resolve(code.data); }}
+                        else      {{ reject(new Error('no QR')); }}
+                    }};
+                    img.onerror = () => {{ URL.revokeObjectURL(url); reject(new Error('load failed')); }};
+                    img.src = url;
+                }});
+            }}
+
+            // Shared QR URL handler — called by both scanner paths.
+            // Returns true if the code matched the current mode, false if not.
+            async function handleCode(rawValue) {{
+                let url;
+                try {{ url = new URL(rawValue); }} catch {{ return false; }}
+
+                if (mode === 'stamp') {{
+                    const t = url.searchParams.get('t');
+                    const b = parseInt(url.searchParams.get('b'));
+                    if (t && b === businessId) {{
+                        scanning = false;
+                        await doStamp(t);
+                        return true;
+                    }}
+                }} else {{
+                    const match = url.pathname.match(/^\/nfc\/([a-f0-9-]{{36}})$/i);
+                    if (match) {{
+                        scanning = false;
+                        await doActivate(match[1]);
+                        return true;
+                    }}
+                }}
+                return false;
             }}
 
             async function doStamp(token) {{
@@ -427,6 +508,11 @@ fn page(title: &str, content: &str) -> String {
 <meta name="apple-mobile-web-app-title" content="Staff">
 <link rel="manifest" href="/staff/manifest">
 <title>{title} · box fraise</title>
+<!-- jsqr 1.4.0 — QR decoder for iOS Safari fallback (BarcodeDetector unavailable on iOS).
+     Version and SRI hash are pinned; update both together if upgrading. -->
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"
+        integrity="sha384-b5Ya4Bq3qCyz39m2ISh+4DxjAIljdeFwK/BsXLuj9gugaNwAcj/ia15fxNZL9Nlx"
+        crossorigin="anonymous"></script>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}}
 :root{{

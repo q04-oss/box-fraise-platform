@@ -29,6 +29,12 @@ pub enum AppError {
     #[error("payment required")]
     PaymentRequired,
 
+    /// 502 — an upstream service (Square, Stripe, etc.) returned an error or
+    /// an unexpected response. The message is user-facing: it should explain
+    /// what failed and what the operator needs to do to fix it.
+    #[error("{0}")]
+    BadGateway(String),
+
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
 
@@ -60,6 +66,7 @@ impl IntoResponse for AppError {
             Self::Conflict(m)       => (StatusCode::CONFLICT,              m.clone()),
             Self::Unprocessable(m)  => (StatusCode::UNPROCESSABLE_ENTITY,  m.clone()),
             Self::PaymentRequired   => (StatusCode::PAYMENT_REQUIRED,      self.to_string()),
+            Self::BadGateway(m)     => (StatusCode::BAD_GATEWAY,           m.clone()),
             Self::Internal(e) => {
                 tracing::error!(error = %e, "internal server error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())

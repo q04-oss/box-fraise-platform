@@ -149,6 +149,49 @@ pub const SQUARE_SIGNING_KEY: &str = "test-square-signing-key-for-integration";
 pub const SQUARE_NOTIFICATION_URL: &str =
     "https://test.boxfraise.com/api/webhooks/square/orders";
 
+/// Full Square OAuth config — used by the OAuth callback integration test.
+/// Includes app credentials + token encryption key (64 hex chars = 32 bytes).
+pub fn test_config_with_square_oauth() -> Config {
+    Config {
+        square_app_id:               Some("sq0idp-test-app-id".to_string()),
+        square_app_secret:           Some(SecretString::from("test-app-secret")),
+        square_oauth_redirect_url:   Some("https://test.example.com/callback".to_string()),
+        // 64 hex chars = 32 bytes, required by AES-256-GCM encrypt
+        square_token_encryption_key: Some(SecretString::from(
+            "0101010101010101010101010101010101010101010101010101010101010101"
+        )),
+        ..test_config()
+    }
+}
+
+pub fn build_state_with_square_oauth(db: PgPool, redis: Option<RedisPool>) -> box_fraise_server::app::AppState {
+    use box_fraise_server::app::AppState;
+    AppState {
+        db,
+        cfg:     Arc::new(test_config_with_square_oauth()),
+        revoked: box_fraise_server::auth::new_revoked_tokens(),
+        nonces:  box_fraise_server::http::middleware::hmac::new_nonce_cache(),
+        redis,
+        rate:    box_fraise_server::http::middleware::rate_limit::RateLimiter::new(),
+        http:    reqwest::Client::new(),
+    }
+}
+
+/// Seeds a Square OAuth CSRF state token in Redis.
+/// Key: fraise:square-oauth-state:{token} → "{business_id}"
+pub async fn seed_oauth_csrf_state(redis_pool: &RedisPool, token: &str, business_id: i32) {
+    use deadpool_redis::redis;
+    let key = format!("fraise:square-oauth-state:{token}");
+    let mut conn = redis_pool.get().await.unwrap();
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(business_id.to_string())
+        .arg("EX").arg(600u64)
+        .query_async(&mut *conn)
+        .await
+        .unwrap();
+}
+
 pub fn test_config_with_square() -> Config {
     Config {
         square_app_id: Some("sq0idp-test".to_string()),

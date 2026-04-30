@@ -177,15 +177,18 @@ pub fn build(state: AppState) -> Router {
         ))
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,
-            // default-src 'self' covers the staff web app (inline scripts and styles
-            // are allowed because the pages are server-rendered with no external deps).
+            // default-src 'self' covers the staff web app.
+            // https://cdn.jsdelivr.net is added to script-src for jsqr (the QR decoder
+            // used as an iOS Safari fallback in the staff PWA). The SRI hash on the
+            // <script> tag ensures only the exact pinned version can execute — a CDN
+            // compromise cannot inject different code without breaking the hash check.
             // API responses are JSON — browsers do not enforce CSP on non-HTML responses.
-            // frame-ancestors 'none' is maintained to prevent clickjacking.
+            // frame-ancestors 'none' prevents clickjacking.
             HeaderValue::from_static(
                 "default-src 'self'; \
-                 script-src 'self' 'unsafe-inline'; \
+                 script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; \
                  style-src 'self' 'unsafe-inline'; \
-                 img-src 'self' data:; \
+                 img-src 'self' data: blob:; \
                  connect-src 'self'; \
                  media-src 'self' blob:; \
                  frame-ancestors 'none'"

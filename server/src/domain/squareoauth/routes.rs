@@ -61,7 +61,7 @@ async fn callback(
     let code  = match params.code  { Some(c) => c, None => return oauth_result_page(false, "missing code parameter") };
     let state_token = match params.state { Some(s) => s, None => return oauth_result_page(false, "missing state parameter") };
 
-    match service::handle_callback(&state, &code, &state_token, Some(addr.ip())).await {
+    match service::handle_callback(&state, &code, &state_token, Some(addr.ip()), crate::integrations::square::BASE).await {
         Ok(_)  => oauth_result_page(true,  ""),
         Err(AppError::Unauthorized) => oauth_result_page(false, "invalid or expired session — please try again"),
         Err(e) => {

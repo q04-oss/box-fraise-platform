@@ -23,7 +23,7 @@ use serde::Deserialize;
 
 use crate::error::{AppError, AppResult};
 
-const BASE: &str = "https://connect.squareup.com";
+pub const BASE: &str = "https://connect.squareup.com";
 
 // ── Shared response types ─────────────────────────────────────────────────────
 
@@ -52,6 +52,7 @@ pub struct OAuthClient<'a> {
     app_secret:   &'a str,
     redirect_url: &'a str,
     http:         &'a reqwest::Client,
+    base_url:     String,
 }
 
 /// The token set returned by Square after a successful OAuth exchange or refresh.
@@ -70,7 +71,19 @@ impl<'a> OAuthClient<'a> {
         redirect_url: &'a str,
         http:         &'a reqwest::Client,
     ) -> Self {
-        Self { app_id, app_secret, redirect_url, http }
+        Self { app_id, app_secret, redirect_url, http, base_url: BASE.to_string() }
+    }
+
+    /// Constructor for test injection — points at a mock server rather than
+    /// Square's production API. Production code always uses `new()`.
+    pub fn new_with_base(
+        app_id:       &'a str,
+        app_secret:   &'a str,
+        redirect_url: &'a str,
+        http:         &'a reqwest::Client,
+        base_url:     &str,
+    ) -> Self {
+        Self { app_id, app_secret, redirect_url, http, base_url: base_url.to_string() }
     }
 
     /// Exchanges an authorization code (from the OAuth callback) for an access
@@ -109,7 +122,7 @@ impl<'a> OAuthClient<'a> {
         }
 
         let resp = self.http
-            .post(format!("{BASE}/oauth2/token"))
+            .post(format!("{}/oauth2/token", self.base_url))
             .header("Square-Version", "2024-01-18")
             .json(&params.iter().cloned().collect::<HashMap<_, _>>())
             .send()
@@ -146,6 +159,7 @@ impl<'a> OAuthClient<'a> {
 pub struct ApiClient<'a> {
     access_token: &'a str,
     http:         &'a reqwest::Client,
+    base_url:     String,
 }
 
 #[derive(Debug, Clone)]
@@ -157,7 +171,44 @@ pub struct OrderLineItem {
 
 impl<'a> ApiClient<'a> {
     pub fn new(access_token: &'a str, http: &'a reqwest::Client) -> Self {
-        Self { access_token, http }
+        Self { access_token, http, base_url: BASE.to_string() }
+    }
+
+    /// Constructor for test injection — points at a mock server rather than
+    /// Square's production API. Production code always uses `new()`.
+    pub fn new_with_base(access_token: &'a str, http: &'a reqwest::Client, base_url: &str) -> Self {
+        Self { access_token, http, base_url: base_url.to_string() }
+    }
+
+    /// Fetches the merchant's Square locations and returns the first ACTIVE one.
+    ///
+    /// Called once during OAuth connect — the location_id is stored alongside
+    /// the encrypted tokens so order pushes don't need to fetch it each time.
+    /// Returns `AppError::BadGateway` if Square is unreachable or returns no
+    /// active locations, letting the operator know their connection is incomplete.
+    pub async fn get_first_active_location(&self) -> AppResult<String> {
+        let resp = self.http
+            .get(format!("{}/v2/locations", self.base_url))
+            .header("Authorization",  format!("Bearer {}", self.access_token))
+            .header("Square-Version", "2024-01-18")
+            .send()
+            .await
+            .map_err(|e| AppError::BadGateway(
+                format!("Square locations request failed — check your network and try again: {e}")
+            ))?;
+
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(AppError::BadGateway(format!(
+                "Square returned an error fetching locations: {}",
+                first_error(&text)
+            )));
+        }
+
+        let body = resp.text().await
+            .map_err(|e| AppError::BadGateway(format!("Square locations read body: {e}")))?;
+
+        parse_first_active_location(&body)
     }
 
     /// Creates a paid order on the merchant's Square POS/KDS.
@@ -195,7 +246,7 @@ impl<'a> ApiClient<'a> {
         });
 
         let resp = self.http
-            .post(format!("{BASE}/v2/orders"))
+            .post(format!("{}/v2/orders", self.base_url))
             .header("Authorization",  format!("Bearer {}", self.access_token))
             .header("Content-Type",   "application/json")
             .header("Square-Version", "2024-01-18")
@@ -219,6 +270,27 @@ impl<'a> ApiClient<'a> {
             .map(String::from)
             .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Square create_order: missing order.id")))
     }
+}
+
+// ── Location resolution ───────────────────────────────────────────────────────
+
+/// Extracts the first ACTIVE location ID from a Square `GET /v2/locations` body.
+///
+/// `pub(crate)` so unit tests can exercise this parsing logic directly without
+/// making HTTP calls. The HTTP layer is tested separately in the integration test.
+pub(crate) fn parse_first_active_location(body: &str) -> AppResult<String> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Square locations parse: {e}")))?;
+
+    v["locations"]
+        .as_array()
+        .and_then(|locs| locs.iter().find(|l| l["status"].as_str() == Some("ACTIVE")))
+        .and_then(|l| l["id"].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| AppError::BadGateway(
+            "Square account has no ACTIVE locations — ensure at least one location \
+             is active in your Square dashboard before connecting".to_string()
+        ))
 }
 
 // ── Webhook validation ────────────────────────────────────────────────────────
