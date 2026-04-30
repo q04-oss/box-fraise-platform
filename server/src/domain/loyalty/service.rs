@@ -8,8 +8,6 @@ use crate::{
     error::{AppError, AppResult},
     types::UserId,
 };
-// anyhow is used implicitly via AppError::Internal(anyhow::anyhow!(...))
-// — the crate is declared in Cargo.toml and re-exported through the error module.
 use super::{repository, types::{self, *}};
 
 // Redis key namespacing --------------------------------------------------------
@@ -96,7 +94,6 @@ pub async fn issue_qr_token(
     user_id:     UserId,
     business_id: i32,
 ) -> AppResult<QrTokenResponse> {
-    // Verify the business has loyalty configured before issuing a token.
     repository::get_config(&state.db, business_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -185,7 +182,7 @@ pub async fn stamp_via_qr(
         return Err(AppError::Forbidden);
     }
 
-    record_steep(state, customer_id, staff_business, "qr_stamp", qr_token, staff_user_id, ip).await
+    record_steep(state, customer_id, staff_business, "qr_stamp", qr_token, Some(staff_user_id), ip).await
 }
 
 // ── Stamp via HTML page (fallback — camera scan without app) ─────────────────
@@ -207,9 +204,7 @@ pub async fn stamp_via_html(
         return Err(AppError::Forbidden);
     }
 
-    // No staff actor for HTML path — pass a sentinel UserId.
-    let dummy_staff = UserId::from(0_i32);
-    record_steep(state, customer_id, token_business, "qr_stamp", qr_token, dummy_staff, ip).await
+    record_steep(state, customer_id, token_business, "qr_stamp", qr_token, None, ip).await
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -250,7 +245,7 @@ async fn record_steep(
     business_id: i32,
     source:      &str,
     idem_key:    &str,
-    actor_id:    UserId,
+    actor_id:    Option<UserId>,
     ip:          Option<std::net::IpAddr>,
 ) -> AppResult<StampResult> {
     repository::insert_event(
@@ -290,7 +285,7 @@ async fn record_steep(
 
     audit::write(
         &state.db,
-        Some(actor_id.into()),
+        actor_id.map(|id| id.into()),
         Some(business_id),
         "loyalty.steep_earned",
         serde_json::json!({
@@ -325,7 +320,6 @@ pub async fn activate_nfc_sticker(
     staff_business: i32,
     sticker_uuid:   &str,
 ) -> AppResult<()> {
-    // Register or validate ownership — returns Forbidden if it belongs to another business.
     repository::upsert_nfc_sticker(&state.db, sticker_uuid, staff_business).await?;
 
     let redis_pool = state.redis.as_ref()
@@ -393,11 +387,9 @@ pub async fn redeem_nfc_sticker(
 
     // Idempotency key: sticker_uuid — unique per activation window (re-activation generates a new window).
     let result = record_steep(
-        state, user_id, business_id, "qr_stamp", sticker_uuid,
-        UserId::from(0i32), ip,
+        state, user_id, business_id, "nfc_tap", sticker_uuid, None, ip,
     ).await?;
 
-    // Increment tap counter and log — non-fatal if it fails.
     let _ = repository::increment_nfc_taps(&state.db, sticker_uuid).await;
 
     audit::write(

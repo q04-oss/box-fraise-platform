@@ -48,8 +48,8 @@ pub fn router() -> Router<AppState> {
 
 // ── Root ──────────────────────────────────────────────────────────────────────
 
-async fn root(cookies: Cookies) -> Redirect {
-    if extract_claims(&cookies).is_some() {
+async fn root(State(state): State<AppState>, cookies: Cookies) -> Redirect {
+    if extract_claims(&cookies, &state.cfg).is_some() {
         Redirect::to("/staff/scan")
     } else {
         Redirect::to("/staff/login")
@@ -136,8 +136,8 @@ async fn login_submit(
 
 // ── Scan ──────────────────────────────────────────────────────────────────────
 
-async fn scan_page(cookies: Cookies) -> Response {
-    let Some(claims) = extract_claims(&cookies) else {
+async fn scan_page(State(state): State<AppState>, cookies: Cookies) -> Response {
+    let Some(claims) = extract_claims(&cookies, &state.cfg) else {
         return Redirect::to("/staff/login").into_response();
     };
 
@@ -326,7 +326,7 @@ async fn stamp(
     Json(body):   Json<StampBody>,
 ) -> Response {
     // Authenticate from cookie — JS never touches the token.
-    let claims = match extract_claims(&cookies) {
+    let claims = match extract_claims(&cookies, &state.cfg) {
         Some(c) => c,
         None    => return (
             StatusCode::UNAUTHORIZED,
@@ -407,22 +407,12 @@ async fn manifest() -> Response {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn extract_claims(cookies: &Cookies) -> Option<crate::auth::staff::StaffClaims> {
-    // We don't have AppState here so we can't call verify_staff_token directly.
-    // The JWT is self-contained — decode without state by reading the secret from
-    // the environment at call time. This avoids threading AppState through every
-    // cookie read. The secret is already validated at startup.
+fn extract_claims(
+    cookies: &Cookies,
+    cfg:     &crate::config::Config,
+) -> Option<crate::auth::staff::StaffClaims> {
     let token = cookies.get(COOKIE_NAME)?.value().to_owned();
-    let secret = std::env::var("STAFF_JWT_SECRET").ok()?;
-
-    use jsonwebtoken::{decode, DecodingKey, Validation};
-    decode::<crate::auth::staff::StaffClaims>(
-        &token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
-    )
-    .ok()
-    .map(|d| d.claims)
+    crate::auth::staff::verify_staff_token(&token, cfg)
 }
 
 /// Shared HTML shell — minimal, mobile-first, installable as PWA.

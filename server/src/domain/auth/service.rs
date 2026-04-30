@@ -1,8 +1,5 @@
 use secrecy::ExposeSecret;
-use uuid::Uuid;
-
 use std::net::IpAddr;
-
 use deadpool_redis::redis;
 use uuid::Uuid;
 
@@ -263,7 +260,6 @@ pub async fn verify_email(state: &AppState, token: &str) -> AppResult<String> {
     let user_id = UserId::from(user_id_raw);
     repository::set_verified(&state.db, user_id).await?;
 
-    // Fetch email for confirmation display.
     let user = repository::find_by_id(&state.db, user_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -283,7 +279,6 @@ pub async fn verify_email(state: &AppState, token: &str) -> AppResult<String> {
 /// Re-issues a verification token and resends the email.
 /// Rate-limited to one resend per 5 minutes per user.
 pub async fn resend_verification(state: &AppState, user_id: UserId, email: &str) -> AppResult<()> {
-    // Rate limit — one resend per RESEND_RATE_TTL seconds.
     if let Some(redis_pool) = state.redis.as_ref() {
         let key = format!("{RESEND_RATE_PREFIX}{}", i32::from(user_id));
         let mut conn = redis_pool.get().await

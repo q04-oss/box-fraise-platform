@@ -293,12 +293,10 @@ async fn complete_order_from_square_inner(
         return Ok(());
     }
 
-    // Mark completed.
     repository::update_order_status(&state.db, order.id, "completed").await?;
 
     let user_id = UserId::from(order.user_id);
 
-    // Credit the loyalty steep now that the drink has been collected.
     match loyalty::service::record_steep_from_webhook(
         state, user_id, order.business_id, square_order_id,
     ).await {
@@ -318,7 +316,6 @@ async fn complete_order_from_square_inner(
         None,
     ).await;
 
-    // Push notification to customer.
     if let Ok(Some(push_token)) = repository::get_user_push_token(&state.db, order.user_id).await {
         let business_name = repository::get_business_name(&state.db, order.business_id)
             .await
@@ -352,7 +349,6 @@ pub async fn onboard_stripe_connect(
     business_id: i32,
     ip:          Option<std::net::IpAddr>,
 ) -> AppResult<ConnectOnboardingResponse> {
-    // Fetch business email for the Connect account.
     let email: Option<String> = sqlx::query_scalar(
         "SELECT email FROM users
          WHERE id = (SELECT owner_id FROM businesses WHERE id = $1 LIMIT 1)"
