@@ -159,9 +159,6 @@ impl Config {
             apple_client_id:       optional("APPLE_CLIENT_ID"),
             cloudinary_cloud_name: optional("CLOUDINARY_CLOUD_NAME"),
 
-            // staff auth
-            staff_jwt_secret: require_secret("STAFF_JWT_SECRET")?,
-
             // public URL
             api_base_url: optional("API_BASE_URL")
                 .unwrap_or_else(|| "http://localhost:3001".to_string()),
