@@ -15,6 +15,29 @@ use super::{repository, types::{self, *}};
 // fraise:rate:loyalty-bal:{uid} → counter, EX 60              (balance rate limit)
 // fraise:rate:loyalty-stamp:{bid} → counter, EX 60            (stamp rate limit)
 
+// Lua script: atomically validate business ownership and consume a QR stamp token.
+//
+// Threat prevented: with plain GETDEL the token is destroyed before the
+// business_id check, so a rogue staff member from business B could burn a
+// customer's token intended for business A. This script only DELetes if
+// the stored business_id matches ARGV[1], leaving the token intact on mismatch.
+//
+// KEYS[1]: fraise:stamp:{token_uuid}
+// ARGV[1]: expected business_id (decimal string, e.g. "42")
+//
+// Return shape — Redis array:
+//   {0}          token not found, expired, or already consumed → Unauthorized
+//   {1}          token owned by a different business; NOT consumed → Forbidden
+//   {2, payload} success; token consumed; payload = "{biz_id}:{user_id}"
+const QR_CONSUME_LUA: &str = r#"
+local val = redis.call('GET', KEYS[1])
+if not val then return {0} end
+local stored_biz = string.match(val, '^(%d+):')
+if stored_biz ~= ARGV[1] then return {1} end
+redis.call('DEL', KEYS[1])
+return {2, val}
+"#;
+
 const QR_TOKEN_TTL_SECS: u64 = 300; // 5 minutes
 const BALANCE_RATE_LIMIT: i64 = 10; // per user per minute
 const STAMP_RATE_LIMIT:   i64 = 30; // per business per minute
@@ -164,25 +187,23 @@ pub async fn stamp_via_qr(
 ) -> AppResult<StampResult> {
     rate_check_stamp(state, staff_business).await?;
 
-    let (customer_id, token_business) = consume_qr_token(state, qr_token).await?;
+    let (customer_id, token_business) = match consume_qr_token_for_business(state, qr_token, staff_business).await {
+        Err(AppError::Forbidden) => {
+            // Token exists but belongs to a different business and was NOT consumed.
+            audit::write(
+                &state.db,
+                Some(staff_user_id.into()),
+                Some(staff_business),
+                "loyalty.cross_business_stamp_rejected",
+                serde_json::json!({ "staff_business_id": staff_business }),
+                ip,
+            ).await;
+            return Err(AppError::Forbidden);
+        }
+        other => other?,
+    };
 
-    if token_business != staff_business {
-        // Cross-business stamp attempt — audit and reject.
-        audit::write(
-            &state.db,
-            Some(staff_user_id.into()),
-            Some(staff_business),
-            "loyalty.cross_business_stamp_rejected",
-            serde_json::json!({
-                "token_business_id": token_business,
-                "staff_business_id": staff_business,
-            }),
-            ip,
-        ).await;
-        return Err(AppError::Forbidden);
-    }
-
-    record_steep(state, customer_id, staff_business, "qr_stamp", qr_token, Some(staff_user_id), ip).await
+    record_steep(state, customer_id, token_business, "qr_stamp", qr_token, Some(staff_user_id), ip).await
 }
 
 // ── Stamp via HTML page (fallback — camera scan without app) ─────────────────
@@ -193,50 +214,69 @@ pub async fn stamp_via_qr(
 pub async fn stamp_via_html(
     state:       &AppState,
     qr_token:    &str,
-    claimed_bid: i32, // ?b= query param — cross-checked against token
+    claimed_bid: i32, // ?b= query param — verified against the token's stored business_id
     ip:          Option<std::net::IpAddr>,
 ) -> AppResult<StampResult> {
     rate_check_stamp(state, claimed_bid).await?;
-
-    let (customer_id, token_business) = consume_qr_token(state, qr_token).await?;
-
-    if token_business != claimed_bid {
-        return Err(AppError::Forbidden);
-    }
-
+    let (customer_id, token_business) = consume_qr_token_for_business(state, qr_token, claimed_bid).await?;
     record_steep(state, customer_id, token_business, "qr_stamp", qr_token, None, ip).await
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Atomically reads and deletes the QR token from Redis (GETDEL).
-/// Returns (customer_user_id, business_id) on success.
-/// Returns Unauthorized if the token is expired, already used, or unknown.
-async fn consume_qr_token(state: &AppState, token: &str) -> AppResult<(UserId, i32)> {
+/// Atomically validates business ownership and consumes a QR stamp token.
+///
+/// Uses QR_CONSUME_LUA to GET, check, and DEL in one Redis round-trip.
+/// Returns:
+///   Ok((customer_id, business_id)) — token valid for this business, now consumed
+///   Err(Forbidden)                 — token exists but owned by a different business;
+///                                    the token is preserved so the customer can retry
+///   Err(Unauthorized)              — token not found, expired, or already consumed
+async fn consume_qr_token_for_business(
+    state:        &AppState,
+    token:        &str,
+    expected_biz: i32,
+) -> AppResult<(UserId, i32)> {
     let redis_pool = state.redis.as_ref().ok_or(AppError::Unauthorized)?;
-
     let key = format!("fraise:stamp:{token}");
     let mut conn = redis_pool.get().await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis pool: {e}")))?;
 
-    let value: Option<String> = redis::cmd("GETDEL")
-        .arg(&key)
-        .query_async(&mut *conn)
+    let result: redis::Value = redis::Script::new(QR_CONSUME_LUA)
+        .key(&key)
+        .arg(expected_biz.to_string())
+        .invoke_async(&mut *conn)
         .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis GETDEL: {e}")))?;
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis Lua stamp consume: {e}")))?;
 
-    let value = value.ok_or(AppError::Unauthorized)?; // expired or already used
+    // Match the return codes defined in QR_CONSUME_LUA.
+    let parts = match result {
+        redis::Value::Bulk(v) => v,
+        other => return Err(AppError::Internal(
+            anyhow::anyhow!("unexpected Redis type from Lua consume script: {other:?}")
+        )),
+    };
 
-    // Value format: "{business_id}:{user_id}"
-    let mut parts = value.splitn(2, ':');
-    let business_id = parts.next()
-        .and_then(|s| s.parse::<i32>().ok())
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("malformed stamp token value")))?;
-    let user_id = parts.next()
-        .and_then(|s| s.parse::<i32>().ok())
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("malformed stamp token value")))?;
+    match parts.as_slice() {
+        [redis::Value::Int(0)] => Err(AppError::Unauthorized),
+        [redis::Value::Int(1)] => Err(AppError::Forbidden),
+        [redis::Value::Int(2), redis::Value::Data(raw)] => parse_token_value(raw),
+        _ => Err(AppError::Internal(anyhow::anyhow!("unexpected Lua response shape: {parts:?}"))),
+    }
+}
 
-    Ok((UserId::from(user_id), business_id))
+fn parse_token_value(raw: &[u8]) -> AppResult<(UserId, i32)> {
+    // Value format stored in Redis: "{business_id}:{user_id}"
+    let s = std::str::from_utf8(raw)
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("non-UTF8 stamp token value")))?;
+    let mut parts = s.splitn(2, ':');
+    let biz = parts.next()
+        .and_then(|v| v.parse::<i32>().ok())
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("malformed stamp token: missing business_id")))?;
+    let uid = parts.next()
+        .and_then(|v| v.parse::<i32>().ok())
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("malformed stamp token: missing user_id")))?;
+    Ok((UserId::from(uid), biz))
 }
 
 async fn record_steep(
