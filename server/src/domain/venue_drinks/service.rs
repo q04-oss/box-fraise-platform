@@ -1,5 +1,3 @@
-use secrecy::ExposeSecret;
-
 use crate::{
     audit,
     app::AppState,

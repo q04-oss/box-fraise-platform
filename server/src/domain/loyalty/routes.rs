@@ -12,7 +12,7 @@
 /// GET  /nfc/{uuid}               — Universal Link target; fallback HTML if app not installed
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };

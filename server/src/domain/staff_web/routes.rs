@@ -29,7 +29,6 @@ use tower_cookies::{Cookie, Cookies};
 
 use crate::{
     app::AppState,
-    auth::staff,
     domain::{auth, loyalty},
     error::AppError,
 };
@@ -232,7 +231,7 @@ async fn scan_page(State(state): State<AppState>, cookies: Cookies) -> Response 
                 wrap.appendChild(fileInput);
 
                 const btn = document.createElement('button');
-                btn.textContent   = '\u{1F4F7}  scan QR code';
+                btn.textContent   = '\u{{1F4F7}}  scan QR code';
                 btn.style.cssText =
                     'position:absolute;inset:0;width:100%;background:#1C1C1E;' +
                     'color:#F7F5F2;border:none;border-radius:14px;font-size:.95rem;cursor:pointer';

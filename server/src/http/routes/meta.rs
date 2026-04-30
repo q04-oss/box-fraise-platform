@@ -36,7 +36,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         Some(pool) => match pool.get().await {
             Err(_) => false,
             Ok(mut conn) => redis::cmd("PING")
-                .query_async::<String>(&mut *conn)
+                .query_async::<_, String>(&mut *conn)
                 .await
                 .is_ok(),
         },

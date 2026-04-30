@@ -8,7 +8,7 @@ use crate::{
     error::{AppError, AppResult},
     types::UserId,
 };
-use super::{repository, types::{self, *}};
+use super::{repository, types::*};
 
 // Redis key namespacing --------------------------------------------------------
 // fraise:stamp:{uuid}           → "{business_id}:{user_id}"   (QR token)

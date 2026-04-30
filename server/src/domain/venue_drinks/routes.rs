@@ -1,6 +1,6 @@
 use axum::{
     body::Bytes,
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
     routing::{get, post},
     Json, Router,
@@ -24,7 +24,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/businesses/{id}/drinks",         get(menu))
         .route("/api/businesses/{id}/stripe-connect", post(stripe_connect))
         .route("/api/venue-orders",                   post(create_order))
-        .route("/api/webhooks/square/orders",         post(square_order_webhook))
+        .merge(
+            Router::new()
+                .route("/api/webhooks/square/orders", post(square_order_webhook))
+                .layer(DefaultBodyLimit::max(65_536))
+        )
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@
 /// membership payment in the same batch.
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     routing::post,
     Router,
@@ -21,7 +21,9 @@ use crate::{
 };
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/stripe/webhook", post(webhook))
+    Router::new()
+        .route("/api/stripe/webhook", post(webhook))
+        .layer(DefaultBodyLimit::max(65_536))
 }
 
 async fn webhook(

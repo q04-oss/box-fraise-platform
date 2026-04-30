@@ -1,6 +1,5 @@
 use axum::{
     extract::{ConnectInfo, Query, State},
-    http::StatusCode,
     response::{Html, IntoResponse, Response},
     routing::{get, patch, post},
     Json, Router,

@@ -68,6 +68,7 @@ tokio-cron-scheduler = "0.10"
 # Opt-in: set REDIS_URL env var to activate. Falls back to in-process HashMap
 # (single instance only) when Redis is not configured.
 deadpool-redis = { version = "0.13", features = ["rt_tokio_1"] }
+redis          = { version = "0.23", features = ["script", "aio", "tokio-comp"] }
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 chrono    = { version = "0.4", features = ["serde"] }
