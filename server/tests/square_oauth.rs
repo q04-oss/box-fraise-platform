@@ -7,6 +7,7 @@
 mod common;
 
 use box_fraise_server::{domain::squareoauth::service as squareoauth, integrations::square};
+use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::PgPool;
 use wiremock::{matchers::{method, path}, Mock, MockServer, ResponseTemplate};
@@ -197,4 +198,89 @@ async fn callback_fails_when_square_has_no_active_locations(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(row_count, 0, "no tokens must be stored on failed callback");
+}
+
+// ── Integration tests: load_decrypted transparent refresh ────────────────────
+
+/// When stored tokens are within 24 hours of expiry, load_decrypted must call
+/// Square's refresh endpoint and return the new access token.
+///
+/// This is the path that previously hardcoded the production URL — the fix is
+/// tested here by pointing it at a mock server.
+#[sqlx::test(migrations = "migrations")]
+async fn load_decrypted_refreshes_near_expiry_token(pool: PgPool) {
+    let state = common::build_state_with_square_oauth(pool.clone(), None);
+
+    // Seed a token expiring in 1 hour — within the 24-hour refresh threshold.
+    let biz = common::create_business(&pool, "Refresh Test Café").await;
+    common::seed_oauth_tokens(
+        &pool, biz.id,
+        "old_access_token", "old_refresh_token",
+        Utc::now() + Duration::hours(1),
+    ).await;
+
+    // Mock Square's token refresh endpoint.
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth2/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token":  "new_access_token",
+            "token_type":    "bearer",
+            "expires_at":    "2030-01-01T00:00:00Z",
+            "merchant_id":   "MERCHANT_TEST_123",
+            "refresh_token": "new_refresh_token"
+        })))
+        .expect(1) // must call refresh exactly once
+        .mount(&mock_server)
+        .await;
+
+    let result = squareoauth::load_decrypted(&state, biz.id, &mock_server.uri()).await;
+    assert!(result.is_ok(), "load_decrypted must succeed after refresh: {result:?}");
+    assert_eq!(
+        result.unwrap().access_token, "new_access_token",
+        "must return the refreshed access token, not the old one"
+    );
+
+    // The new token must be persisted in the DB.
+    let enc_key = "0101010101010101010101010101010101010101010101010101010101010101";
+    let stored_enc: String = sqlx::query_scalar(
+        "SELECT encrypted_access_token FROM square_oauth_tokens WHERE business_id = $1"
+    )
+    .bind(biz.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let stored_plain = box_fraise_server::crypto::decrypt(enc_key, &stored_enc).unwrap();
+    assert_eq!(stored_plain, "new_access_token", "refreshed token must be written back to DB");
+}
+
+/// When stored tokens are not near expiry, load_decrypted must return the
+/// existing token without calling Square's refresh endpoint.
+#[sqlx::test(migrations = "migrations")]
+async fn load_decrypted_skips_refresh_for_valid_token(pool: PgPool) {
+    let state = common::build_state_with_square_oauth(pool.clone(), None);
+
+    // Seed a token expiring in 30 days — well outside the 24-hour refresh threshold.
+    let biz = common::create_business(&pool, "Valid Token Café").await;
+    common::seed_oauth_tokens(
+        &pool, biz.id,
+        "still_valid_token", "some_refresh_token",
+        Utc::now() + Duration::days(30),
+    ).await;
+
+    // Mock server is started but must receive NO requests.
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth2/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(0) // refresh must NOT be called
+        .mount(&mock_server)
+        .await;
+
+    let result = squareoauth::load_decrypted(&state, biz.id, &mock_server.uri()).await;
+    assert!(result.is_ok(), "load_decrypted must succeed for valid token: {result:?}");
+    assert_eq!(
+        result.unwrap().access_token, "still_valid_token",
+        "must return the existing token unchanged"
+    );
 }

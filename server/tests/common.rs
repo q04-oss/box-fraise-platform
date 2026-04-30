@@ -180,6 +180,32 @@ pub fn build_state_with_square_oauth(db: PgPool, redis: Option<RedisPool>) -> bo
     }
 }
 
+/// Seeds encrypted Square OAuth tokens for a business.
+/// Uses the same 64-hex encryption key as test_config_with_square_oauth.
+/// `expires_at` controls whether load_decrypted will attempt a refresh —
+/// pass `Utc::now() + Duration::hours(1)` to trigger the refresh path.
+pub async fn seed_oauth_tokens(
+    pool:          &PgPool,
+    business_id:   i32,
+    access_token:  &str,
+    refresh_token: &str,
+    expires_at:    chrono::DateTime<chrono::Utc>,
+) {
+    use box_fraise_server::{
+        crypto,
+        domain::squareoauth::repository::{upsert_tokens, EncryptedTokenRow},
+    };
+    const ENC_KEY: &str = "0101010101010101010101010101010101010101010101010101010101010101";
+    let row = EncryptedTokenRow {
+        encrypted_access_token:  crypto::encrypt(ENC_KEY, access_token).unwrap(),
+        encrypted_refresh_token: crypto::encrypt(ENC_KEY, refresh_token).unwrap(),
+        merchant_id:             "MERCHANT_TEST_123".to_string(),
+        square_location_id:      "LOC_TEST_001".to_string(),
+        expires_at,
+    };
+    upsert_tokens(pool, business_id, &row).await.unwrap();
+}
+
 /// Seeds a Square OAuth CSRF state token in Redis.
 /// Key: fraise:square-oauth-state:{token} → "{business_id}"
 pub async fn seed_oauth_csrf_state(redis_pool: &RedisPool, token: &str, business_id: i32) {

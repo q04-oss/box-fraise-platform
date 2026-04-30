@@ -3,8 +3,7 @@ use crate::{
     app::AppState,
     domain::{loyalty, squareoauth},
     error::{AppError, AppResult},
-    integrations::square::ApiClient,
-    integrations::square::OrderLineItem,
+    integrations::square::{self as square_integration, ApiClient, OrderLineItem},
     types::UserId,
 };
 use super::{
@@ -216,7 +215,7 @@ async fn complete_venue_order_inner(state: &AppState, pi_id: &str) -> AppResult<
     ).await;
 
     // ── 2. Push to Square POS ─────────────────────────────────────────────────
-    let tokens = squareoauth::service::load_decrypted(state, order.business_id).await?;
+    let tokens = squareoauth::service::load_decrypted(state, order.business_id, square_integration::BASE).await?;
 
     let items = repository::get_order_items_for_square(&state.db, order.id).await?;
     let line_items: Vec<OrderLineItem> = items.iter().map(|(name, price, qty)| OrderLineItem {

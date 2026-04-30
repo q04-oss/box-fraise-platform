@@ -159,10 +159,14 @@ pub async fn handle_callback(
 /// Returns live, decrypted tokens for a business, refreshing them if within
 /// 24 hours of expiry. Called by any domain that needs to call the Square API.
 ///
+/// `square_base` is the Square API base URL — production code passes
+/// `crate::integrations::square::BASE`; tests pass a mock server URL.
+///
 /// Returns Err if the business has not connected Square.
 pub async fn load_decrypted(
     state:       &AppState,
     business_id: i32,
+    square_base: &str,
 ) -> AppResult<LiveTokens> {
     let enc_key = encryption_key(state)?;
 
@@ -178,6 +182,7 @@ pub async fn load_decrypted(
     if hours_remaining < REFRESH_THRESHOLD_HOURS {
         let access_token = refresh_token_for_business(
             state, business_id, &refresh_token, &stored.merchant_id, &stored.square_location_id,
+            square_base,
         ).await?;
         return Ok(LiveTokens {
             access_token,
@@ -215,11 +220,12 @@ async fn consume_state(state: &AppState, state_token: &str) -> AppResult<i32> {
 }
 
 async fn refresh_token_for_business(
-    state:             &AppState,
-    business_id:       i32,
-    refresh_token:     &str,
-    merchant_id:       &str,
+    state:              &AppState,
+    business_id:        i32,
+    refresh_token:      &str,
+    merchant_id:        &str,
     square_location_id: &str,
+    square_base:        &str,
 ) -> AppResult<String> {
     let app_id       = state.cfg.square_app_id.as_deref()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("SQUARE_APP_ID missing")))?;
@@ -227,7 +233,7 @@ async fn refresh_token_for_business(
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("SQUARE_APP_SECRET missing")))?;
     let redirect_url = state.cfg.square_oauth_redirect_url.as_deref().unwrap_or("");
 
-    let client = OAuthClient::new(app_id, app_secret.expose_secret(), redirect_url, &state.http);
+    let client = OAuthClient::new_with_base(app_id, app_secret.expose_secret(), redirect_url, &state.http, square_base);
     let tokens = client.refresh(refresh_token).await?;
 
     let enc_key = encryption_key(state)?;
