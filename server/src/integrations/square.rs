@@ -220,3 +220,33 @@ impl<'a> ApiClient<'a> {
             .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Square create_order: missing order.id")))
     }
 }
+
+// ── Webhook validation ────────────────────────────────────────────────────────
+
+/// Validates the authenticity of a Square webhook payload.
+///
+/// Square computes: Base64(HMAC-SHA256(signing_key, notification_url + body))
+/// The notification_url must exactly match the URL configured in Square's
+/// Developer dashboard — including scheme, host, path, no trailing slash.
+pub fn validate_webhook(
+    signing_key:      &str,
+    notification_url: &str,
+    body:             &[u8],
+    signature:        &str,
+) -> bool {
+    use ring::hmac;
+    if signature.is_empty() { return false; }
+
+    let key      = hmac::Key::new(hmac::HMAC_SHA256, signing_key.as_bytes());
+    let mut ctx  = hmac::Context::with_key(&key);
+    ctx.update(notification_url.as_bytes());
+    ctx.update(body);
+    let expected = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        ctx.sign().as_ref(),
+    );
+
+    // Constant-time comparison prevents timing oracle on the signature.
+    use ring::constant_time::verify_slices_are_equal;
+    verify_slices_are_equal(expected.as_bytes(), signature.as_bytes()).is_ok()
+}

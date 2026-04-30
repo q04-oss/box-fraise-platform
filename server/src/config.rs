@@ -90,6 +90,16 @@ pub struct Config {
     /// Applied as Stripe's application_fee_amount on Connect charges.
     /// Default: 500 (5%). Set to 0 to disable the fee during testing.
     pub platform_fee_bips: i64,
+
+    // ── Square order webhooks ─────────────────────────────────────────────────
+    /// Signing key for the Square order.updated webhook subscription.
+    /// Separate from SQUARE_WEBHOOK_SIGNING_KEY (which covers payment events)
+    /// because Square issues a distinct key per webhook subscription.
+    /// Threat: webhook spoofing — a missing key causes the endpoint to return 503.
+    pub square_order_webhook_signing_key: Option<SecretString>,
+    /// Must exactly match the order webhook URL in the Square Developer dashboard.
+    /// e.g. https://your-api.railway.app/api/webhooks/square/orders
+    pub square_order_notification_url: Option<String>,
 }
 
 impl Config {
@@ -147,7 +157,9 @@ impl Config {
             staff_jwt_secret: require_secret("STAFF_JWT_SECRET")?,
 
             // venue ordering
-            platform_fee_bips: optional_parse("PLATFORM_FEE_BIPS", 500i64)?,
+            platform_fee_bips:                    optional_parse("PLATFORM_FEE_BIPS", 500i64)?,
+            square_order_webhook_signing_key:     optional_secret("SQUARE_ORDER_WEBHOOK_SIGNING_KEY"),
+            square_order_notification_url:        optional("SQUARE_ORDER_NOTIFICATION_URL"),
 
             // Square OAuth — all optional; Square integration is disabled when absent
             square_app_id:                optional("SQUARE_APP_ID"),

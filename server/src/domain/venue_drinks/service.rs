@@ -249,21 +249,96 @@ async fn complete_venue_order_inner(state: &AppState, pi_id: &str) -> AppResult<
         None,
     ).await;
 
-    // ── 3. Credit loyalty steep ───────────────────────────────────────────────
+    // Steep is credited when the drink is collected (Square order.updated →
+    // COMPLETED), not at payment time. See complete_order_from_square below.
+
+    Ok(())
+}
+
+// ── Square order.updated → COMPLETED ─────────────────────────────────────────
+
+/// Called when Square fires order.updated with state == COMPLETED.
+/// This is the moment the drink has been handed to the customer — the correct
+/// trigger for crediting the loyalty steep.
+///
+/// Idempotency: square_order_id is used as the loyalty idempotency key.
+/// If Square retries the webhook the loyalty UNIQUE constraint rejects the
+/// duplicate without returning an error.
+pub async fn complete_order_from_square(state: &AppState, square_order_id: &str) {
+    if let Err(e) = complete_order_from_square_inner(state, square_order_id).await {
+        tracing::error!(
+            square_order_id,
+            error = %e,
+            "complete_order_from_square failed"
+        );
+    }
+}
+
+async fn complete_order_from_square_inner(
+    state:           &AppState,
+    square_order_id: &str,
+) -> AppResult<()> {
+    let order = match repository::get_order_by_square_id(&state.db, square_order_id).await? {
+        Some(o) => o,
+        None    => {
+            // Order not in our system — could be a walk-in Square order, not an app order.
+            tracing::debug!(square_order_id, "order.updated for unknown Square order — ignoring");
+            return Ok(());
+        }
+    };
+
+    // Guard: only process orders that reached the POS successfully.
+    if order.status != "pushed_to_square" {
+        tracing::debug!(square_order_id, status = order.status, "order not in pushed_to_square state — skipping");
+        return Ok(());
+    }
+
+    // Mark completed.
+    repository::update_order_status(&state.db, order.id, "completed").await?;
+
     let user_id = UserId::from(order.user_id);
 
-    // Conflict = already recorded (idempotent). Any other error is non-fatal
-    // for the order itself — log but don't fail the whole completion.
+    // Credit the loyalty steep now that the drink has been collected.
     match loyalty::service::record_steep_from_webhook(
-        state, user_id, order.business_id, pi_id
+        state, user_id, order.business_id, square_order_id,
     ).await {
-        Ok(())                   => {}
-        Err(AppError::Conflict(_)) => {
-            tracing::info!(pi_id, "loyalty steep already recorded — skipping");
-        }
-        Err(e) => {
-            tracing::error!(pi_id, error = %e, "loyalty steep failed — order still complete");
-        }
+        Ok(()) | Err(AppError::Conflict(_)) => {}
+        Err(e) => tracing::error!(square_order_id, error = %e, "loyalty steep failed"),
+    }
+
+    audit::write(
+        &state.db,
+        None,
+        Some(order.business_id),
+        "venue_order.completed",
+        serde_json::json!({
+            "order_id":        order.id,
+            "square_order_id": square_order_id,
+        }),
+        None,
+    ).await;
+
+    // Push notification to customer.
+    if let Ok(Some(push_token)) = repository::get_user_push_token(&state.db, order.user_id).await {
+        let business_name = repository::get_business_name(&state.db, order.business_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "the café".to_string());
+
+        let _ = crate::integrations::expo_push::send(
+            &state.http,
+            crate::integrations::expo_push::PushMessage {
+                to:    &push_token,
+                title: Some("steep earned"),
+                body:  &format!("enjoy your drink from {business_name}"),
+                data:  Some(serde_json::json!({
+                    "type":        "steep_earned",
+                    "business_id": order.business_id,
+                })),
+                sound: "default",
+            },
+        ).await;
     }
 
     Ok(())

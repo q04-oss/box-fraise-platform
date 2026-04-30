@@ -185,6 +185,52 @@ pub async fn set_square_order_id(
     Ok(())
 }
 
+pub async fn get_order_by_square_id(
+    pool:            &PgPool,
+    square_order_id: &str,
+) -> AppResult<Option<VenueOrderRow>> {
+    sqlx::query_as(
+        "SELECT id, user_id, business_id, stripe_payment_intent_id, square_order_id,
+                status, total_cents, platform_fee_cents, notes, created_at
+         FROM venue_orders
+         WHERE square_order_id = $1"
+    )
+    .bind(square_order_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Db)
+}
+
+pub async fn get_user_push_token(
+    pool:    &PgPool,
+    user_id: i32,
+) -> AppResult<Option<String>> {
+    let row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT push_token FROM users WHERE id = $1"
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    Ok(row.and_then(|(t,)| t))
+}
+
+pub async fn get_business_name(
+    pool:        &PgPool,
+    business_id: i32,
+) -> AppResult<Option<String>> {
+    let row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT name FROM businesses WHERE id = $1"
+    )
+    .bind(business_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    Ok(row.and_then(|(n,)| n))
+}
+
 pub async fn get_order_items_for_square(
     pool:     &PgPool,
     order_id: i64,
