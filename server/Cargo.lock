@@ -402,6 +402,7 @@ dependencies = [
  "sha2",
  "sha3",
  "sqlx",
+ "subtle",
  "testcontainers",
  "testcontainers-modules",
  "thiserror 2.0.18",

@@ -69,6 +69,19 @@ pub fn new_nonce_cache() -> NonceCache {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+// ── Nonce validation ──────────────────────────────────────────────────────────
+
+/// Returns true only for canonical hyphenated UUID format (8-4-4-4-12).
+/// uuid::Uuid::parse_str in v1.x accepts no-dash format, which would let the
+/// same nonce be stored under two different string keys and enable replay via
+/// format variation. Requiring dashes closes that gap.
+pub(super) fn is_valid_nonce(s: &str) -> bool {
+    let b = s.as_bytes();
+    s.len() == 36
+        && b[8] == b'-' && b[13] == b'-' && b[18] == b'-' && b[23] == b'-'
+        && uuid::Uuid::parse_str(s).is_ok()
+}
+
 // ── Middleware ────────────────────────────────────────────────────────────────
 
 pub async fn validate(
@@ -106,8 +119,7 @@ pub async fn validate(
     if nonce.is_empty() {
         return reject(StatusCode::BAD_REQUEST, "nonce required");
     }
-    // UUID format validation prevents key-injection into Redis (e.g. "fraise:nonce:*").
-    if uuid::Uuid::parse_str(&nonce).is_err() {
+    if !is_valid_nonce(&nonce) {
         return reject(StatusCode::BAD_REQUEST, "malformed nonce");
     }
 
@@ -412,7 +424,7 @@ pub(crate) mod tests {
             "00000000-0000-0000-0000-000000000000",
         ];
         for u in &cases {
-            assert!(uuid::Uuid::parse_str(u).is_ok(), "Must accept valid UUID: {u}");
+            assert!(is_valid_nonce(u), "Must accept valid UUID: {u}");
         }
     }
 
@@ -424,10 +436,10 @@ pub(crate) mod tests {
             "123",
             "../../etc/passwd",
             "fraise:nonce:injection",
-            "550e8400e29b41d4a716446655440000", // no dashes
+            "550e8400e29b41d4a716446655440000", // no dashes — same UUID, different cache key
         ];
         for u in &cases {
-            assert!(uuid::Uuid::parse_str(u).is_err(), "Must reject: {u}");
+            assert!(!is_valid_nonce(u), "Must reject: {u}");
         }
     }
 

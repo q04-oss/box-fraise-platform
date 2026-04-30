@@ -318,9 +318,8 @@ pub fn validate_webhook(
         ctx.sign().as_ref(),
     );
 
-    // Constant-time comparison prevents timing oracle on the signature.
-    use ring::constant_time::verify_slices_are_equal;
-    verify_slices_are_equal(expected.as_bytes(), signature.as_bytes()).is_ok()
+    use subtle::ConstantTimeEq;
+    expected.as_bytes().ct_eq(signature.as_bytes()).into()
 }
 
 #[cfg(test)]

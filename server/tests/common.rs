@@ -26,17 +26,17 @@ use box_fraise_server::{
 
 pub fn test_config() -> Config {
     Config {
-        database_url:    SecretString::from("postgres://localhost/test"),
-        jwt_secret:      SecretString::from("test-jwt-secret-minimum-32-characters!!"),
-        staff_jwt_secret: SecretString::from("test-staff-secret-minimum-32-chars!!"),
-        stripe_secret_key:     SecretString::from("sk_test_placeholder"),
-        stripe_webhook_secret: SecretString::from("whsec_placeholder"),
-        admin_pin:       SecretString::from("testpin1"),
-        chocolatier_pin: SecretString::from("testpin2"),
-        supplier_pin:    SecretString::from("testpin3"),
+        database_url:    SecretString::from("postgres://localhost/test".to_string()),
+        jwt_secret:      SecretString::from("test-jwt-secret-minimum-32-characters!!".to_string()),
+        staff_jwt_secret: SecretString::from("test-staff-secret-minimum-32-chars!!".to_string()),
+        stripe_secret_key:     SecretString::from("sk_test_placeholder".to_string()),
+        stripe_webhook_secret: SecretString::from("whsec_placeholder".to_string()),
+        admin_pin:       SecretString::from("testpin1".to_string()),
+        chocolatier_pin: SecretString::from("testpin2".to_string()),
+        supplier_pin:    SecretString::from("testpin3".to_string()),
         review_pin:      None,
         port:            3001,
-        hmac_shared_key: Some(SecretString::from("test-hmac-key-32-bytes-exactly!!")),
+        hmac_shared_key: Some(SecretString::from("test-hmac-key-32-bytes-exactly!!".to_string())),
         redis_url:       None,
         apple_team_id:   None,
         apple_key_id:    None,
@@ -55,6 +55,7 @@ pub fn test_config() -> Config {
         platform_fee_bips:   500,
         square_order_webhook_signing_key: None,
         square_order_notification_url:    None,
+        app_store_id:                     None,
     }
 }
 
@@ -154,11 +155,11 @@ pub const SQUARE_NOTIFICATION_URL: &str =
 pub fn test_config_with_square_oauth() -> Config {
     Config {
         square_app_id:               Some("sq0idp-test-app-id".to_string()),
-        square_app_secret:           Some(SecretString::from("test-app-secret")),
+        square_app_secret:           Some(SecretString::from("test-app-secret".to_string())),
         square_oauth_redirect_url:   Some("https://test.example.com/callback".to_string()),
         // 64 hex chars = 32 bytes, required by AES-256-GCM encrypt
         square_token_encryption_key: Some(SecretString::from(
-            "0101010101010101010101010101010101010101010101010101010101010101"
+            "0101010101010101010101010101010101010101010101010101010101010101".to_string()
         )),
         ..test_config()
     }

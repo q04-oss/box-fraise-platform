@@ -66,7 +66,7 @@ async fn confirm_evening_token(
 
     // Lock the booking row â€” prevents concurrent double-mint.
     let booking: Option<BookingLock> = sqlx::query_as(
-        "SELECT id, user_id_1, user_id_2, status
+        "SELECT user_id_1, user_id_2, status
          FROM bookings
          WHERE id = $1
          FOR UPDATE",
@@ -122,7 +122,6 @@ async fn confirm_evening_token(
 
 #[derive(sqlx::FromRow)]
 struct BookingLock {
-    id:        i32,
     user_id_1: UserId,
     user_id_2: UserId,
     status:    String,
@@ -209,7 +208,7 @@ async fn accept_trade(
 
     // Lock the offer row.
     let offer: Option<TradeOfferLock> = sqlx::query_as(
-        "SELECT id, token_id, from_user_id, to_user_id, status
+        "SELECT token_id, from_user_id, to_user_id, status
          FROM trade_offers
          WHERE id = $1
          FOR UPDATE",
@@ -298,7 +297,6 @@ async fn decline_trade(
 
 #[derive(sqlx::FromRow)]
 struct TradeOfferLock {
-    id:           i32,
     token_id:     i32,
     from_user_id: UserId,
     to_user_id:   UserId,
