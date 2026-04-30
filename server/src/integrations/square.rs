@@ -250,3 +250,62 @@ pub fn validate_webhook(
     use ring::constant_time::verify_slices_are_equal;
     verify_slices_are_equal(expected.as_bytes(), signature.as_bytes()).is_ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::validate_webhook;
+
+    const KEY:  &str = "test-square-signing-key-for-unit-tests";
+    const URL:  &str = "https://api.boxfraise.com/api/webhooks/square/orders";
+    const BODY: &[u8] = b"{\"type\":\"order.updated\",\"data\":{}}";
+
+    /// Compute what Square computes: Base64(HMAC-SHA256(key, url + body)).
+    fn sign(key: &str, url: &str, body: &[u8]) -> String {
+        use base64::Engine;
+        use ring::hmac;
+        let k = hmac::Key::new(hmac::HMAC_SHA256, key.as_bytes());
+        let mut ctx = hmac::Context::with_key(&k);
+        ctx.update(url.as_bytes());
+        ctx.update(body);
+        base64::engine::general_purpose::STANDARD.encode(ctx.sign().as_ref())
+    }
+
+    #[test]
+    fn known_payload_and_secret_produce_expected_signature() {
+        let sig = sign(KEY, URL, BODY);
+        assert!(validate_webhook(KEY, URL, BODY, &sig),
+            "valid signature must be accepted");
+    }
+
+    #[test]
+    fn wrong_key_is_rejected() {
+        let sig = sign("a-completely-different-signing-key", URL, BODY);
+        assert!(!validate_webhook(KEY, URL, BODY, &sig),
+            "signature from wrong key must be rejected");
+    }
+
+    #[test]
+    fn tampered_body_is_rejected() {
+        let sig = sign(KEY, URL, BODY);
+        let tampered = b"{\"type\":\"order.updated\",\"data\":{\"injected\":true}}";
+        assert!(!validate_webhook(KEY, URL, tampered, &sig),
+            "signature computed over original body must not validate tampered body");
+    }
+
+    #[test]
+    fn empty_signature_is_rejected() {
+        assert!(!validate_webhook(KEY, URL, BODY, ""),
+            "empty signature must be rejected");
+    }
+
+    /// A signature produced for URL A must not validate against URL B.
+    /// This prevents replay of a valid webhook from one environment against
+    /// a different environment or endpoint path.
+    #[test]
+    fn notification_url_is_part_of_signed_message() {
+        let sig = sign(KEY, URL, BODY);
+        let url_b = "https://staging.boxfraise.com/api/webhooks/square/orders";
+        assert!(!validate_webhook(KEY, url_b, BODY, &sig),
+            "signature for URL A must not validate against URL B");
+    }
+}

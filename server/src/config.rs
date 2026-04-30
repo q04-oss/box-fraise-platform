@@ -129,6 +129,25 @@ impl Config {
         validate_pin("CHOCOLATIER_PIN", &chocolatier_pin_raw)?;
         validate_pin("SUPPLIER_PIN",    &supplier_pin_raw)?;
 
+        // Square: webhook signing key and notification URL are required when
+        // Square is enabled. The endpoint is unconditionally registered and
+        // unauthenticated if either is absent — fail loud rather than silently
+        // accepting all webhook requests with a 503.
+        if env::var("SQUARE_APP_ID").is_ok() {
+            if env::var("SQUARE_ORDER_WEBHOOK_SIGNING_KEY").is_err() {
+                anyhow::bail!(
+                    "SQUARE_ORDER_WEBHOOK_SIGNING_KEY is required when SQUARE_APP_ID is set — \
+                     the webhook endpoint cannot authenticate requests without it"
+                );
+            }
+            if env::var("SQUARE_ORDER_NOTIFICATION_URL").is_err() {
+                anyhow::bail!(
+                    "SQUARE_ORDER_NOTIFICATION_URL is required when SQUARE_APP_ID is set — \
+                     the notification URL is part of the webhook signature computation"
+                );
+            }
+        }
+
         Ok(Self {
             // required secrets
             database_url:          require_secret("DATABASE_URL")?,

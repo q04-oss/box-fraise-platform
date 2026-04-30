@@ -73,7 +73,10 @@ async fn square_order_webhook(
     ) {
         (Some(k), Some(u)) => (k.expose_secret().to_owned(), u.to_owned()),
         _ => {
-            tracing::warn!("square order webhook received but SQUARE_ORDER_WEBHOOK_SIGNING_KEY not configured");
+            // Config::load() prevents this when Square is enabled — reaching
+            // here means a deployment misconfiguration bypassed startup checks.
+            tracing::error!("square order webhook received but signing key not configured — \
+                             check SQUARE_ORDER_WEBHOOK_SIGNING_KEY and SQUARE_ORDER_NOTIFICATION_URL");
             return StatusCode::SERVICE_UNAVAILABLE;
         }
     };

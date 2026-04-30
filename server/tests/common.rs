@@ -142,3 +142,45 @@ pub async fn seed_loyalty_config(pool: &PgPool, business_id: i32, steeps_per_rew
     .await
     .unwrap_or_else(|e| panic!("seed_loyalty_config: {e}"));
 }
+
+// ── Square webhook helpers ─────────────────────────────────────────────────────
+
+pub const SQUARE_SIGNING_KEY: &str = "test-square-signing-key-for-integration";
+pub const SQUARE_NOTIFICATION_URL: &str =
+    "https://test.boxfraise.com/api/webhooks/square/orders";
+
+pub fn test_config_with_square() -> Config {
+    Config {
+        square_app_id: Some("sq0idp-test".to_string()),
+        square_order_webhook_signing_key: Some(
+            SecretString::from(SQUARE_SIGNING_KEY)
+        ),
+        square_order_notification_url: Some(SQUARE_NOTIFICATION_URL.to_string()),
+        ..test_config()
+    }
+}
+
+pub fn build_state_with_square(db: PgPool, redis: Option<RedisPool>) -> box_fraise_server::app::AppState {
+    use box_fraise_server::app::AppState;
+    AppState {
+        db,
+        cfg:     Arc::new(test_config_with_square()),
+        revoked: box_fraise_server::auth::new_revoked_tokens(),
+        nonces:  box_fraise_server::http::middleware::hmac::new_nonce_cache(),
+        redis,
+        rate:    box_fraise_server::http::middleware::rate_limit::RateLimiter::new(),
+        http:    reqwest::Client::new(),
+    }
+}
+
+/// Computes the Square webhook signature for a given body.
+/// Mirrors Square's algorithm: Base64(HMAC-SHA256(signing_key, url + body)).
+pub fn sign_square_payload(key: &str, url: &str, body: &[u8]) -> String {
+    use base64::Engine;
+    use ring::hmac;
+    let k = hmac::Key::new(hmac::HMAC_SHA256, key.as_bytes());
+    let mut ctx = hmac::Context::with_key(&k);
+    ctx.update(url.as_bytes());
+    ctx.update(body);
+    base64::engine::general_purpose::STANDARD.encode(ctx.sign().as_ref())
+}
