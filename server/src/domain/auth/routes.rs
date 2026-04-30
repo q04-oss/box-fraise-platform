@@ -156,7 +156,7 @@ async fn logout(
     State(state): State<AppState>,
     RequireClaims(claims): RequireClaims,
 ) -> AppResult<Json<serde_json::Value>> {
-    auth::revoke(&state.revoked, &claims.jti, claims.exp);
+    auth::revoke_token(&state.redis, &state.revoked, &claims.jti, claims.exp).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

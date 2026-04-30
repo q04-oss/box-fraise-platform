@@ -49,7 +49,7 @@ where
         let claims = auth::verify_token(bearer.token(), &app.cfg)
             .ok_or(AppError::Unauthorized)?;
 
-        if auth::is_revoked(&app.revoked, &claims.jti) {
+        if auth::check_revoked(&app.redis, &app.revoked, &claims.jti).await {
             return Err(AppError::Unauthorized);
         }
 
@@ -186,10 +186,12 @@ where
         let claims = staff_auth::verify_staff_token(bearer.token(), &app.cfg)
             .ok_or(AppError::Unauthorized)?;
 
-        // Staff tokens are short-lived (8h) and not tracked in the revocation list —
-        // at 8h TTL the revocation list overhead is not worth it for shift tokens.
-        // If immediate revocation is needed for a specific token, the staff member
-        // re-authenticates (short TTL is the mitigation).
+        // Staff tokens are revocation-checked via Redis. Logout, admin-forced
+        // termination, and staff removal all trigger revocation. The 8-hour TTL
+        // is defense-in-depth alongside revocation, not a substitute for it.
+        if auth::check_revoked(&app.redis, &app.revoked, &claims.jti).await {
+            return Err(AppError::Unauthorized);
+        }
 
         Ok(RequireStaff(claims))
     }

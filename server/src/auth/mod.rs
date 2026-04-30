@@ -4,6 +4,7 @@ pub mod device;
 pub mod staff;
 
 use chrono::Utc;
+use deadpool_redis::Pool as RedisPool;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -56,23 +57,89 @@ pub fn verify_token(token: &str, cfg: &Config) -> Option<Claims> {
 
 // ── Revocation list ───────────────────────────────────────────────────────────
 
-/// JTI → Unix expiry. Entries are self-pruning: once a token's `exp` has
-/// passed it can no longer be valid regardless, so it is removed on the next
-/// access rather than stored forever.
+const REVOKED_KEY_PREFIX: &str = "fraise:revoked:";
+
+/// JTI → Unix expiry. In-process store used when Redis is not configured.
+/// Safe for single-instance deployments; replaced by Redis for multi-instance.
 pub type RevokedTokens = Arc<Mutex<HashMap<String, usize>>>;
 
 pub fn new_revoked_tokens() -> RevokedTokens {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-pub fn revoke(list: &RevokedTokens, jti: &str, exp: usize) {
+// Sync primitives kept for the in-process fallback path.
+fn revoke_local(list: &RevokedTokens, jti: &str, exp: usize) {
     list.lock().unwrap().insert(jti.to_owned(), exp);
 }
 
-pub fn is_revoked(list: &RevokedTokens, jti: &str) -> bool {
+fn is_revoked_local(list: &RevokedTokens, jti: &str) -> bool {
     let now = Utc::now().timestamp() as usize;
     let mut map = list.lock().unwrap();
-    // Prune entries whose tokens have already expired — they cannot be replayed.
     map.retain(|_, &mut exp| exp > now);
     map.contains_key(jti)
+}
+
+/// Revoke a token by JTI. Uses Redis when available (cross-instance), falls
+/// back to in-process store for single-instance deployments.
+///
+/// Events that MUST call this function (extend as features are added):
+///   - Explicit logout                             ✓ implemented
+///   - Password change while authenticated         (future — needs current JTI in scope)
+///   - Admin-forced session termination            (future)
+///   - Account deletion                            (future)
+///   - Suspicious activity / security incident     (future)
+///   - Staff token invalidation mid-shift          (future, same function, staff JTI)
+pub async fn revoke_token(redis: &Option<RedisPool>, fallback: &RevokedTokens, jti: &str, exp: usize) {
+    let ttl = (exp as i64).saturating_sub(Utc::now().timestamp());
+    if ttl <= 0 { return; } // already expired — JWT validation will reject it anyway
+
+    if let Some(pool) = redis {
+        match pool.get().await {
+            Ok(mut conn) => {
+                let key = format!("{REVOKED_KEY_PREFIX}{jti}");
+                if let Err(e) = deadpool_redis::redis::cmd("SET")
+                    .arg(&key).arg("1").arg("EX").arg(ttl)
+                    .query_async::<_, ()>(&mut *conn)
+                    .await
+                {
+                    tracing::error!(jti, error = %e, "Redis revocation failed — using in-process fallback");
+                    revoke_local(fallback, jti, exp);
+                }
+            }
+            Err(e) => {
+                tracing::error!(jti, error = %e, "Redis pool error during revocation — using in-process fallback");
+                revoke_local(fallback, jti, exp);
+            }
+        }
+    } else {
+        revoke_local(fallback, jti, exp);
+    }
+}
+
+/// Returns true if the JTI has been revoked. Checks Redis when available.
+/// On Redis failure, falls back to in-process list rather than failing open.
+pub async fn check_revoked(redis: &Option<RedisPool>, fallback: &RevokedTokens, jti: &str) -> bool {
+    if let Some(pool) = redis {
+        match pool.get().await {
+            Ok(mut conn) => {
+                match deadpool_redis::redis::cmd("EXISTS")
+                    .arg(&format!("{REVOKED_KEY_PREFIX}{jti}"))
+                    .query_async::<_, i64>(&mut *conn)
+                    .await
+                {
+                    Ok(n)  => n > 0,
+                    Err(e) => {
+                        tracing::warn!(jti, error = %e, "Redis revocation check failed — using in-process fallback");
+                        is_revoked_local(fallback, jti)
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(jti, error = %e, "Redis pool error during revocation check — using in-process fallback");
+                is_revoked_local(fallback, jti)
+            }
+        }
+    } else {
+        is_revoked_local(fallback, jti)
+    }
 }
