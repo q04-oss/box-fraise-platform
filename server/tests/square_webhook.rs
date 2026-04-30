@@ -9,6 +9,7 @@
 mod common;
 
 use axum::{body::Body, http::{Request, StatusCode}};
+use box_fraise_server::domain::venue_drinks::service as venue_service;
 use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -60,13 +61,13 @@ async fn insert_pushed_order(pool: &PgPool, user_id: i32, business_id: i32, squa
     id
 }
 
-// ── Test 1: valid signature → 200, payload processed ─────────────────────────
+// ── Test 1a: valid signature → 200 (HTTP path) ───────────────────────────────
 
-/// A correctly signed webhook must pass the verification gate (200) and
-/// trigger order completion. After the handler returns, the venue_order
-/// status must change to 'completed' and a loyalty steep must be recorded.
+/// A correctly signed webhook must pass the verification gate and return 200.
+/// The HTTP test asserts the status code only — processing happens in a
+/// tokio::spawn and is tested deterministically in test 1b below.
 #[sqlx::test(migrations = "migrations")]
-async fn valid_signature_returns_200_and_processes_payload(pool: PgPool) {
+async fn valid_signature_returns_200(pool: PgPool) {
     let state = common::build_state_with_square(pool.clone(), None);
     let app   = box_fraise_server::app::build(state);
 
@@ -74,10 +75,8 @@ async fn valid_signature_returns_200_and_processes_payload(pool: PgPool) {
     let biz      = common::create_business(&pool, "Test Café").await;
     common::seed_loyalty_config(&pool, biz.id, 10).await;
 
-    let square_order_id = "sq-order-valid-sig-test";
-    let order_id = insert_pushed_order(
-        &pool, i32::from(customer.id), biz.id, square_order_id
-    ).await;
+    let square_order_id = "sq-order-valid-sig-http-test";
+    insert_pushed_order(&pool, i32::from(customer.id), biz.id, square_order_id).await;
 
     let body = order_completed_payload(square_order_id);
     let sig  = common::sign_square_payload(SQUARE_SIGNING_KEY, SQUARE_NOTIFICATION_URL, &body);
@@ -95,11 +94,32 @@ async fn valid_signature_returns_200_and_processes_payload(pool: PgPool) {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK,
-        "valid signature must return 200");
+    assert_eq!(response.status(), StatusCode::OK, "valid signature must return 200");
+}
 
-    // Wait for the spawned processing task to complete.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+// ── Test 1b: order completion processing (service layer, no HTTP) ─────────────
+
+/// Tests that complete_order_from_square marks the order completed and credits
+/// a loyalty steep. Calls the service function directly so the assertion is
+/// deterministic — no tokio::spawn, no timing sleeps.
+///
+/// This is the correct test for the processing path. The HTTP handler wraps
+/// this function in tokio::spawn for throughput; the spawn is irrelevant to
+/// what the processing actually does.
+#[sqlx::test(migrations = "migrations")]
+async fn complete_order_from_square_marks_completed_and_credits_steep(pool: PgPool) {
+    let state    = common::build_state_with_square(pool.clone(), None);
+    let customer = common::create_user(&pool, "customer@test.com").await;
+    let biz      = common::create_business(&pool, "Test Café").await;
+    common::seed_loyalty_config(&pool, biz.id, 10).await;
+
+    let square_order_id = "sq-order-direct-processing-test";
+    let order_id = insert_pushed_order(
+        &pool, i32::from(customer.id), biz.id, square_order_id
+    ).await;
+
+    // Call the processing function directly — no HTTP, no spawn, deterministic.
+    venue_service::complete_order_from_square(&state, square_order_id).await;
 
     let status: String = sqlx::query_scalar(
         "SELECT status FROM venue_orders WHERE id = $1"
@@ -109,7 +129,7 @@ async fn valid_signature_returns_200_and_processes_payload(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(status, "completed",
-        "order must be marked completed after valid webhook");
+        "order must be marked completed after Square collection");
 
     let steep_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM loyalty_events
