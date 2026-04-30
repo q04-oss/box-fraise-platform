@@ -25,30 +25,34 @@ pub fn router() -> Router<AppState> {
 // â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async fn payment_intent(
-    State(state): State<AppState>,
-    RequireUser(_): RequireUser,
-    AppJson(body): AppJson<PaymentIntentBody>,
+    State(state):     State<AppState>,
+    RequireUser(uid): RequireUser,
+    AppJson(body):    AppJson<PaymentIntentBody>,
 ) -> AppResult<Json<PaymentIntentResponse>> {
-    let tier = body.tier.trim().to_lowercase();
+    let tier    = body.tier.trim().to_lowercase();
+    let uid_str = i32::from(uid).to_string();
 
     // Hard gate â€” only three tiers may be purchased via Stripe.
     // Higher tiers require a manual invoice; this cannot be bypassed by the client.
     if !STRIPE_PAYABLE_TIERS.contains(&tier.as_str()) {
         return Err(AppError::bad_request(
-            "this membership tier requires a manual invoice â€” contact us directly",
+            “this membership tier requires a manual invoice â€” contact us directly”,
         ));
     }
 
     let amount_cents = tier_amount_cents(&tier)
-        .ok_or_else(|| AppError::bad_request("unknown membership tier"))?;
+        .ok_or_else(|| AppError::bad_request(“unknown membership tier”))?;
 
+    // user_id must be in metadata so the webhook can activate the membership.
+    // Without it complete_membership receives None and silently no-ops â€”
+    // the user is charged but the membership row is never written.
     let pi = state
         .stripe()
         .create_payment_intent(
             amount_cents,
-            "cad",
+            “cad”,
             None,
-            &[("type", "membership"), ("tier", &tier)],
+            &[(“type”, “membership”), (“tier”, &tier), (“user_id”, &uid_str)],
         )
         .await?;
 
@@ -80,7 +84,10 @@ async fn join_waitlist(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn list_members(State(state): State<AppState>) -> AppResult<Json<Vec<MemberRow>>> {
+async fn list_members(
+    State(state):    State<AppState>,
+    RequireUser(_):  RequireUser,
+) -> AppResult<Json<Vec<MemberRow>>> {
     Ok(Json(repository::list_active_members(&state.db).await?))
 }
 
@@ -140,8 +147,9 @@ async fn contribute(
 }
 
 async fn contributors(
-    State(state): State<AppState>,
-    Path(user_id): Path<UserId>,
+    State(state):   State<AppState>,
+    RequireUser(_): RequireUser,
+    Path(user_id):  Path<UserId>,
 ) -> AppResult<Json<Vec<serde_json::Value>>> {
     Ok(Json(
         repository::list_fund_contributors(&state.db, user_id).await?,

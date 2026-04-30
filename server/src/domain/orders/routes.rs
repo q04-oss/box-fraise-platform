@@ -121,6 +121,37 @@ async fn device_collect(
     if device.role != "employee" && device.role != "chocolatier" {
         return Err(AppError::Forbidden);
     }
+
+    // Verify the device's owner is employed at the business that owns this order.
+    // Without this check any employee device — regardless of which business it belongs
+    // to — can collect orders from any other business.
+    //
+    // Check happens before the atomic collect so the order status is never mutated
+    // by an unauthorised device. The subquery filters on status='ready' so it returns
+    // false for both nonexistent and already-collected orders.
+    let device_user = device.user_id.ok_or(AppError::Forbidden)?;
+    let authorized: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM   orders o
+             JOIN   locations          l  ON l.id           = o.location_id
+             JOIN   employment_contracts ec ON ec.business_id = l.business_id
+             WHERE  o.nfc_token  = $1
+               AND  o.status     = 'ready'
+               AND  ec.user_id   = $2
+               AND  ec.status    = 'active'
+         )",
+    )
+    .bind(&nfc_token)
+    .bind(device_user)
+    .fetch_one(&state.db)
+    .await
+    .map_err(AppError::Db)?;
+
+    if !authorized {
+        return Err(AppError::Forbidden);
+    }
+
     let order = repository::collect_by_nfc(&state.db, &nfc_token, None)
         .await?
         .ok_or_else(|| AppError::bad_request("order not found or not ready"))?;

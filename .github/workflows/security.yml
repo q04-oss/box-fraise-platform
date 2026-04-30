@@ -1,0 +1,60 @@
+name: Security
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Run weekly so new advisories are caught without needing a push
+    - cron: "0 6 * * 1"
+
+# ci.yml owns clippy + tests (with a live Postgres service).
+# This workflow owns the two security-specific checks that CI doesn't run.
+
+jobs:
+  # ── Dependency vulnerability scan ─────────────────────────────────────────────
+  # Checks every dependency against the RustSec advisory database.
+  # Fails on any advisory rated medium or higher.
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('server/Cargo.lock') }}
+
+      - name: Install cargo-audit and cargo-outdated
+        run: cargo install cargo-audit cargo-outdated --locked
+
+      - name: Run cargo audit
+        working-directory: server
+        run: cargo audit
+
+      - name: Check for outdated dependencies
+        working-directory: server
+        run: cargo outdated
+
+  # ── Dependency policy ──────────────────────────────────────────────────────────
+  # Enforces: no yanked crates, no duplicate security-critical crates,
+  # licence compliance, no unapproved registries or git sources.
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v1
+        with:
+          manifest-path: server/Cargo.toml
+          command: check advisories bans licenses sources

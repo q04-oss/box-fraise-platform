@@ -61,6 +61,11 @@ use crate::{app::AppState, auth::apple_attest};
 /// Change both sides together if this value changes.
 pub const MAX_SKEW_SECS: u64 = 300;
 
+/// Hard cap on the in-process nonce cache size.
+/// At 300s window, this allows ~333 authenticated req/s sustained before we start
+/// rejecting. Exceeding the cap fails closed — preferable to an OOM crash under DoS.
+const MAX_NONCE_CACHE_SIZE: usize = 100_000;
+
 // ── In-process nonce cache (fallback when Redis is not configured) ─────────────
 
 pub type NonceCache = Arc<Mutex<HashMap<String, u64>>>;
@@ -256,6 +261,10 @@ async fn check_and_reserve_nonce(nonce: &str, state: &AppState) -> bool {
         let mut cache = state.nonces.lock().unwrap();
         cache.retain(|_, exp| *exp > now);
         if cache.contains_key(nonce) {
+            return false;
+        }
+        if cache.len() >= MAX_NONCE_CACHE_SIZE {
+            tracing::error!("in-process nonce cache full — failing closed");
             return false;
         }
         cache.insert(nonce.to_string(), now + MAX_SKEW_SECS);

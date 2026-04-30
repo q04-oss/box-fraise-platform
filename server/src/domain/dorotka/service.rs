@@ -56,11 +56,13 @@ pub fn system_prompt(context: &str) -> &'static str {
 pub fn sanitise(raw: &str) -> anyhow::Result<String> {
     const MAX_CHARS: usize = 500;
 
-    // Strip /ask prefix (with or without leading slash and trailing space)
-    let stripped = raw
-        .trim()
-        .trim_start_matches("/ask")
-        .trim_start_matches("ask")
+    // Strip /ask or ask prefix — strip_prefix removes exactly one occurrence,
+    // unlike trim_start_matches which would greedily strip "/askask..." entirely.
+    let trimmed = raw.trim();
+    let stripped = trimmed
+        .strip_prefix("/ask")
+        .or_else(|| trimmed.strip_prefix("ask"))
+        .unwrap_or(trimmed)
         .trim();
 
     if stripped.is_empty() {

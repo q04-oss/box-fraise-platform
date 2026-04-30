@@ -135,6 +135,11 @@ pub fn build(state: AppState) -> Router {
             state.clone(),
             crate::http::middleware::rate_limit::check,
         ))
+        // Outer of hmac + rate_limit so it sees their 401/403 rejections too.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::http::middleware::log_rejections::log_rejections,
+        ))
 
         // ── Observability ─────────────────────────────────────────────────
         .layer(PropagateRequestIdLayer::x_request_id())

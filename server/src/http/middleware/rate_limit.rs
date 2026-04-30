@@ -64,7 +64,7 @@ pub async fn check(
 ) -> Response {
     let ip      = client_ip(req.headers(), req.extensions().get::<ConnectInfo<SocketAddr>>());
     let allowed = if let Some(pool) = &state.redis {
-        redis_allow(pool, ip).await
+        redis_allow(pool, ip, &state.rate).await
     } else {
         state.rate.allow(ip)
     };
@@ -81,13 +81,13 @@ pub async fn check(
 
 /// Redis-backed rate check: INCR fraise:rate:ip:{ip} EX 60.
 /// Returns true if the request is within the limit, false if exceeded.
-/// On Redis failure, fails open (allows the request) and logs a warning.
-async fn redis_allow(pool: &deadpool_redis::Pool, ip: IpAddr) -> bool {
+/// On Redis failure, falls back to the in-process limiter rather than failing open.
+async fn redis_allow(pool: &deadpool_redis::Pool, ip: IpAddr, fallback: &SharedRateLimiter) -> bool {
     let mut conn = match pool.get().await {
         Ok(c)  => c,
         Err(e) => {
-            tracing::warn!(error = %e, "rate limit Redis pool error — failing open");
-            return true;
+            tracing::warn!(error = %e, "rate limit Redis pool error — using in-process fallback");
+            return fallback.allow(ip);
         }
     };
 
@@ -95,8 +95,8 @@ async fn redis_allow(pool: &deadpool_redis::Pool, ip: IpAddr) -> bool {
     let count: i64 = match redis::cmd("INCR").arg(&key).query_async(&mut *conn).await {
         Ok(n)  => n,
         Err(e) => {
-            tracing::warn!(error = %e, "rate limit INCR failed — failing open");
-            return true;
+            tracing::warn!(error = %e, "rate limit INCR failed — using in-process fallback");
+            return fallback.allow(ip);
         }
     };
 

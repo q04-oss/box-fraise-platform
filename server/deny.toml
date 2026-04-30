@@ -1,0 +1,32 @@
+[advisories]
+# Fail on any unignored vulnerability advisory.
+vulnerability = "deny"
+unmaintained  = "warn"
+yanked        = "deny"
+notice        = "warn"
+
+[licenses]
+# Allow permissive and weak-copyleft licences common in the Rust ecosystem.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "OpenSSL",
+]
+# Crates whose licence cannot be determined automatically — manually reviewed.
+exceptions = []
+
+[bans]
+# Deny duplicate versions of crates where version skew creates security risk.
+multiple-versions = "warn"
+wildcards         = "deny"
+
+[sources]
+# Only allow crates from crates.io; no git dependencies in production.
+unknown-registry = "deny"
+unknown-git      = "deny"

@@ -30,10 +30,9 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Deserialize)]
 struct AskBody {
-    query:   String,
-    /// Selects the system prompt context. "whisked" loads the Whisked prompt;
-    /// anything else (including absent) falls back to the platform voice.
-    context: Option<String>,
+    query: String,
+    // context is intentionally absent — derived server-side from the Host header
+    // so callers cannot select a system prompt that doesn't belong to their surface.
 }
 
 #[derive(Serialize)]
@@ -59,7 +58,7 @@ async fn ask(
     let query = service::sanitise(&body.query)
         .map_err(|e| AppError::bad_request(&e.to_string()))?;
 
-    let context = body.context.as_deref().unwrap_or("fraise");
+    let context = context_from_host(&headers);
     let system  = service::system_prompt(context);
 
     let api_key = state.cfg.anthropic_api_key.as_ref()
@@ -93,6 +92,21 @@ async fn ask(
         answer,
         context: context.to_string(),
     }))
+}
+
+/// Derives the Dorotka context from the Host header.
+/// "whisked.*" hostnames get the Whisked persona; everything else gets the platform voice.
+/// This is intentionally server-side — callers must not select their own system prompt.
+fn context_from_host(headers: &HeaderMap) -> &'static str {
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if host.starts_with("whisked.") {
+        "whisked"
+    } else {
+        "fraise"
+    }
 }
 
 /// Fixed-window Redis rate limiter — same pattern as loyalty and HTML stamp endpoints.

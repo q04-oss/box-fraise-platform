@@ -21,6 +21,8 @@ const MAGIC_LINK_PREFIX:      &str = "fraise:magic:";
 const MAGIC_LINK_TTL:         u64  = 900;  // 15 minutes
 const MAGIC_RATE_PREFIX:      &str = "fraise:rate:magic:";
 const MAGIC_RATE_TTL:         u64  = 120;  // 2 minutes between requests per email
+const RESET_RATE_PREFIX:      &str = "fraise:rate:reset:";
+const RESET_RATE_TTL:         u64  = 300;  // 5 minutes between reset requests per email
 use super::{
     repository,
     types::{AuthResponse, StaffAuthResponse, UserRow},
@@ -194,6 +196,26 @@ pub async fn login(state: &AppState, email: &str, password: &str) -> AppResult<A
 // ── Password reset ────────────────────────────────────────────────────────────
 
 pub async fn forgot_password(state: &AppState, email: &str) -> AppResult<()> {
+    // Per-email rate limit — same pattern as magic link. Silent on excess so
+    // the response is identical whether the email exists or not (prevents enumeration
+    // and also prevents using 429 as a signal that the email is registered).
+    if let Some(pool) = state.redis.as_ref() {
+        let key = format!("{RESET_RATE_PREFIX}{}", email.to_lowercase());
+        let mut conn = pool.get().await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+        let count: i64 = redis::cmd("INCR")
+            .arg(&key)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis INCR: {e}")))?;
+        if count == 1 {
+            let _: () = redis::cmd("EXPIRE")
+                .arg(&key).arg(RESET_RATE_TTL)
+                .query_async(&mut *conn).await.unwrap_or(());
+        }
+        if count > 1 { return Ok(()); }
+    }
+
     if let Some(user) = repository::find_by_email(&state.db, email).await? {
         let token = Uuid::new_v4().to_string();
         repository::create_reset_token(&state.db, user.id, &token).await?;
@@ -332,9 +354,22 @@ pub async fn verify_magic_link(state: &AppState, token: &str) -> AppResult<AuthR
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/// HMAC-normalising constant-time comparison. Produces fixed-length 32-byte MACs
+/// for both inputs so the final XOR-fold runs over equal-length slices regardless
+/// of input length. This removes the length oracle present in naive early-return
+/// implementations. Matches the implementation in admin/routes.rs.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() { return false; }
-    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    use ring::{
+        hmac::{self, Key, HMAC_SHA256},
+        rand::{SecureRandom, SystemRandom},
+    };
+    let rng = SystemRandom::new();
+    let mut key_bytes = [0u8; 32];
+    if rng.fill(&mut key_bytes).is_err() { return false; }
+    let key   = Key::new(HMAC_SHA256, &key_bytes);
+    let mac_a = hmac::sign(&key, a);
+    let mac_b = hmac::sign(&key, b);
+    mac_a.as_ref().iter().zip(mac_b.as_ref()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 // ── Email verification ────────────────────────────────────────────────────────

@@ -151,6 +151,26 @@ async fn claim_booking(
     RequireUser(user_id): RequireUser,
     AppJson(body): AppJson<ClaimBookingBody>,
 ) -> AppResult<Json<serde_json::Value>> {
+    // Verify the submitted email matches the user's own registered email.
+    // Without this, any authenticated user can claim table_verified status
+    // by supplying another user's booking email.
+    let registered: Option<String> = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(AppError::Db)?
+        .flatten();
+
+    let matches = registered
+        .as_deref()
+        .map(|e| e.eq_ignore_ascii_case(&body.email))
+        .unwrap_or(false);
+
+    if !matches {
+        tracing::warn!(user_id = %user_id, submitted_email = %body.email, "claim_booking email mismatch — possible probing");
+        return Err(AppError::bad_request("email does not match your account"));
+    }
+
     let verified = repository::claim_booking_email(&state.db, user_id, &body.email).await?;
     Ok(Json(serde_json::json!({ "ok": true, "verified": verified })))
 }
