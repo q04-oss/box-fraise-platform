@@ -1,9 +1,10 @@
 # Rust
 target/
 
-# Environment
+# Environment — ignore real secrets, track the example
 .env
-.env.*
+.env.local
+.env.*.local
 
 # Editor
 .vscode/

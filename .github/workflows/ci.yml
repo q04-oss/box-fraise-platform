@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: check · clippy · test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: fraise
+          POSTGRES_PASSWORD: fraise
+          POSTGRES_DB: fraise_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+
+      - name: cargo check
+        working-directory: server
+        run: cargo check
+        env:
+          DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_test
+
+      - name: cargo clippy
+        working-directory: server
+        run: cargo clippy -- -D warnings
+        env:
+          DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_test
+
+      - name: cargo test
+        working-directory: server
+        run: cargo test
+        env:
+          DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_test
+          # testcontainers handles Redis — no Redis service needed here
