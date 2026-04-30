@@ -47,8 +47,19 @@ pub async fn start(state: AppState) -> anyhow::Result<()> {
         })?).await?;
     }
 
+    // Every 5 minutes — alert operator if Square push failures occurred.
+    // A customer paid but their order wasn't sent to the POS; silent failure
+    // without this alert means the operator only discovers it from customer complaints.
+    {
+        let s = state.clone();
+        sched.add(Job::new_async("0 */5 * * * *", move |_, _| {
+            let s = s.clone();
+            Box::pin(async move { alert_square_push_failures(&s).await; })
+        })?).await?;
+    }
+
     sched.start().await?;
-    info!("cron scheduler started (4 jobs)");
+    info!("cron scheduler started (5 jobs)");
     Ok(())
 }
 
@@ -310,6 +321,74 @@ async fn send_renewal_reminder(
     let subject   = format!("Your {tier} membership renews in {days_left} days — Maison Fraise");
     let html      = resend::renewal_reminder_html(tier, renews_at, days_left);
     let _ = resend::send(http, key, email, &subject, &html).await;
+}
+
+// ── Square push failure alerts ────────────────────────────────────────────────
+
+async fn alert_square_push_failures(state: &AppState) {
+    let (Some(ref operator_email), Some(ref key)) =
+        (&state.cfg.operator_email, &state.cfg.resend_api_key)
+    else {
+        return; // alerting not configured
+    };
+
+    #[derive(sqlx::FromRow)]
+    struct FailureRow {
+        business_id: Option<i32>,
+        metadata:    serde_json::Value,
+    }
+
+    let rows: Vec<FailureRow> = match sqlx::query_as(
+        "SELECT business_id, metadata
+         FROM audit_events
+         WHERE event_kind = 'venue_order.square_push_failed'
+           AND created_at > NOW() - INTERVAL '10 minutes'
+         ORDER BY created_at DESC",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(r)  => r,
+        Err(e) => {
+            tracing::error!(error = %e, "alert_square_push_failures: query failed");
+            return;
+        }
+    };
+
+    if rows.is_empty() { return; }
+
+    let count = rows.len();
+    tracing::warn!(count, "Square push failures detected — alerting operator");
+
+    let rows_html: String = rows.iter().map(|r| {
+        let order_id = r.metadata["order_id"].as_i64().map(|n| n.to_string()).unwrap_or_else(|| "—".into());
+        let pi_id    = r.metadata["pi_id"].as_str().unwrap_or("—");
+        let error    = r.metadata["error"].as_str().unwrap_or("—");
+        let biz_id   = r.business_id.map(|n| n.to_string()).unwrap_or_else(|| "—".into());
+        format!("<tr><td>{biz_id}</td><td>{order_id}</td><td style='font-family:monospace'>{pi_id}</td><td>{error}</td></tr>")
+    }).collect();
+
+    let plural  = if count == 1 { "" } else { "s" };
+    let subject = format!("⚠ {count} Square push failure{plural} — orders need attention");
+    let html    = format!(
+        "<h2>{count} Square push failure{plural} in the last 10 minutes</h2>\
+         <p>The following customers paid but their orders were not sent to the POS. \
+         They may need to be manually fulfilled or refunded.</p>\
+         <table border='1' cellpadding='6' style='border-collapse:collapse;font-size:14px'>\
+           <tr style='background:#f5f5f5'>\
+             <th>Business</th><th>Order ID</th><th>Stripe PI</th><th>Error</th>\
+           </tr>\
+           {rows_html}\
+         </table>\
+         <p style='color:#888;font-size:12px'>Sent by Maison Fraise platform — check audit_events for full detail.</p>"
+    );
+
+    let http  = state.http.clone();
+    let key   = key.expose_secret().to_owned();
+    let email = operator_email.clone();
+    tokio::spawn(async move {
+        let _ = resend::send(&http, &key, &email, &subject, &html).await;
+    });
 }
 
 // ── January reset ─────────────────────────────────────────────────────────────

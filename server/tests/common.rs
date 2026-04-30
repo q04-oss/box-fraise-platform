@@ -55,6 +55,7 @@ pub fn test_config() -> Config {
         square_token_encryption_key:  None,
         api_base_url:        "http://localhost:3001".to_string(),
         platform_fee_bips:   500,
+        operator_email:                   None,
         square_order_webhook_signing_key: None,
         square_order_notification_url:    None,
         app_store_id:                     None,

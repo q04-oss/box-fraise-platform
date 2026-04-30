@@ -92,6 +92,11 @@ pub struct Config {
     /// Generate with: openssl rand -hex 32
     pub square_token_encryption_key: Option<SecretString>,
 
+    // ── Operator alerting ─────────────────────────────────────────────────────
+    /// Email address for operational alerts (Square push failures, etc.).
+    /// When absent, alerts are logged but not emailed.
+    pub operator_email: Option<String>,
+
     // ── Public URL ───────────────────────────────────────────────────────────
     /// The publicly reachable base URL of this API server.
     /// Used to generate links in transactional emails (email verification, etc.).
@@ -186,6 +191,8 @@ impl Config {
             anthropic_api_key: optional_secret("ANTHROPIC_API_KEY"),
             cloudinary_api_key:    optional_secret("CLOUDINARY_API_KEY"),
             cloudinary_api_secret: optional_secret("CLOUDINARY_API_SECRET"),
+
+            operator_email:            optional("OPERATOR_EMAIL"),
 
             // optional public identifiers
             apple_team_id:         optional("APPLE_TEAM_ID"),
