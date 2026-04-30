@@ -7,6 +7,10 @@ edition = "2021"
 name = "server"
 path = "src/main.rs"
 
+[lib]
+name = "box_fraise_server"
+path = "src/lib.rs"
+
 [dependencies]
 
 # ── Web ──────────────────────────────────────────────────────────────────────
@@ -79,6 +83,12 @@ url       = "2"
 # ── Observability ─────────────────────────────────────────────────────────────
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+sqlx               = { version = "0.8", features = ["runtime-tokio", "postgres", "macros"] }
+tokio              = { version = "1",   features = ["full"] }
+testcontainers     = "0.23"
+testcontainers-modules = { version = "0.11", features = ["redis"] }
 
 [profile.release]
 opt-level     = 3
