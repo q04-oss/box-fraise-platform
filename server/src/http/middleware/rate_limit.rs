@@ -115,7 +115,7 @@ async fn redis_allow(pool: &deadpool_redis::Pool, ip: IpAddr) -> bool {
 
 // ── IP resolution ─────────────────────────────────────────────────────────────
 
-fn client_ip(headers: &HeaderMap, connect: Option<&ConnectInfo<SocketAddr>>) -> IpAddr {
+pub fn client_ip(headers: &HeaderMap, connect: Option<&ConnectInfo<SocketAddr>>) -> IpAddr {
     // X-Forwarded-For: client, proxy1, proxy2 — take the leftmost.
     if let Some(xff) = headers.get("x-forwarded-for") {
         if let Ok(s) = xff.to_str() {

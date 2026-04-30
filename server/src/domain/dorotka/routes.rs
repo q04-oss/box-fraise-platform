@@ -1,5 +1,6 @@
 use axum::{
     extract::{ConnectInfo, State},
+    http::HeaderMap,
     routing::post,
     Json, Router,
 };
@@ -10,6 +11,7 @@ use crate::{
     app::AppState,
     audit,
     error::{AppError, AppResult},
+    http::middleware::rate_limit::client_ip,
     integrations::anthropic,
 };
 use super::service;
@@ -43,9 +45,12 @@ struct AskResponse {
 async fn ask(
     State(state):      State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers:           HeaderMap,
     Json(body):        Json<AskBody>,
 ) -> AppResult<Json<AskResponse>> {
-    let ip = addr.ip();
+    // Use X-Forwarded-For (set by Railway's proxy) — ConnectInfo gives the
+    // proxy's IP, not the client's.
+    let ip = client_ip(&headers, Some(&ConnectInfo(addr)));
 
     // Rate check before any other work — cheap Redis call prevents wasted Anthropic spend
     rate_check(&state, ip).await?;
