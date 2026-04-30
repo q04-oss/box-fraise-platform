@@ -46,13 +46,19 @@ pub fn sign_token(user_id: UserId, cfg: &Config) -> Result<String, AppError> {
 }
 
 pub fn verify_token(token: &str, cfg: &Config) -> Option<Claims> {
-    decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(cfg.jwt_secret.expose_secret().as_bytes()),
-        &Validation::default(),
-    )
-    .ok()
-    .map(|d| d.claims)
+    // Try current secret first. Fall back to previous during rotation window.
+    decode_claims(token, cfg.jwt_secret.expose_secret())
+        .or_else(|| {
+            cfg.jwt_secret_previous
+                .as_ref()
+                .and_then(|prev| decode_claims(token, prev.expose_secret()))
+        })
+}
+
+fn decode_claims(token: &str, secret: &str) -> Option<Claims> {
+    decode::<Claims>(token, &DecodingKey::from_secret(secret.as_bytes()), &Validation::default())
+        .ok()
+        .map(|d| d.claims)
 }
 
 // ── Revocation list ───────────────────────────────────────────────────────────

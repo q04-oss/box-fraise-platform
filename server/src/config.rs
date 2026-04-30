@@ -17,8 +17,12 @@ pub struct Config {
     /// Threat: credential exposure via log/error leakage — contains DB password.
     pub database_url: SecretString,
     /// Threat: token forgery if leaked — used to sign and verify all JWTs.
-    pub jwt_secret:   SecretString,
-    pub port:         u16,
+    pub jwt_secret:          SecretString,
+    /// Previous JWT secret — set during rotation window so tokens signed with
+    /// the old key remain valid until they naturally expire. Unset after one
+    /// full token TTL (90 days). See README for the rotation procedure.
+    pub jwt_secret_previous: Option<SecretString>,
+    pub port:                u16,
 
     // ── iOS request signing ───────────────────────────────────────────────────
     /// Threat: HMAC bypass — fallback key for non-attested iOS clients.
@@ -70,7 +74,10 @@ pub struct Config {
     /// cryptographically invalid at any staff endpoint even if a serde bug appeared.
     /// Threat: staff endpoint access by regular users — structural isolation via
     /// StaffClaims is the first line; a separate secret is defense-in-depth.
-    pub staff_jwt_secret: SecretString,
+    pub staff_jwt_secret:          SecretString,
+    /// Previous staff JWT secret — same rotation semantics as jwt_secret_previous
+    /// but scoped to staff tokens. Unset after one full shift TTL (8 hours).
+    pub staff_jwt_secret_previous: Option<SecretString>,
 
     // ── Square OAuth ──────────────────────────────────────────────────────────
     /// Public Square application ID — safe to log.
@@ -158,7 +165,9 @@ impl Config {
             // required secrets
             database_url:          require_secret("DATABASE_URL")?,
             jwt_secret:            jwt_secret_raw.into(),
+            jwt_secret_previous:   optional_secret("JWT_SECRET_PREVIOUS"),
             staff_jwt_secret:      staff_jwt_secret_raw.into(),
+            staff_jwt_secret_previous: optional_secret("STAFF_JWT_SECRET_PREVIOUS"),
             stripe_secret_key:     require_secret("STRIPE_SECRET_KEY")?,
             stripe_webhook_secret: require_secret("STRIPE_WEBHOOK_SECRET")?,
             admin_pin:             admin_pin_raw.into(),

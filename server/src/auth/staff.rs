@@ -66,11 +66,17 @@ pub fn sign_staff_token(
 }
 
 pub fn verify_staff_token(token: &str, cfg: &Config) -> Option<StaffClaims> {
-    decode::<StaffClaims>(
-        token,
-        &DecodingKey::from_secret(cfg.staff_jwt_secret.expose_secret().as_bytes()),
-        &Validation::default(),
-    )
-    .ok()
-    .map(|d| d.claims)
+    // Try current secret first. Fall back to previous during rotation window.
+    decode_staff_claims(token, cfg.staff_jwt_secret.expose_secret())
+        .or_else(|| {
+            cfg.staff_jwt_secret_previous
+                .as_ref()
+                .and_then(|prev| decode_staff_claims(token, prev.expose_secret()))
+        })
+}
+
+fn decode_staff_claims(token: &str, secret: &str) -> Option<StaffClaims> {
+    decode::<StaffClaims>(token, &DecodingKey::from_secret(secret.as_bytes()), &Validation::default())
+        .ok()
+        .map(|d| d.claims)
 }

@@ -27,8 +27,10 @@ use box_fraise_server::{
 pub fn test_config() -> Config {
     Config {
         database_url:    SecretString::from("postgres://localhost/test".to_string()),
-        jwt_secret:      SecretString::from("test-jwt-secret-minimum-32-characters!!".to_string()),
-        staff_jwt_secret: SecretString::from("test-staff-secret-minimum-32-chars!!".to_string()),
+        jwt_secret:               SecretString::from("test-jwt-secret-minimum-32-characters!!".to_string()),
+        jwt_secret_previous:      None,
+        staff_jwt_secret:         SecretString::from("test-staff-secret-minimum-32-chars!!".to_string()),
+        staff_jwt_secret_previous: None,
         stripe_secret_key:     SecretString::from("sk_test_placeholder".to_string()),
         stripe_webhook_secret: SecretString::from("whsec_placeholder".to_string()),
         admin_pin:       SecretString::from("testpin1".to_string()),

@@ -90,7 +90,9 @@ sqlx migrate run
 - **Single-use tokens** — QR stamp tokens, email verification tokens, OAuth CSRF state, and NFC activation windows are all GETDEL (Redis) so replay is structurally impossible
 - **AES-256-GCM at rest** — Square OAuth tokens are encrypted at the application layer before hitting the DB; the encryption key is an env var, not in the database
 - **Separate staff JWT secret** — `STAFF_JWT_SECRET` is distinct from `JWT_SECRET`; a user token cannot be decoded as a `StaffClaims` token regardless of library bugs
-- **Square webhook signature** — `validate_webhook` verifies HMAC-SHA256 over `notification_url + body`, base64-encoded, constant-time; server refuses to start if Square is configured without the signing key
+- **Redis-backed JWT revocation** — logout and other security events write `SET fraise:revoked:{jti} 1 EX {ttl}` to Redis; every authenticated request checks `EXISTS fraise:revoked:{jti}` before reaching a handler; both user and staff tokens are checked; falls back to in-process store if Redis is unavailable
+- **JWT secret rotation without forced logout** — set `JWT_SECRET_PREVIOUS=$OLD_SECRET` and `JWT_SECRET=$NEW_SECRET` and deploy; tokens signed with the old key verify against the previous-secret fallback and remain valid until they naturally expire; unset `JWT_SECRET_PREVIOUS` after one full token TTL (90 days for user tokens, 8h for staff); same procedure applies to `STAFF_JWT_SECRET_PREVIOUS`
+- **Square webhook signature** — `validate_webhook` verifies HMAC-SHA256 over `notification_url + body`, base64-encoded, constant-time comparison via `subtle::ConstantTimeEq`; server refuses to start if Square is configured without the signing key
 
 ## Health check
 
