@@ -64,6 +64,26 @@ pub struct Config {
     /// Threat: media upload abuse / asset deletion if leaked.
     pub cloudinary_api_key:    Option<SecretString>,
     pub cloudinary_api_secret: Option<SecretString>,
+
+    // ── Staff auth ────────────────────────────────────────────────────────────
+    /// Separate signing secret for staff JWTs so a compromised user token is
+    /// cryptographically invalid at any staff endpoint even if a serde bug appeared.
+    /// Threat: staff endpoint access by regular users — structural isolation via
+    /// StaffClaims is the first line; a separate secret is defense-in-depth.
+    pub staff_jwt_secret: SecretString,
+
+    // ── Square OAuth ──────────────────────────────────────────────────────────
+    /// Public Square application ID — safe to log.
+    pub square_app_id: Option<String>,
+    /// Threat: OAuth impersonation — used to exchange authorization codes for tokens.
+    pub square_app_secret: Option<SecretString>,
+    /// Must exactly match the redirect URL registered in the Square Developer dashboard.
+    pub square_oauth_redirect_url: Option<String>,
+    /// 32-byte hex key for AES-256-GCM encryption of Square OAuth tokens at rest.
+    /// Threat: DB credential leak exposes Square tokens — application-layer encryption
+    /// ensures tokens are useless without this key.
+    /// Generate with: openssl rand -hex 32
+    pub square_token_encryption_key: Option<SecretString>,
 }
 
 impl Config {
@@ -72,6 +92,11 @@ impl Config {
         let jwt_secret_raw = require("JWT_SECRET")?;
         if jwt_secret_raw.len() < 32 {
             anyhow::bail!("JWT_SECRET must be at least 32 characters");
+        }
+
+        let staff_jwt_secret_raw = require("STAFF_JWT_SECRET")?;
+        if staff_jwt_secret_raw.len() < 32 {
+            anyhow::bail!("STAFF_JWT_SECRET must be at least 32 characters");
         }
 
         let admin_pin_raw       = require("ADMIN_PIN")?;
@@ -86,6 +111,7 @@ impl Config {
             // required secrets
             database_url:          require_secret("DATABASE_URL")?,
             jwt_secret:            jwt_secret_raw.into(),
+            staff_jwt_secret:      staff_jwt_secret_raw.into(),
             stripe_secret_key:     require_secret("STRIPE_SECRET_KEY")?,
             stripe_webhook_secret: require_secret("STRIPE_WEBHOOK_SECRET")?,
             admin_pin:             admin_pin_raw.into(),
@@ -110,6 +136,15 @@ impl Config {
             apple_key_id:          optional("APPLE_KEY_ID"),
             apple_client_id:       optional("APPLE_CLIENT_ID"),
             cloudinary_cloud_name: optional("CLOUDINARY_CLOUD_NAME"),
+
+            // staff auth
+            staff_jwt_secret: require_secret("STAFF_JWT_SECRET")?,
+
+            // Square OAuth — all optional; Square integration is disabled when absent
+            square_app_id:                optional("SQUARE_APP_ID"),
+            square_app_secret:            optional_secret("SQUARE_APP_SECRET"),
+            square_oauth_redirect_url:    optional("SQUARE_OAUTH_REDIRECT_URL"),
+            square_token_encryption_key:  optional_secret("SQUARE_TOKEN_ENCRYPTION_KEY"),
         })
     }
 }

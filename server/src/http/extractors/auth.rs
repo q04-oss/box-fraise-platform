@@ -1,8 +1,11 @@
 /// Axum request extractors for authenticated callers.
 ///
-/// `RequireUser`   — any valid, non-revoked JWT. Yields the user's ID.
+/// `RequireUser`   — any valid, non-revoked user JWT. Yields the user's ID.
 /// `RequireClaims` — same, but yields the full Claims (needed for logout).
 /// `OptionalAuth`  — yields Some(user_id) if a valid token is present, None otherwise.
+/// `RequireStaff`  — valid StaffClaims JWT signed with STAFF_JWT_SECRET. Yields
+///                   (user_id, business_id). A regular user JWT is rejected at the
+///                   cryptographic level before any claim check runs.
 /// `RequireDevice` — Cardputer EIP-191 device auth. Yields DeviceInfo.
 use axum::{
     extract::{FromRef, FromRequestParts},
@@ -19,6 +22,7 @@ use crate::{
     app::AppState,
     auth::{self, Claims},
     auth::device::{parse_auth_header, verify_signature},
+    auth::staff::{self as staff_auth, StaffClaims},
     error::AppError,
     types::UserId,
 };
@@ -147,5 +151,46 @@ where
             role:    row.role,
             user_id: row.user_id,
         }))
+    }
+}
+
+// ── RequireStaff ──────────────────────────────────────────────────────────────
+
+/// Verified staff credentials scoped to a specific business.
+///
+/// A regular user JWT is rejected at the signature-verification step —
+/// it was not signed with STAFF_JWT_SECRET. A staff token for business A
+/// cannot satisfy an endpoint that asserts business B's ID.
+pub struct RequireStaff(pub StaffClaims);
+
+impl RequireStaff {
+    pub fn user_id(&self)     -> UserId { self.0.user_id }
+    pub fn business_id(&self) -> i32    { self.0.business_id }
+}
+
+impl<S> FromRequestParts<S> for RequireStaff
+where
+    AppState: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, AppError> {
+        let app = AppState::from_ref(state);
+
+        let TypedHeader(Authorization(bearer)) = parts
+            .extract::<TypedHeader<Authorization<Bearer>>>()
+            .await
+            .map_err(|_| AppError::Unauthorized)?;
+
+        let claims = staff_auth::verify_staff_token(bearer.token(), &app.cfg)
+            .ok_or(AppError::Unauthorized)?;
+
+        // Staff tokens are short-lived (8h) and not tracked in the revocation list —
+        // at 8h TTL the revocation list overhead is not worth it for shift tokens.
+        // If immediate revocation is needed for a specific token, the staff member
+        // re-authenticates (short TTL is the mitigation).
+
+        Ok(RequireStaff(claims))
     }
 }

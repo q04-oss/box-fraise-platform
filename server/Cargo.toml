@@ -33,13 +33,14 @@ sqlx = { version = "0.8", features = [
 ] }
 
 # ── Crypto ────────────────────────────────────────────────────────────────────
-ring  = "0.17"                                              # HMAC-SHA256
-p256  = { version = "0.13", features = ["ecdsa", "pkcs8"] }# Apple Sign In / App Attest
-k256  = { version = "0.13", features = ["ecdsa"] }          # Cardputer EIP-191
-sha2  = "0.10"
-sha3  = "0.10"                                              # Keccak-256 for EIP-191
-rand  = "0.8"
-hex   = "0.4"
+ring    = "0.17"                                              # HMAC-SHA256
+p256    = { version = "0.13", features = ["ecdsa", "pkcs8"] }# Apple Sign In / App Attest
+k256    = { version = "0.13", features = ["ecdsa"] }          # Cardputer EIP-191
+sha2    = "0.10"
+sha3    = "0.10"                                              # Keccak-256 for EIP-191
+rand    = "0.8"
+hex     = "0.4"
+aes-gcm = "0.10"                                              # AES-256-GCM for Square token encryption at rest
 
 # ── App Attest ────────────────────────────────────────────────────────────────
 ciborium    = "0.2"     # CBOR decode of attestation objects

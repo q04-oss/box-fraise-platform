@@ -5,6 +5,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod app;
 mod auth;
+mod crypto;
 mod types;
 mod config;
 mod db;

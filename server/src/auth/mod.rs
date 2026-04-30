@@ -1,6 +1,7 @@
 pub mod apple;
 pub mod apple_attest;
 pub mod device;
+pub mod staff;
 
 use chrono::Utc;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
