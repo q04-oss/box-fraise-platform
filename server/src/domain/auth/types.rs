@@ -101,7 +101,25 @@ pub struct DisplayNameBody {
     pub display_name: String,
 }
 
+// ── Staff auth ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct StaffLoginBody {
+    /// The location whose staff_pin is being presented.
+    pub location_id: i32,
+    /// The PIN printed on the staff card / shown in the business dashboard.
+    pub pin: String,
+}
+
 // ── Response bodies ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct StaffAuthResponse {
+    pub user_id:     i32,
+    pub business_id: i32,
+    /// Short-lived JWT signed with STAFF_JWT_SECRET. TTL: 8 hours.
+    pub token:       String,
+}
 
 #[derive(Debug, Serialize)]
 pub struct AuthResponse {

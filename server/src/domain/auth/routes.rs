@@ -1,8 +1,9 @@
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     routing::{get, patch, post},
     Json, Router,
 };
+use std::net::SocketAddr;
 
 use crate::{
     app::AppState,
@@ -19,6 +20,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/auth/apple",           post(apple))
         .route("/api/auth/operator",        post(operator))
+        .route("/api/auth/staff",           post(staff_login))
         .route("/api/auth/demo",            post(demo))
         .route("/api/auth/register",        post(register))
         .route("/api/auth/login",           post(login))
@@ -51,6 +53,14 @@ async fn operator(
     AppJson(body): AppJson<OperatorAuthBody>,
 ) -> AppResult<Json<AuthResponse>> {
     Ok(Json(service::operator_login(&state, &body.code, body.location_id).await?))
+}
+
+async fn staff_login(
+    State(state):               State<AppState>,
+    ConnectInfo(addr):          ConnectInfo<SocketAddr>,
+    AppJson(body):              AppJson<StaffLoginBody>,
+) -> AppResult<Json<StaffAuthResponse>> {
+    Ok(Json(service::staff_login(&state, &body.pin, body.location_id, Some(addr.ip())).await?))
 }
 
 async fn demo(

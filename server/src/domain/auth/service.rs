@@ -1,15 +1,19 @@
 use secrecy::ExposeSecret;
 use uuid::Uuid;
 
+use std::net::IpAddr;
+
 use crate::{
+    audit,
     auth,
+    auth::staff,
     app::AppState,
     error::{AppError, AppResult},
     types::UserId,
 };
 use super::{
     repository,
-    types::{AuthResponse, UserRow},
+    types::{AuthResponse, StaffAuthResponse, UserRow},
 };
 
 // ── Apple Sign In ─────────────────────────────────────────────────────────────
@@ -61,6 +65,42 @@ pub async fn operator_login(
 
     let token = auth::sign_token(user.id, &state.cfg)?;
     Ok(AuthResponse { user_id: user.id, token, is_new: false, verified: true })
+}
+
+// ── Staff login ───────────────────────────────────────────────────────────────
+
+/// Authenticates a staff member against a location's staff PIN and issues a
+/// `StaffClaims` JWT scoped to that location's business.
+///
+/// The issued token is short-lived (8h / one shift) and signed with
+/// `STAFF_JWT_SECRET` — cryptographically distinct from user tokens.
+pub async fn staff_login(
+    state:       &AppState,
+    pin:         &str,
+    location_id: i32,
+    ip:          Option<IpAddr>,
+) -> AppResult<StaffAuthResponse> {
+    let (user_id, business_id) =
+        repository::find_staff_with_business(&state.db, pin, location_id)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+
+    let token = staff::sign_staff_token(user_id, business_id, &state.cfg)?;
+
+    audit::write(
+        &state.db,
+        Some(user_id.into()),
+        Some(business_id),
+        "auth.staff_login",
+        serde_json::json!({ "location_id": location_id }),
+        ip,
+    ).await;
+
+    Ok(StaffAuthResponse {
+        user_id:     user_id.into(),
+        business_id,
+        token,
+    })
 }
 
 // ── Demo (Apple App Review) ───────────────────────────────────────────────────

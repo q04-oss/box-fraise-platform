@@ -16,6 +16,7 @@ pub mod payments;
 pub mod popups;
 pub mod portal;
 pub mod search;
+pub mod squareoauth;
 pub mod users;
 pub mod tokens;
 pub mod tournaments;
