@@ -91,6 +91,12 @@ pub struct Config {
     /// e.g. https://your-api.up.railway.app
     pub api_base_url: String,
 
+    // ── iOS App Store ─────────────────────────────────────────────────────────
+    /// Apple App Store numeric ID (e.g. "6478901234").
+    /// When present, the NFC fallback page includes a direct App Store download link.
+    /// When absent, the download link is omitted rather than showing a broken URL.
+    pub app_store_id: Option<String>,
+
     // ── Venue ordering ────────────────────────────────────────────────────────
     /// Platform fee on venue drink orders, in basis points. 500 = 5%.
     /// Applied as Stripe's application_fee_amount on Connect charges.
@@ -181,6 +187,7 @@ impl Config {
             // public URL
             api_base_url: optional("API_BASE_URL")
                 .unwrap_or_else(|| "http://localhost:3001".to_string()),
+            app_store_id: optional("APP_STORE_ID"),
 
             // venue ordering
             platform_fee_bips:                    optional_parse("PLATFORM_FEE_BIPS", 500i64)?,

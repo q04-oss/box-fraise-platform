@@ -69,6 +69,30 @@ pub async fn send_verification_email(
     send(http, api_key, to, "verify your email — box fraise", &html).await
 }
 
+pub async fn send_password_reset(
+    http:      &reqwest::Client,
+    api_key:   &str,
+    to:        &str,
+    reset_url: &str,
+) -> AppResult<()> {
+    let html = base_template(&format!(
+        r#"<p>We received a request to reset your Box Fraise password.</p>
+           <p style="margin:32px 0">
+             <a href="{reset_url}"
+                style="background:#C9973A;color:#0a0a0a;padding:12px 24px;
+                       text-decoration:none;border-radius:6px;font-size:14px;
+                       font-family:-apple-system,sans-serif;font-weight:600">
+               reset password
+             </a>
+           </p>
+           <p style="color:#555;font-size:12px">
+             This link expires in 1 hour. If you didn't request this, ignore the email —
+             your password hasn't changed.
+           </p>"#
+    ));
+    send(http, api_key, to, "reset your password — box fraise", &html).await
+}
+
 pub async fn send_order_confirmation(
     http:      &reqwest::Client,
     api_key:   &str,

@@ -193,8 +193,18 @@ pub async fn forgot_password(state: &AppState, email: &str) -> AppResult<()> {
     if let Some(user) = repository::find_by_email(&state.db, email).await? {
         let token = Uuid::new_v4().to_string();
         repository::create_reset_token(&state.db, user.id, &token).await?;
-        // TODO: integrations::resend::send_password_reset(&state.http, &cfg, email, &token)
-        tracing::info!(user_id = %user.id, "password reset token generated");
+
+        // Fire-and-forget — email delivery failure must not roll back the token.
+        if let Some(api_key) = state.cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned()) {
+            let http     = state.http.clone();
+            let base_url = state.cfg.api_base_url.clone();
+            let to       = email.to_owned();
+            tokio::spawn(async move {
+                // Universal Link — iOS intercepts this and shows the in-app reset form.
+                let reset_url = format!("{base_url}/reset-password?token={token}");
+                let _ = resend::send_password_reset(&http, &api_key, &to, &reset_url).await;
+            });
+        }
     }
     // Intentionally silent whether the email exists — prevents enumeration.
     Ok(())

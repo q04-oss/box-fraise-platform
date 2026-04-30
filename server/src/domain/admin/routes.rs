@@ -41,8 +41,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/admin/varieties",           get(list_varieties_admin))
         .route("/api/admin/varieties/{id}/stock", patch(set_stock))
         // Businesses
-        .route("/api/admin/businesses",          get(list_businesses_admin))
-        .route("/api/admin/businesses/{id}/verify", post(verify_business))
+        .route("/api/admin/businesses",                       get(list_businesses_admin))
+        .route("/api/admin/businesses/{id}/verify",           post(verify_business))
+        .route("/api/admin/businesses/{id}/loyalty-config",   post(set_loyalty_config))
 }
 
 // â”€â”€ PIN extraction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -500,4 +501,58 @@ async fn verify_business(
     }
 
     Ok(Json(serde_json::json!({ "verified": true })))
+}
+
+// ── Loyalty configuration ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SetLoyaltyConfigBody {
+    steeps_per_reward:  i32,
+    reward_description: String,
+}
+
+/// Creates or replaces the loyalty programme configuration for a business.
+/// Required before any customer can earn steeps at that business.
+async fn set_loyalty_config(
+    State(state):      State<AppState>,
+    RequireUser(_uid): RequireUser,
+    Path(business_id): Path<i32>,
+    method:            axum::http::Method,
+    uri:               axum::http::Uri,
+    headers:           axum::http::HeaderMap,
+    Json(body):        Json<SetLoyaltyConfigBody>,
+) -> AppResult<Json<serde_json::Value>> {
+    let role = require_admin_pin(&headers, &state.cfg, method.as_str(), uri.path())?;
+    if role < AdminRole::Admin {
+        return Err(AppError::Forbidden);
+    }
+
+    if body.steeps_per_reward < 1 || body.steeps_per_reward > 100 {
+        return Err(AppError::bad_request("steeps_per_reward must be between 1 and 100"));
+    }
+    let description = body.reward_description.trim();
+    if description.is_empty() {
+        return Err(AppError::bad_request("reward_description cannot be empty"));
+    }
+
+    sqlx::query(
+        "INSERT INTO business_loyalty_config (business_id, steeps_per_reward, reward_description)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (business_id) DO UPDATE
+             SET steeps_per_reward  = EXCLUDED.steeps_per_reward,
+                 reward_description = EXCLUDED.reward_description,
+                 updated_at         = now()"
+    )
+    .bind(business_id)
+    .bind(body.steeps_per_reward)
+    .bind(description)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::Db)?;
+
+    Ok(Json(serde_json::json!({
+        "business_id":        business_id,
+        "steeps_per_reward":  body.steeps_per_reward,
+        "reward_description": description,
+    })))
 }

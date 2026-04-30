@@ -10,6 +10,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use deadpool_redis::redis;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -24,8 +25,34 @@ pub fn router() -> Router<AppState> {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-async fn health() -> impl IntoResponse {
-    Json(json!({ "status": "ok" }))
+async fn health(State(state): State<AppState>) -> impl IntoResponse {
+    let db_ok = sqlx::query("SELECT 1")
+        .execute(&state.db)
+        .await
+        .is_ok();
+
+    let redis_ok = match state.redis.as_ref() {
+        None => true, // Redis not configured — not a failure condition
+        Some(pool) => match pool.get().await {
+            Err(_) => false,
+            Ok(mut conn) => redis::cmd("PING")
+                .query_async::<String>(&mut *conn)
+                .await
+                .is_ok(),
+        },
+    };
+
+    let status_code = if db_ok && redis_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (status_code, Json(json!({
+        "status": if db_ok && redis_ok { "ok" } else { "degraded" },
+        "db":    if db_ok    { "ok" } else { "error" },
+        "redis": if redis_ok { "ok" } else { "error" },
+    })))
 }
 
 /// Apple App Site Association — drives Universal Links in the iOS app.

@@ -229,7 +229,6 @@ async fn nfc_activate(
 }
 
 #[derive(Deserialize)]
-#[derive(Deserialize)]
 struct NfcRedeemBody { sticker_uuid: String }
 
 #[derive(Serialize)]
@@ -264,9 +263,19 @@ async fn nfc_redeem(
 /// device that does not have the Box Fraise app installed.
 /// Devices with the app never reach this endpoint — iOS intercepts the URL
 /// and opens the app directly via Universal Links.
-async fn nfc_tap(Path(uuid): Path<String>) -> Response {
-    // The app is not installed. Show a download prompt.
-    // The UUID is preserved in the URL so the app can redeem immediately after install.
+async fn nfc_tap(
+    State(state): State<AppState>,
+    Path(_uuid):  Path<String>,
+) -> Response {
+    // Only include the App Store link if APP_STORE_ID is configured.
+    // A missing ID shows no link rather than a broken one.
+    let cta = match state.cfg.app_store_id.as_deref() {
+        Some(id) => format!(
+            r#"<a href="https://apps.apple.com/app/box-fraise/id{id}">get the app</a>"#
+        ),
+        None => "<p style=\"color:#C0392B;font-size:.8rem\">app not yet available</p>".to_string(),
+    };
+
     Html(format!(r#"<!doctype html>
 <html lang="en">
 <head>
@@ -291,7 +300,7 @@ a{{display:block;background:#1C1C1E;color:#F7F5F2;text-decoration:none;
   <div style="font-size:2.5rem">☕</div>
   <h1>earn a steep</h1>
   <p>download box fraise to collect loyalty steeps from your drinks.</p>
-  <a href="https://apps.apple.com/app/box-fraise/id0000000000">get the app</a>
+  {cta}
 </div>
 </body>
 </html>"#)).into_response()
