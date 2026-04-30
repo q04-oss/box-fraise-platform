@@ -16,7 +16,7 @@
 /// Staff tokens have an 8-hour TTL (one shift). They are not renewable; staff
 /// re-authenticate at the start of each shift.
 use chrono::Utc;
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -76,7 +76,7 @@ pub fn verify_staff_token(token: &str, cfg: &Config) -> Option<StaffClaims> {
 }
 
 fn decode_staff_claims(token: &str, secret: &str) -> Option<StaffClaims> {
-    decode::<StaffClaims>(token, &DecodingKey::from_secret(secret.as_bytes()), &Validation::default())
+    decode::<StaffClaims>(token, &DecodingKey::from_secret(secret.as_bytes()), &Validation::new(Algorithm::HS256))
         .ok()
         .map(|d| d.claims)
 }

@@ -5,7 +5,7 @@ pub mod staff;
 
 use chrono::Utc;
 use deadpool_redis::Pool as RedisPool;
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -56,7 +56,7 @@ pub fn verify_token(token: &str, cfg: &Config) -> Option<Claims> {
 }
 
 fn decode_claims(token: &str, secret: &str) -> Option<Claims> {
-    decode::<Claims>(token, &DecodingKey::from_secret(secret.as_bytes()), &Validation::default())
+    decode::<Claims>(token, &DecodingKey::from_secret(secret.as_bytes()), &Validation::new(Algorithm::HS256))
         .ok()
         .map(|d| d.claims)
 }

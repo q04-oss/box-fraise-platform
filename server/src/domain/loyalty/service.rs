@@ -38,9 +38,10 @@ redis.call('DEL', KEYS[1])
 return {2, val}
 "#;
 
-const QR_TOKEN_TTL_SECS: u64 = 300; // 5 minutes
-const BALANCE_RATE_LIMIT: i64 = 10; // per user per minute
-const STAMP_RATE_LIMIT:   i64 = 30; // per business per minute
+const QR_TOKEN_TTL_SECS: u64    = 300; // 5 minutes
+const BALANCE_RATE_LIMIT: i64   = 10;  // per user per minute
+const STAMP_RATE_LIMIT:   i64   = 30;  // per business per minute (authenticated QR path only)
+const HTML_STAMP_RATE_LIMIT: i64 = 10; // per IP per minute (unauthenticated HTML path)
 
 // ── Balance ───────────────────────────────────────────────────────────────────
 
@@ -211,13 +212,30 @@ pub async fn stamp_via_qr(
 /// Records a steep via the HTML /stamp page. Security model: the QR token
 /// itself encodes the business_id, so cross-business stamping is structurally
 /// impossible. No staff JWT required — the token IS the proof of intent.
+///
+/// Rate limiting uses the caller's IP, not the business ID. A business-keyed
+/// counter on an unauthenticated endpoint lets any attacker exhaust the stamp
+/// budget for a target business with garbage requests before any token is checked.
 pub async fn stamp_via_html(
     state:       &AppState,
     qr_token:    &str,
     claimed_bid: i32, // ?b= query param — verified against the token's stored business_id
     ip:          Option<std::net::IpAddr>,
 ) -> AppResult<StampResult> {
-    rate_check_stamp(state, claimed_bid).await?;
+    if let Err(e) = rate_check_html_stamp(state, ip).await {
+        // Repeated rate limit hits from one IP targeting a business is a security signal —
+        // could indicate DoS against the stamp endpoint or token brute-force.
+        // claimed_bid is unverified here but tells us what business was targeted.
+        audit::write(
+            &state.db,
+            None,
+            Some(claimed_bid),
+            "loyalty.html_stamp_rate_limited",
+            serde_json::json!({ "ip": ip.map(|i| i.to_string()) }),
+            ip,
+        ).await;
+        return Err(e);
+    }
     let (customer_id, token_business) = consume_qr_token_for_business(state, qr_token, claimed_bid).await?;
     record_steep(state, customer_id, token_business, "qr_stamp", qr_token, None, ip).await
 }
@@ -360,7 +378,33 @@ pub async fn activate_nfc_sticker(
     staff_business: i32,
     sticker_uuid:   &str,
 ) -> AppResult<()> {
-    repository::upsert_nfc_sticker(&state.db, sticker_uuid, staff_business).await?;
+    if let Err(AppError::Forbidden) = repository::upsert_nfc_sticker(&state.db, sticker_uuid, staff_business).await {
+        // Sticker is registered to a different business. Audit before returning —
+        // systematic probing of sticker UUIDs across businesses is a real attack
+        // vector and must be queryable after the fact.
+        let actual_owner: Option<i32> = sqlx::query_scalar(
+            "SELECT business_id FROM nfc_stickers WHERE uuid = $1"
+        )
+        .bind(sticker_uuid)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+
+        audit::write(
+            &state.db,
+            Some(staff_uid.into()),
+            Some(staff_business),
+            "loyalty.nfc_sticker_cross_business_probe",
+            serde_json::json!({
+                "sticker_uuid":          sticker_uuid,
+                "attempted_business_id": staff_business,
+                "actual_business_id":    actual_owner,
+            }),
+            None,
+        ).await;
+        return Err(AppError::Forbidden);
+    }
 
     let redis_pool = state.redis.as_ref()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Redis required for NFC activation")))?;
@@ -494,9 +538,18 @@ async fn rate_check_balance(state: &AppState, user_id: UserId) -> AppResult<()> 
     rate_check(state, &format!("fraise:rate:loyalty-bal:{}", i32::from(user_id)), BALANCE_RATE_LIMIT).await
 }
 
-/// 30 stamp attempts per business per minute.
+/// 30 stamp attempts per business per minute — authenticated QR path only.
+/// Not applied to the unauthenticated HTML path; use rate_check_html_stamp there.
 async fn rate_check_stamp(state: &AppState, business_id: i32) -> AppResult<()> {
     rate_check(state, &format!("fraise:rate:loyalty-stamp:{business_id}"), STAMP_RATE_LIMIT).await
+}
+
+/// 10 stamp attempts per IP per minute — unauthenticated HTML path only.
+/// IP-keyed so an attacker cannot exhaust a specific business's stamp budget.
+/// When Redis is absent, falls through (the global IP limiter is still active).
+async fn rate_check_html_stamp(state: &AppState, ip: Option<std::net::IpAddr>) -> AppResult<()> {
+    let Some(ip) = ip else { return Ok(()) };
+    rate_check(state, &format!("fraise:rate:loyalty-html:{ip}"), HTML_STAMP_RATE_LIMIT).await
 }
 
 /// Fixed-window counter using Redis INCR + EXPIRE.
