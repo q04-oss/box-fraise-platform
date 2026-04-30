@@ -124,6 +124,7 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::staff_web::routes::router())
         .merge(crate::domain::tokens::routes::router())
         .merge(crate::domain::tournaments::routes::router())
+        .merge(crate::domain::dorotka::routes::router())
 
         // ── Security middleware (innermost — applied last, runs first) ─────
         .layer(middleware::from_fn_with_state(

@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod art;
 pub mod auth;
+pub mod dorotka;
 pub mod businesses;
 pub mod campaigns;
 pub mod catalog;

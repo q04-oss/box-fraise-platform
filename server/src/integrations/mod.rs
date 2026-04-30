@@ -1,3 +1,4 @@
+pub mod anthropic;
 pub mod expo_push;
 pub mod resend;
 pub mod square;
