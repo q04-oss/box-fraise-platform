@@ -113,3 +113,53 @@ pub async fn get_customer_name(pool: &PgPool, user_id: UserId) -> AppResult<Stri
 
     Ok(name.unwrap_or_else(|| "Guest".to_string()))
 }
+
+// ── NFC stickers ──────────────────────────────────────────────────────────────
+
+/// Registers a sticker to a business on first activation. Returns the
+/// business_id that owns this sticker (which may be an existing registration).
+/// If the sticker was previously registered to a different business, returns Err.
+pub async fn upsert_nfc_sticker(
+    pool:        &PgPool,
+    uuid:        &str,
+    business_id: i32,
+) -> AppResult<i32> {
+    // Try to insert; if it already exists for this business, that's fine.
+    let result = sqlx::query(
+        "INSERT INTO nfc_stickers (uuid, business_id)
+         VALUES ($1, $2)
+         ON CONFLICT (uuid) DO NOTHING"
+    )
+    .bind(uuid)
+    .bind(business_id)
+    .execute(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    // If nothing was inserted, the sticker exists — fetch its business_id.
+    if result.rows_affected() == 0 {
+        let (owner,): (i32,) = sqlx::query_as(
+            "SELECT business_id FROM nfc_stickers WHERE uuid = $1"
+        )
+        .bind(uuid)
+        .fetch_one(pool)
+        .await
+        .map_err(AppError::Db)?;
+
+        if owner != business_id {
+            return Err(AppError::Forbidden); // sticker belongs to a different business
+        }
+        return Ok(owner);
+    }
+
+    Ok(business_id)
+}
+
+pub async fn increment_nfc_taps(pool: &PgPool, uuid: &str) -> AppResult<()> {
+    sqlx::query("UPDATE nfc_stickers SET total_taps = total_taps + 1 WHERE uuid = $1")
+        .bind(uuid)
+        .execute(pool)
+        .await
+        .map_err(AppError::Db)?;
+    Ok(())
+}

@@ -303,11 +303,113 @@ async fn record_steep(
     ).await;
 
     Ok(StampResult {
+        business_id,
         customer_name,
-        new_balance:   current_balance,
+        new_balance:        current_balance,
         reward_available,
         reward_description: cfg.reward_description,
     })
+}
+
+// ── NFC cup stickers ──────────────────────────────────────────────────────────
+
+const NFC_PREFIX:  &str = "fraise:nfc-active:";
+const NFC_TTL:     u64  = 7_200; // 2 hours — window between preparation and collection
+
+/// Called by staff after scanning the companion QR on a sticker.
+/// Registers the sticker to the staff's business (or validates it's already theirs)
+/// and sets a 2-hour activation window in Redis.
+pub async fn activate_nfc_sticker(
+    state:          &AppState,
+    staff_uid:      UserId,
+    staff_business: i32,
+    sticker_uuid:   &str,
+) -> AppResult<()> {
+    // Register or validate ownership — returns Forbidden if it belongs to another business.
+    repository::upsert_nfc_sticker(&state.db, sticker_uuid, staff_business).await?;
+
+    let redis_pool = state.redis.as_ref()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Redis required for NFC activation")))?;
+
+    let key = format!("{NFC_PREFIX}{sticker_uuid}");
+    let mut conn = redis_pool.get().await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+
+    // SET overwrites any previous activation — staff can re-activate if needed.
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(staff_business.to_string())
+        .arg("EX").arg(NFC_TTL)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis SET: {e}")))?;
+
+    audit::write(
+        &state.db,
+        Some(staff_uid.into()),
+        Some(staff_business),
+        "loyalty.nfc_sticker_activated",
+        serde_json::json!({ "sticker_uuid": sticker_uuid }),
+        None,
+    ).await;
+
+    Ok(())
+}
+
+/// Called by the iOS app when the customer taps an NFC sticker.
+/// Atomically consumes the activation window and credits a loyalty steep.
+pub async fn redeem_nfc_sticker(
+    state:        &AppState,
+    user_id:      UserId,
+    sticker_uuid: &str,
+    ip:           Option<std::net::IpAddr>,
+) -> AppResult<StampResult> {
+    // Email verification required for NFC redemption (walk-in path, no payment).
+    let verified = crate::domain::auth::repository::get_verified(&state.db, user_id)
+        .await
+        .unwrap_or(false);
+    if !verified {
+        return Err(AppError::Unprocessable(
+            "verify your email to earn steeps".into()
+        ));
+    }
+
+    let redis_pool = state.redis.as_ref().ok_or(AppError::Unauthorized)?;
+    let key = format!("{NFC_PREFIX}{sticker_uuid}");
+    let mut conn = redis_pool.get().await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+
+    // GETDEL: atomically read and consume the activation window.
+    let value: Option<String> = redis::cmd("GETDEL")
+        .arg(&key)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis GETDEL: {e}")))?;
+
+    let business_id = value
+        .ok_or(AppError::Unauthorized)? // not activated or window expired
+        .parse::<i32>()
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("malformed NFC activation value")))?;
+
+    // Idempotency key: sticker_uuid — unique per activation window (re-activation generates a new window).
+    let result = record_steep(
+        state, user_id, business_id, "qr_stamp", sticker_uuid,
+        UserId::from(0i32), ip,
+    ).await?;
+
+    // Increment tap counter and log — non-fatal if it fails.
+    let _ = repository::increment_nfc_taps(&state.db, sticker_uuid).await;
+
+    audit::write(
+        &state.db,
+        Some(user_id.into()),
+        Some(business_id),
+        "loyalty.nfc_sticker_redeemed",
+        serde_json::json!({ "sticker_uuid": sticker_uuid }),
+        ip,
+    ).await;
+
+    Ok(result)
 }
 
 // ── Webhook path (called by venue_drinks on payment_intent.succeeded) ─────────

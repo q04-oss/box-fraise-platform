@@ -66,8 +66,9 @@ pub struct StampBody {
 
 #[derive(Debug, Serialize)]
 pub struct StampResult {
-    pub customer_name:     String,
-    pub new_balance:       i64,
-    pub reward_available:  bool,
+    pub business_id:        i32,
+    pub customer_name:      String,
+    pub new_balance:        i64,
+    pub reward_available:   bool,
     pub reward_description: String,
 }

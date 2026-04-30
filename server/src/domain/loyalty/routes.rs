@@ -5,13 +5,18 @@
 /// GET  /api/businesses/:id/loyalty/qr-token     — issue stamp token (RequireUser)
 /// POST /api/businesses/:id/loyalty/stamp        — record steep via app scanner (RequireStaff)
 /// GET  /stamp                                   — HTML stamp page; camera-scan fallback
+///
+/// NFC cup sticker endpoints:
+/// POST /api/staff/nfc/activate   — staff scans companion QR; opens 2h activation window
+/// POST /api/nfc/redeem           — app calls this when customer taps sticker
+/// GET  /nfc/{uuid}               — Universal Link target; fallback HTML if app not installed
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
 use crate::{
@@ -28,6 +33,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/businesses/{id}/loyalty",         get(balance))
         .route("/api/businesses/{id}/loyalty/history", get(history))
+        // NFC sticker routes
+        .route("/api/staff/nfc/activate", post(nfc_activate))
+        .route("/api/nfc/redeem",         post(nfc_redeem))
+        .route("/nfc/{uuid}",             get(nfc_tap))
         .route("/api/businesses/{id}/loyalty/qr-token",get(qr_token))
         .route("/api/businesses/{id}/loyalty/stamp",   post(stamp))
         // HTML fallback — opened in phone browser after camera scan
@@ -194,4 +203,96 @@ fn stamp_page(state: StampPageState) -> Html<String> {
 </div>
 </body>
 </html>"#))
+}
+
+
+// ── NFC sticker handlers ──────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct NfcActivateBody { sticker_uuid: String }
+
+#[derive(Serialize)]
+struct NfcActivateResponse { ok: bool, expires_in_secs: u64 }
+
+async fn nfc_activate(
+    State(state):         State<AppState>,
+    RequireStaff(claims): RequireStaff,
+    AppJson(body):        AppJson<NfcActivateBody>,
+) -> AppResult<Json<NfcActivateResponse>> {
+    service::activate_nfc_sticker(
+        &state,
+        claims.user_id,
+        claims.business_id,
+        &body.sticker_uuid,
+    ).await?;
+    Ok(Json(NfcActivateResponse { ok: true, expires_in_secs: 7_200 }))
+}
+
+#[derive(Deserialize)]
+#[derive(Deserialize)]
+struct NfcRedeemBody { sticker_uuid: String }
+
+#[derive(Serialize)]
+struct NfcRedeemResponse {
+    business_id:        i32,
+    customer_name:      String,
+    new_balance:        i64,
+    reward_available:   bool,
+    reward_description: String,
+}
+
+async fn nfc_redeem(
+    State(state):      State<AppState>,
+    RequireUser(uid):  RequireUser,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    AppJson(body):     AppJson<NfcRedeemBody>,
+) -> AppResult<Json<NfcRedeemResponse>> {
+    let result = service::redeem_nfc_sticker(
+        &state, uid, &body.sticker_uuid, Some(addr.ip())
+    ).await?;
+
+    Ok(Json(NfcRedeemResponse {
+        business_id:        result.business_id,
+        customer_name:      result.customer_name,
+        new_balance:        result.new_balance,
+        reward_available:   result.reward_available,
+        reward_description: result.reward_description,
+    }))
+}
+
+/// Universal Link target — called when a customer taps the NFC sticker on a
+/// device that does not have the Box Fraise app installed.
+/// Devices with the app never reach this endpoint — iOS intercepts the URL
+/// and opens the app directly via Universal Links.
+async fn nfc_tap(Path(uuid): Path<String>) -> Response {
+    // The app is not installed. Show a download prompt.
+    // The UUID is preserved in the URL so the app can redeem immediately after install.
+    Html(format!(r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>box fraise</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+     background:#F7F5F2;display:flex;align-items:center;justify-content:center;
+     min-height:100svh;text-align:center}}
+.card{{background:#fff;border-radius:20px;padding:48px 28px;width:90%;max-width:340px;
+      box-shadow:0 4px 24px rgba(0,0,0,.07)}}
+h1{{font-size:1.3rem;font-weight:600;color:#1C1C1E;margin:16px 0 8px}}
+p{{font-size:.875rem;color:#8E8E93;line-height:1.5;margin-bottom:24px}}
+a{{display:block;background:#1C1C1E;color:#F7F5F2;text-decoration:none;
+   padding:14px;border-radius:12px;font-size:.9rem;font-weight:500}}
+</style>
+</head>
+<body>
+<div class="card">
+  <div style="font-size:2.5rem">☕</div>
+  <h1>earn a steep</h1>
+  <p>download box fraise to collect loyalty steeps from your drinks.</p>
+  <a href="https://apps.apple.com/app/box-fraise/id0000000000">get the app</a>
+</div>
+</body>
+</html>"#)).into_response()
 }

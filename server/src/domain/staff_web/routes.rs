@@ -144,8 +144,12 @@ async fn scan_page(cookies: Cookies) -> Response {
     Html(page("scan", &format!(
         r#"
         <div class="card scan-card" id="card">
-            <p class="sub">{business_id}</p>
-            <h1>scan stamp code</h1>
+            <p class="sub" id="mode-label">stamp mode</p>
+
+            <div class="mode-toggle">
+                <button id="btn-stamp"    class="mode active" onclick="setMode('stamp')">stamp customer</button>
+                <button id="btn-activate" class="mode"        onclick="setMode('activate')">activate cup</button>
+            </div>
 
             <div class="video-wrap">
                 <video id="video" autoplay playsinline muted></video>
@@ -160,15 +164,28 @@ async fn scan_page(cookies: Cookies) -> Response {
             const businessId = {business_id};
             const video      = document.getElementById('video');
             const statusEl   = document.getElementById('status');
+            const modeLabel  = document.getElementById('mode-label');
             const card       = document.getElementById('card');
             let scanning     = true;
+            let mode         = 'stamp'; // 'stamp' | 'activate'
+
+            function setMode(m) {{
+                mode = m;
+                scanning = true;
+                document.getElementById('btn-stamp').classList.toggle('active',    m === 'stamp');
+                document.getElementById('btn-activate').classList.toggle('active', m === 'activate');
+                modeLabel.textContent  = m === 'stamp' ? 'stamp mode' : 'activate cup mode';
+                statusEl.textContent   = m === 'stamp'
+                    ? 'point camera at customer QR'
+                    : 'scan the QR on the cup sticker';
+            }}
 
             // Start camera
             navigator.mediaDevices.getUserMedia({{ video: {{ facingMode: 'environment' }} }})
-                .then(stream => {{ video.srcObject = stream; startScan(stream); }})
+                .then(stream => {{ video.srcObject = stream; startScan(); }})
                 .catch(() => {{ statusEl.textContent = 'camera access denied'; }});
 
-            function startScan(stream) {{
+            function startScan() {{
                 if (!('BarcodeDetector' in window)) {{
                     statusEl.textContent = 'QR scanning not supported — use Chrome or Safari 16+';
                     return;
@@ -179,13 +196,25 @@ async fn scan_page(cookies: Cookies) -> Response {
                     try {{
                         const codes = await detector.detect(video);
                         for (const code of codes) {{
-                            const url = new URL(code.rawValue);
-                            const t   = url.searchParams.get('t');
-                            const b   = parseInt(url.searchParams.get('b'));
-                            if (t && b === businessId) {{
-                                scanning = false;
-                                await stamp(t);
-                                return;
+                            let url;
+                            try {{ url = new URL(code.rawValue); }} catch {{ continue; }}
+
+                            if (mode === 'stamp') {{
+                                const t = url.searchParams.get('t');
+                                const b = parseInt(url.searchParams.get('b'));
+                                if (t && b === businessId) {{
+                                    scanning = false;
+                                    await doStamp(t);
+                                    return;
+                                }}
+                            }} else {{
+                                // activate cup — detect /nfc/{{uuid}} companion QR
+                                const match = url.pathname.match(/^\/nfc\/([a-f0-9-]{{36}})$/i);
+                                if (match) {{
+                                    scanning = false;
+                                    await doActivate(match[1]);
+                                    return;
+                                }}
                             }}
                         }}
                     }} catch (_) {{}}
@@ -194,7 +223,7 @@ async fn scan_page(cookies: Cookies) -> Response {
                 requestAnimationFrame(tick);
             }}
 
-            async function stamp(token) {{
+            async function doStamp(token) {{
                 statusEl.textContent = 'recording...';
                 try {{
                     const res  = await fetch('/staff/stamp', {{
@@ -204,16 +233,51 @@ async fn scan_page(cookies: Cookies) -> Response {
                     }});
                     const data = await res.json();
                     if (res.ok) {{
-                        showResult(true,  data.customer_name, data.new_balance, data.reward_available, data.reward_description);
+                        showResult('stamp', true, data.customer_name, data.new_balance, data.reward_available, data.reward_description);
                     }} else {{
-                        showResult(false, null, null, false, data.error || 'stamp failed');
+                        showResult('stamp', false, null, null, false, data.error || 'stamp failed');
                     }}
                 }} catch (e) {{
-                    showResult(false, null, null, false, 'network error');
+                    showResult('stamp', false, null, null, false, 'network error');
                 }}
             }}
 
-            function showResult(ok, name, balance, rewardAvailable, msg) {{
+            async function doActivate(uuid) {{
+                statusEl.textContent = 'activating...';
+                try {{
+                    const res  = await fetch('/api/staff/nfc/activate', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        // Cookie carries the staff JWT — no Authorization header needed
+                        credentials: 'same-origin',
+                        body: JSON.stringify({{ sticker_uuid: uuid }}),
+                    }});
+                    const data = await res.json();
+                    if (res.ok) {{
+                        showActivated(uuid);
+                    }} else {{
+                        showResult('activate', false, null, null, false, data.message || 'activation failed');
+                    }}
+                }} catch (e) {{
+                    showResult('activate', false, null, null, false, 'network error');
+                }}
+            }}
+
+            function showActivated(uuid) {{
+                if (navigator.vibrate) navigator.vibrate([50, 50, 50]);
+                card.innerHTML = `
+                    <div class="result ok">
+                        <div class="icon">📡</div>
+                        <p class="name">cup activated</p>
+                        <p style="font-size:.75rem;color:#8E8E93;margin-top:8px;word-break:break-all">
+                            ${{uuid.slice(0,8)}}...
+                        </p>
+                        <p style="font-size:.8rem;color:#8E8E93;margin-top:4px">active for 2 hours</p>
+                    </div>`;
+                setTimeout(() => location.reload(), 2000);
+            }}
+
+            function showResult(ctx, ok, name, balance, rewardAvailable, msg) {{
                 card.innerHTML = ok
                     ? `<div class="result ok">
                            <div class="icon">✓</div>
@@ -225,11 +289,7 @@ async fn scan_page(cookies: Cookies) -> Response {
                            <div class="icon">✗</div>
                            <p class="balance">${{msg}}</p>
                        </div>`;
-
-                // Vibrate on stamp (Android)
                 if (ok && navigator.vibrate) navigator.vibrate(100);
-
-                // Reset to scan mode after 2.5 seconds
                 setTimeout(() => location.reload(), 2500);
             }}
         }})();
@@ -436,6 +496,11 @@ video{{width:100%;height:100%;object-fit:cover;display:block}}
 .reward{{font-size:.85rem;color:var(--green);font-weight:500}}
 .ok .icon{{color:var(--green)}}
 .err .icon{{color:var(--red)}}
+.mode-toggle{{display:flex;gap:6px;width:100%}}
+.mode{{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;
+       padding:9px 6px;font-size:.78rem;cursor:pointer;color:var(--muted);
+       -webkit-appearance:none;transition:background .15s,color .15s}}
+.mode.active{{background:var(--text);color:var(--bg);border-color:var(--text)}}
 </style>
 </head>
 <body>
