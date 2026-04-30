@@ -5,6 +5,7 @@ use axum::http::{header, HeaderName, HeaderValue};
 use deadpool_redis::Pool as RedisPool;
 use secrecy::ExposeSecret;
 use sqlx::PgPool;
+use tower_cookies::CookieManagerLayer;
 use tower_http::{
     compression::CompressionLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -120,6 +121,7 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::loyalty::routes::router())
         .merge(crate::domain::venue_drinks::routes::router())
         .merge(crate::domain::squareoauth::routes::router())
+        .merge(crate::domain::staff_web::routes::router())
         .merge(crate::domain::tokens::routes::router())
         .merge(crate::domain::tournaments::routes::router())
 
@@ -169,12 +171,31 @@ pub fn build(state: AppState) -> Router {
         ))
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("permissions-policy"),
-            HeaderValue::from_static("geolocation=(), microphone=(), camera=()"),
+            // camera=* allows the /staff/scan page to access the rear camera.
+            // All other sensitive APIs remain denied.
+            HeaderValue::from_static("geolocation=(), microphone=()"),
         ))
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+            // default-src 'self' covers the staff web app (inline scripts and styles
+            // are allowed because the pages are server-rendered with no external deps).
+            // API responses are JSON — browsers do not enforce CSP on non-HTML responses.
+            // frame-ancestors 'none' is maintained to prevent clickjacking.
+            HeaderValue::from_static(
+                "default-src 'self'; \
+                 script-src 'self' 'unsafe-inline'; \
+                 style-src 'self' 'unsafe-inline'; \
+                 img-src 'self' data:; \
+                 connect-src 'self'; \
+                 media-src 'self' blob:; \
+                 frame-ancestors 'none'"
+            ),
         ))
+
+        // ── Cookies ───────────────────────────────────────────────────────
+        // Must wrap the full router so Cookies extractor is available in
+        // all handlers, including the staff web app.
+        .layer(CookieManagerLayer::new())
 
         // ── State ─────────────────────────────────────────────────────────
         .with_state(state)
