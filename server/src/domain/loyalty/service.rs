@@ -306,25 +306,17 @@ async fn record_steep(
     actor_id:    Option<UserId>,
     ip:          Option<std::net::IpAddr>,
 ) -> AppResult<StampResult> {
-    repository::insert_event(
+    // idempotency_key UNIQUE violation → Conflict, handled inside insert_steep.
+    // Should be unreachable because GETDEL is atomic, but treated as a duplicate
+    // if two concurrent requests somehow race past Redis.
+    repository::insert_steep(
         &state.db,
         customer_id,
         business_id,
-        "steep_earned",
         source,
         idem_key,
         serde_json::json!({}),
-    ).await
-    .map_err(|e| match e {
-        // idempotency_key UNIQUE violation — this token was already redeemed.
-        // This path should be unreachable because GETDEL is atomic, but if it
-        // somehow fires (e.g., two concurrent requests with the same token before
-        // Redis GETDEL could run), we treat it as a duplicate, not an error.
-        AppError::Db(sqlx::Error::Database(ref db)) if db.is_unique_violation() => {
-            AppError::Conflict("steep already recorded for this token".into())
-        }
-        other => other,
-    })?;
+    ).await?;
 
     let cfg = repository::get_config(&state.db, business_id)
         .await?
@@ -498,22 +490,14 @@ pub async fn record_steep_from_webhook(
     business_id:     i32,
     idempotency_key: &str,
 ) -> AppResult<()> {
-    repository::insert_event(
+    repository::insert_steep(
         &state.db,
         user_id,
         business_id,
-        "steep_earned",
         "stripe_webhook",
         idempotency_key,
         serde_json::json!({ "stripe_payment_intent_id": idempotency_key }),
-    ).await
-    .map_err(|e| match e {
-        AppError::Db(sqlx::Error::Database(ref db)) if db.is_unique_violation() => {
-            // Already recorded for this payment — idempotent success.
-            AppError::Conflict("loyalty event already recorded".into())
-        }
-        other => other,
-    })?;
+    ).await?;
 
     audit::write(
         &state.db,

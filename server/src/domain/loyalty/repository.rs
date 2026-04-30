@@ -72,6 +72,9 @@ pub async fn get_history(
 
 // ── Event insert ──────────────────────────────────────────────────────────────
 
+/// Low-level event insert. Prefer insert_steep for loyalty steep events —
+/// it adds the standard idempotency error mapping and is the single update
+/// point when the loyalty_events schema gains a new required field.
 pub async fn insert_event(
     pool:            &PgPool,
     user_id:         UserId,
@@ -98,6 +101,30 @@ pub async fn insert_event(
     .map_err(AppError::Db)?;
 
     Ok(id)
+}
+
+/// Records a steep_earned loyalty event. Both the QR/NFC path and the Stripe
+/// webhook path call this function — it is the single place to update when
+/// the loyalty_events schema gains a new required field.
+///
+/// Returns Ok(event_id) on success, Err(Conflict) if this idempotency_key
+/// has already been recorded (safe to discard as a duplicate).
+pub async fn insert_steep(
+    pool:            &PgPool,
+    customer_id:     UserId,
+    business_id:     i32,
+    source:          &str,
+    idempotency_key: &str,
+    metadata:        serde_json::Value,
+) -> AppResult<i64> {
+    insert_event(pool, customer_id, business_id, "steep_earned", source, idempotency_key, metadata)
+        .await
+        .map_err(|e| match e {
+            AppError::Db(sqlx::Error::Database(ref db)) if db.is_unique_violation() => {
+                AppError::Conflict("steep already recorded".into())
+            }
+            other => other,
+        })
 }
 
 // ── Customer lookup (for stamp page) ─────────────────────────────────────────
