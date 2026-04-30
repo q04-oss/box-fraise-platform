@@ -15,7 +15,14 @@
 -- The DO blocks find the existing constraint by what it constrains rather than
 -- by name — auto-generated constraint names vary across environments.
 -- All existing rows satisfy the new constraints (their values are a strict
--- subset of the expanded allowlist), so no backfill is required.
+-- subset of the expanded allowlist). Pre-flight verification:
+--   SELECT DISTINCT source FROM loyalty_events;   -- must be subset of new list
+--   SELECT DISTINCT status  FROM venue_orders;    -- must be subset of new list
+--
+-- Wrapped in a transaction so the DROP→ADD window is closed: no write can
+-- land during the brief period when neither constraint is enforced.
+
+BEGIN;
 
 -- ── loyalty_events.source ─────────────────────────────────────────────────────
 
@@ -58,3 +65,5 @@ END $$;
 ALTER TABLE venue_orders
     ADD CONSTRAINT venue_orders_status_check
     CHECK (status IN ('pending', 'paid', 'pushed_to_square', 'completed', 'failed'));
+
+COMMIT;

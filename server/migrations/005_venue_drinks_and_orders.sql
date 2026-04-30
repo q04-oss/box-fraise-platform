@@ -31,7 +31,7 @@ END;
 $$;
 
 ALTER TABLE businesses
-    ADD COLUMN stripe_connect_account_id TEXT;
+    ADD COLUMN IF NOT EXISTS stripe_connect_account_id TEXT;
 
 -- ── Drink menu ────────────────────────────────────────────────────────────────
 
