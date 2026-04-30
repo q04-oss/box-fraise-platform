@@ -19,6 +19,7 @@ pub mod portal;
 pub mod search;
 pub mod squareoauth;
 pub mod users;
+pub mod venue_drinks;
 pub mod tokens;
 pub mod tournaments;
 pub mod ventures;

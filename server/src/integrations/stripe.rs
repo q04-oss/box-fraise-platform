@@ -90,6 +90,83 @@ impl<'a> StripeClient<'a> {
         Ok(())
     }
 
+    // ── Connect — venue drink orders ──────────────────────────────────────────
+
+    /// Creates a PaymentIntent for a venue drink order using Stripe Connect
+    /// destination charges. The platform retains `fee_cents` as
+    /// `application_fee_amount`; the remainder is transferred to the
+    /// business's connected account automatically on capture.
+    ///
+    /// `amount_cents` is the full amount the customer pays (total, not net).
+    /// Amount and fee are always computed server-side from DB prices —
+    /// never from client input.
+    pub async fn create_payment_intent_connect(
+        &self,
+        amount_cents:      i64,
+        fee_cents:         i64,
+        connect_account:   &str,
+        customer_id:       Option<&str>,
+        metadata:          &[(&str, &str)],
+    ) -> AppResult<PaymentIntent> {
+        let mut params: Vec<(&str, String)> = vec![
+            ("amount",                          amount_cents.to_string()),
+            ("currency",                        "cad".to_string()),
+            ("capture_method",                  "automatic".to_string()),
+            ("transfer_data[destination]",      connect_account.to_string()),
+        ];
+
+        if fee_cents > 0 {
+            params.push(("application_fee_amount", fee_cents.to_string()));
+        }
+        if let Some(cid) = customer_id {
+            params.push(("customer", cid.to_string()));
+        }
+        for (k, v) in metadata {
+            params.push((k, v.to_string()));
+        }
+
+        self.post_form("/payment_intents", &params).await
+    }
+
+    // ── Connect — onboarding ──────────────────────────────────────────────────
+
+    /// Creates a Stripe Connect Express account for a business.
+    /// Returns the account ID (acct_...) to store on the businesses row.
+    pub async fn create_connect_account(&self, email: &str) -> AppResult<String> {
+        #[derive(serde::Deserialize)]
+        struct Account { id: String }
+
+        let account: Account = self.post_form("/accounts", &[
+            ("type",  "express".to_string()),
+            ("email", email.to_string()),
+            ("capabilities[card_payments][requested]", "true".to_string()),
+            ("capabilities[transfers][requested]",     "true".to_string()),
+        ]).await?;
+
+        Ok(account.id)
+    }
+
+    /// Creates a Connect onboarding link for an existing Express account.
+    /// The business owner visits this URL to complete KYC and banking setup.
+    pub async fn create_account_link(
+        &self,
+        account_id:  &str,
+        refresh_url: &str,
+        return_url:  &str,
+    ) -> AppResult<String> {
+        #[derive(serde::Deserialize)]
+        struct AccountLink { url: String }
+
+        let link: AccountLink = self.post_form("/account_links", &[
+            ("account",     account_id.to_string()),
+            ("refresh_url", refresh_url.to_string()),
+            ("return_url",  return_url.to_string()),
+            ("type",        "account_onboarding".to_string()),
+        ]).await?;
+
+        Ok(link.url)
+    }
+
     // ── Customers ─────────────────────────────────────────────────────────────
 
     pub async fn create_customer(

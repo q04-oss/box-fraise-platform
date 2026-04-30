@@ -118,6 +118,7 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::portal::routes::router())
         .merge(crate::domain::admin::routes::router())
         .merge(crate::domain::loyalty::routes::router())
+        .merge(crate::domain::venue_drinks::routes::router())
         .merge(crate::domain::squareoauth::routes::router())
         .merge(crate::domain::tokens::routes::router())
         .merge(crate::domain::tournaments::routes::router())

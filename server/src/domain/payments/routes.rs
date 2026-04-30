@@ -69,13 +69,17 @@ async fn handle_pi_succeeded(state: &AppState, event: &serde_json::Value) {
 
     match payment_type {
         "order" | "" => complete_order(state, pi_id).await,
-        "rsvp"            => complete_rsvp(state, pi_id).await,
-        "membership"      => complete_membership(state, pi, pi_id).await,
-        "tip"             => complete_tip(state, pi).await,
-        "portal_access"   => complete_portal_access(state, pi).await,
-        "tournament_entry"=> complete_tournament_entry(state, pi).await,
+        "rsvp"             => complete_rsvp(state, pi_id).await,
+        "membership"       => complete_membership(state, pi, pi_id).await,
+        "tip"              => complete_tip(state, pi).await,
+        "portal_access"    => complete_portal_access(state, pi).await,
+        "tournament_entry" => complete_tournament_entry(state, pi).await,
         "portrait_purchase"=> complete_portrait_purchase(state, pi).await,
-        _            => {
+        // Venue drink orders: push to Square POS + credit loyalty steep.
+        "venue_order"      => {
+            crate::domain::venue_drinks::service::complete_venue_order(state, pi_id).await
+        }
+        _ => {
             tracing::info!(pi_id, payment_type, "unhandled payment_intent.succeeded type");
         }
     }

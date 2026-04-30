@@ -84,6 +84,12 @@ pub struct Config {
     /// ensures tokens are useless without this key.
     /// Generate with: openssl rand -hex 32
     pub square_token_encryption_key: Option<SecretString>,
+
+    // ── Venue ordering ────────────────────────────────────────────────────────
+    /// Platform fee on venue drink orders, in basis points. 500 = 5%.
+    /// Applied as Stripe's application_fee_amount on Connect charges.
+    /// Default: 500 (5%). Set to 0 to disable the fee during testing.
+    pub platform_fee_bips: i64,
 }
 
 impl Config {
@@ -139,6 +145,9 @@ impl Config {
 
             // staff auth
             staff_jwt_secret: require_secret("STAFF_JWT_SECRET")?,
+
+            // venue ordering
+            platform_fee_bips: optional_parse("PLATFORM_FEE_BIPS", 500i64)?,
 
             // Square OAuth — all optional; Square integration is disabled when absent
             square_app_id:                optional("SQUARE_APP_ID"),
