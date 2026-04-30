@@ -15,7 +15,7 @@ RUN rm -rf src
 
 # Build the real source
 COPY src ./src
-RUN touch src/main.rs && cargo build --release
+RUN touch src/main.rs src/lib.rs && cargo build --release
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
