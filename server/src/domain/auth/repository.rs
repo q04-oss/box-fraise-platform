@@ -311,6 +311,24 @@ async fn generate_unique_code_tx(
     )))
 }
 
+pub async fn set_verified(pool: &PgPool, user_id: UserId) -> AppResult<()> {
+    sqlx::query("UPDATE users SET verified = true WHERE id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map_err(AppError::Db)?;
+    Ok(())
+}
+
+pub async fn get_verified(pool: &PgPool, user_id: UserId) -> AppResult<bool> {
+    let (verified,): (bool,) = sqlx::query_as("SELECT verified FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .map_err(AppError::Db)?;
+    Ok(verified)
+}
+
 /// Excludes visually ambiguous characters (0/O, 1/I/L).
 fn random_code() -> String {
     const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";

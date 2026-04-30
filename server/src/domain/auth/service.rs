@@ -3,14 +3,23 @@ use uuid::Uuid;
 
 use std::net::IpAddr;
 
+use deadpool_redis::redis;
+use uuid::Uuid;
+
 use crate::{
     audit,
     auth,
     auth::staff,
     app::AppState,
     error::{AppError, AppResult},
+    integrations::resend,
     types::UserId,
 };
+
+const VERIFY_PREFIX:  &str = "fraise:email-verify:";
+const VERIFY_TTL:     u64  = 86_400; // 24 hours
+const RESEND_RATE_PREFIX: &str = "fraise:rate:email-resend:";
+const RESEND_RATE_TTL: u64 = 300;   // 5 minutes — one resend per window
 use super::{
     repository,
     types::{AuthResponse, StaffAuthResponse, UserRow},
@@ -139,7 +148,22 @@ pub async fn register(
     // return AppError::Conflict rather than a DB error.
     let user = repository::create_email_user(&state.db, email, &hash, display_name).await?;
 
-    // TODO: send welcome email via integrations::resend
+    // Send verification email. Fire-and-forget — a failed email never blocks
+    // registration. The user can request a resend from within the app.
+    if let Some(api_key) = state.cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned()) {
+        let http       = state.http.clone();
+        let base_url   = state.cfg.api_base_url.clone();
+        let user_id    = user.id;
+        let user_email = email.to_owned();
+        let redis      = state.redis.clone();
+        tokio::spawn(async move {
+            if let Some(verify_url) =
+                issue_verification_token(redis.as_ref(), user_id, &base_url).await
+            {
+                let _ = resend::send_verification_email(&http, &api_key, &user_email, &verify_url).await;
+            }
+        });
+    }
 
     let token = auth::sign_token(user.id, &state.cfg)?;
     Ok(AuthResponse { user_id: user.id, token, is_new: true, verified: user.verified })
@@ -211,4 +235,113 @@ pub async fn require_active(state: &AppState, user_id: UserId) -> AppResult<User
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() { return false; }
     a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+// ── Email verification ────────────────────────────────────────────────────────
+
+/// Consumes a verification token, marks the user verified, returns their email.
+/// Returns Err(Unauthorized) if the token is expired, already used, or invalid.
+pub async fn verify_email(state: &AppState, token: &str) -> AppResult<String> {
+    let redis_pool = state.redis.as_ref()
+        .ok_or(AppError::Unauthorized)?;
+
+    let key = format!("{VERIFY_PREFIX}{token}");
+    let mut conn = redis_pool.get().await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+
+    let user_id_str: Option<String> = redis::cmd("GETDEL")
+        .arg(&key)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis GETDEL: {e}")))?;
+
+    let user_id_raw = user_id_str
+        .ok_or(AppError::Unauthorized)?
+        .parse::<i32>()
+        .map_err(|_| AppError::Unauthorized)?;
+
+    let user_id = UserId::from(user_id_raw);
+    repository::set_verified(&state.db, user_id).await?;
+
+    // Fetch email for confirmation display.
+    let user = repository::find_by_id(&state.db, user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    audit::write(
+        &state.db,
+        Some(user_id_raw),
+        None,
+        "auth.email_verified",
+        serde_json::json!({ "email": user.email }),
+        None,
+    ).await;
+
+    Ok(user.email)
+}
+
+/// Re-issues a verification token and resends the email.
+/// Rate-limited to one resend per 5 minutes per user.
+pub async fn resend_verification(state: &AppState, user_id: UserId, email: &str) -> AppResult<()> {
+    // Rate limit — one resend per RESEND_RATE_TTL seconds.
+    if let Some(redis_pool) = state.redis.as_ref() {
+        let key = format!("{RESEND_RATE_PREFIX}{}", i32::from(user_id));
+        let mut conn = redis_pool.get().await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+
+        let count: i64 = redis::cmd("INCR")
+            .arg(&key)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis INCR: {e}")))?;
+
+        if count == 1 {
+            let _: () = redis::cmd("EXPIRE")
+                .arg(&key).arg(RESEND_RATE_TTL)
+                .query_async(&mut *conn).await.unwrap_or(());
+        }
+        if count > 1 {
+            return Err(AppError::Unprocessable(
+                "please wait a few minutes before requesting another verification email".into()
+            ));
+        }
+    }
+
+    let api_key = state.cfg.resend_api_key.as_ref()
+        .map(|k| k.expose_secret().to_owned())
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("email not configured")))?;
+
+    if let Some(verify_url) =
+        issue_verification_token(state.redis.as_ref(), user_id, &state.cfg.api_base_url).await
+    {
+        let _ = resend::send_verification_email(
+            &state.http, &api_key, email, &verify_url
+        ).await;
+    }
+
+    Ok(())
+}
+
+/// Generates a verification token, stores it in Redis, returns the full URL.
+/// Returns None if Redis is not configured — email verification is best-effort.
+async fn issue_verification_token(
+    redis:    Option<&deadpool_redis::Pool>,
+    user_id:  UserId,
+    base_url: &str,
+) -> Option<String> {
+    let pool = redis?;
+    let token = Uuid::new_v4().to_string();
+    let key   = format!("{VERIFY_PREFIX}{token}");
+
+    let mut conn = pool.get().await.ok()?;
+    let _: redis::Value = redis::cmd("SET")
+        .arg(&key)
+        .arg(i32::from(user_id).to_string())
+        .arg("EX").arg(VERIFY_TTL)
+        .arg("NX")
+        .query_async(&mut *conn)
+        .await
+        .ok()?;
+
+    Some(format!("{base_url}/api/auth/verify-email?token={token}"))
 }

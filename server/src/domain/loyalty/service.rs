@@ -35,6 +35,10 @@ pub async fn get_balance(
         .await?
         .ok_or_else(|| AppError::NotFound)?;
 
+    let email_verified = crate::domain::auth::repository::get_verified(&state.db, user_id)
+        .await
+        .unwrap_or(true); // fail open — don't block balance reads on a DB error
+
     let raw = repository::get_balance(&state.db, user_id, business_id).await?;
 
     let steeps_per_reward = cfg.steeps_per_reward as i64;
@@ -64,6 +68,7 @@ pub async fn get_balance(
         reward_description: cfg.reward_description,
         steeps_until_reward,
         reward_available,
+        email_verified,
     })
 }
 
@@ -95,6 +100,17 @@ pub async fn issue_qr_token(
     repository::get_config(&state.db, business_id)
         .await?
         .ok_or(AppError::NotFound)?;
+
+    // Gate walk-in stamps on email verification. In-app payments credit steeps
+    // regardless — a cleared Stripe charge is a stronger signal than an email click.
+    let verified = crate::domain::auth::repository::get_verified(&state.db, user_id)
+        .await
+        .unwrap_or(false);
+    if !verified {
+        return Err(AppError::Unprocessable(
+            "verify your email to start earning steeps".into()
+        ));
+    }
 
     let redis_pool = state.redis.as_ref()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!(

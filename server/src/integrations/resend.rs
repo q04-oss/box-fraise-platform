@@ -46,6 +46,29 @@ pub async fn send(
 /// `order_ref` is formatted as a display string in the email body. It accepts
 /// `OrderId` for real orders or an `i32` standing-order reference from the
 /// cron job, which does not yet have a real order ID at send time.
+pub async fn send_verification_email(
+    http:       &reqwest::Client,
+    api_key:    &str,
+    to:         &str,
+    verify_url: &str,
+) -> AppResult<()> {
+    let html = base_template(&format!(
+        r#"<p>Verify your email to start earning loyalty steeps.</p>
+           <p style="margin:32px 0">
+             <a href="{verify_url}"
+                style="background:#C9973A;color:#0a0a0a;padding:12px 24px;
+                       text-decoration:none;border-radius:6px;font-size:14px;
+                       font-family:-apple-system,sans-serif;font-weight:600">
+               verify email
+             </a>
+           </p>
+           <p style="color:#555;font-size:12px">
+             This link expires in 24 hours. If you didn't create an account, ignore this email.
+           </p>"#
+    ));
+    send(http, api_key, to, "verify your email — box fraise", &html).await
+}
+
 pub async fn send_order_confirmation(
     http:      &reqwest::Client,
     api_key:   &str,

@@ -85,6 +85,12 @@ pub struct Config {
     /// Generate with: openssl rand -hex 32
     pub square_token_encryption_key: Option<SecretString>,
 
+    // ── Public URL ───────────────────────────────────────────────────────────
+    /// The publicly reachable base URL of this API server.
+    /// Used to generate links in transactional emails (email verification, etc.).
+    /// e.g. https://your-api.up.railway.app
+    pub api_base_url: String,
+
     // ── Venue ordering ────────────────────────────────────────────────────────
     /// Platform fee on venue drink orders, in basis points. 500 = 5%.
     /// Applied as Stripe's application_fee_amount on Connect charges.
@@ -155,6 +161,10 @@ impl Config {
 
             // staff auth
             staff_jwt_secret: require_secret("STAFF_JWT_SECRET")?,
+
+            // public URL
+            api_base_url: optional("API_BASE_URL")
+                .unwrap_or_else(|| "http://localhost:3001".to_string()),
 
             // venue ordering
             platform_fee_bips:                    optional_parse("PLATFORM_FEE_BIPS", 500i64)?,

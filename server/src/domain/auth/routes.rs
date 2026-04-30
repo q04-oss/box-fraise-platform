@@ -1,8 +1,11 @@
 use axum::{
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, Query, State},
+    http::StatusCode,
+    response::{Html, IntoResponse, Response},
     routing::{get, patch, post},
     Json, Router,
 };
+use serde::Deserialize;
 use std::net::SocketAddr;
 
 use crate::{
@@ -29,8 +32,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/display-name",    patch(display_name))
         .route("/api/auth/forgot-password", post(forgot_password))
         .route("/api/auth/reset-password",  post(reset_password))
-        .route("/api/auth/claim-booking",   post(claim_booking))
-        .route("/api/auth/logout",          post(logout))
+        .route("/api/auth/claim-booking",        post(claim_booking))
+        .route("/api/auth/logout",               post(logout))
+        .route("/api/auth/verify-email",         get(verify_email))
+        .route("/api/auth/resend-verification",  post(resend_verification))
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -154,4 +159,68 @@ async fn logout(
 ) -> AppResult<Json<serde_json::Value>> {
     auth::revoke(&state.revoked, &claims.jti, claims.exp);
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct VerifyEmailParams { token: String }
+
+async fn verify_email(
+    State(state):  State<AppState>,
+    Query(params): Query<VerifyEmailParams>,
+) -> Response {
+    match service::verify_email(&state, &params.token).await {
+        Ok(email) => Html(verify_page(true,  &email,  "")).into_response(),
+        Err(_)    => Html(verify_page(false, "",      "this link has expired or already been used")).into_response(),
+    }
+}
+
+async fn resend_verification(
+    State(state):      State<AppState>,
+    RequireUser(uid):  RequireUser,
+) -> AppResult<Json<serde_json::Value>> {
+    let user = repository::find_by_id(&state.db, uid)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    if user.verified {
+        return Ok(Json(serde_json::json!({ "ok": true, "already_verified": true })));
+    }
+
+    service::resend_verification(&state, uid, &user.email).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+fn verify_page(ok: bool, email: &str, error: &str) -> String {
+    let (icon, heading, detail) = if ok {
+        ("✓", "email verified", format!("<p>{email}</p><p>you can now earn loyalty steeps.</p>"))
+    } else {
+        ("✗", "verification failed", format!("<p>{error}</p><p>open the app to request a new link.</p>"))
+    };
+    format!(r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>box fraise · {heading}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+     background:#F7F5F2;display:flex;align-items:center;justify-content:center;
+     min-height:100vh}}
+.card{{background:#fff;border-radius:20px;padding:48px 32px;max-width:360px;
+      width:90%;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.07)}}
+.icon{{font-size:3rem;margin-bottom:12px;color:{icon_color}}}
+h1{{font-size:1.3rem;font-weight:600;color:#1C1C1E;margin-bottom:16px}}
+p{{font-size:.875rem;color:#8E8E93;line-height:1.5;margin-bottom:8px}}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">{icon}</div>
+  <h1>{heading}</h1>
+  {detail}
+</div>
+</body>
+</html>"#,
+    icon_color = if ok { "#4CAF50" } else { "#C0392B" })
 }

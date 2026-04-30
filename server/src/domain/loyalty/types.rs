@@ -27,6 +27,10 @@ pub struct LoyaltyBalance {
     /// How many more steeps until the next reward. Zero means a reward is available.
     pub steeps_until_reward: i64,
     pub reward_available:   bool,
+    /// False for email+password accounts that haven't clicked their verification
+    /// link. Walk-in QR stamps are gated on this. In-app payments always credit
+    /// the steep regardless — payment is a stronger verification signal.
+    pub email_verified:     bool,
 }
 
 // ── Events ────────────────────────────────────────────────────────────────────
