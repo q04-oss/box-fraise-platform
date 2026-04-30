@@ -101,6 +101,16 @@ pub struct DisplayNameBody {
     pub display_name: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MagicLinkBody {
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MagicLinkVerifyBody {
+    pub token: String,
+}
+
 // ── Staff auth ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

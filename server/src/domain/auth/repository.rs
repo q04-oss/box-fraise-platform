@@ -180,6 +180,38 @@ pub async fn create_email_user(
     row.ok_or_else(|| AppError::conflict("email already in use"))
 }
 
+pub async fn find_or_create_magic_link_user(
+    pool:  &PgPool,
+    email: &str,
+) -> AppResult<(UserRow, bool)> {
+    if let Some(user) = find_by_email(pool, email).await? {
+        return Ok((user, false));
+    }
+    let user_code = generate_unique_code(pool).await?;
+    let row: Option<UserRow> = sqlx::query_as(&format!(
+        "INSERT INTO users (email, user_code, verified)
+         VALUES ($1, $2, true)
+         ON CONFLICT (email) DO NOTHING
+         RETURNING {USER_COLS}"
+    ))
+    .bind(email)
+    .bind(&user_code)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Db)?;
+
+    match row {
+        Some(user) => Ok((user, true)),
+        None => {
+            let user = find_by_email(pool, email).await?
+                .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
+                    "magic link user creation race"
+                )))?;
+            Ok((user, false))
+        }
+    }
+}
+
 pub async fn set_password(pool: &PgPool, user_id: UserId, password_hash: &str) -> AppResult<()> {
     sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
         .bind(password_hash)

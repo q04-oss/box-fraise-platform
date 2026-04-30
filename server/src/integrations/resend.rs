@@ -202,6 +202,29 @@ pub async fn send_tip_received(
     send(http, api_key, to, "Tip received — Maison Fraise", &html).await
 }
 
+pub async fn send_magic_link_email(
+    http:     &reqwest::Client,
+    api_key:  &str,
+    to:       &str,
+    link_url: &str,
+) -> AppResult<()> {
+    let html = base_template(&format!(
+        r#"<p>Tap the button below to sign in. This link expires in 15 minutes.</p>
+           <p style="margin:32px 0">
+             <a href="{link_url}"
+                style="background:#C9973A;color:#0a0a0a;padding:12px 24px;
+                       text-decoration:none;border-radius:6px;font-size:14px;
+                       font-family:-apple-system,sans-serif;font-weight:600">
+               sign in
+             </a>
+           </p>
+           <p style="color:#555;font-size:12px">
+             If you didn't request this, you can safely ignore it.
+           </p>"#
+    ));
+    send(http, api_key, to, "sign in to Whisked", &html).await
+}
+
 pub fn renewal_reminder_html(
     tier:      &str,
     renews_at: chrono::NaiveDateTime,

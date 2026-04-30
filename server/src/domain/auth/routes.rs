@@ -1,6 +1,6 @@
 use axum::{
     extract::{ConnectInfo, Query, State},
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, patch, post},
     Json, Router,
 };
@@ -35,6 +35,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/logout",               post(logout))
         .route("/api/auth/verify-email",         get(verify_email))
         .route("/api/auth/resend-verification",  post(resend_verification))
+        .route("/api/auth/magic-link",        post(magic_link_request))
+        .route("/api/auth/magic-link/open",   get(magic_link_open))
+        .route("/api/auth/magic-link/verify", post(magic_link_verify))
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -187,6 +190,30 @@ async fn resend_verification(
 
     service::resend_verification(&state, uid, &user.email).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn magic_link_request(
+    State(state):  State<AppState>,
+    AppJson(body): AppJson<MagicLinkBody>,
+) -> AppResult<Json<serde_json::Value>> {
+    service::request_magic_link(&state, &body.email).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct MagicLinkOpenParams { token: String }
+
+async fn magic_link_open(
+    Query(params): Query<MagicLinkOpenParams>,
+) -> Response {
+    Redirect::temporary(&format!("whisked://auth?token={}", params.token)).into_response()
+}
+
+async fn magic_link_verify(
+    State(state):  State<AppState>,
+    AppJson(body): AppJson<MagicLinkVerifyBody>,
+) -> AppResult<Json<super::types::AuthResponse>> {
+    Ok(Json(service::verify_magic_link(&state, &body.token).await?))
 }
 
 fn verify_page(ok: bool, email: &str, error: &str) -> String {

@@ -17,6 +17,10 @@ const VERIFY_PREFIX:  &str = "fraise:email-verify:";
 const VERIFY_TTL:     u64  = 86_400; // 24 hours
 const RESEND_RATE_PREFIX: &str = "fraise:rate:email-resend:";
 const RESEND_RATE_TTL: u64 = 300;   // 5 minutes — one resend per window
+const MAGIC_LINK_PREFIX:      &str = "fraise:magic:";
+const MAGIC_LINK_TTL:         u64  = 900;  // 15 minutes
+const MAGIC_RATE_PREFIX:      &str = "fraise:rate:magic:";
+const MAGIC_RATE_TTL:         u64  = 120;  // 2 minutes between requests per email
 use super::{
     repository,
     types::{AuthResponse, StaffAuthResponse, UserRow},
@@ -235,6 +239,95 @@ pub async fn require_active(state: &AppState, user_id: UserId) -> AppResult<User
     }
 
     Ok(user)
+}
+
+// ── Magic link auth ───────────────────────────────────────────────────────────
+
+/// Sends a one-time sign-in link to `email`. Creates the user if they don't
+/// exist yet. Always returns Ok — never reveals whether the email is registered.
+pub async fn request_magic_link(state: &AppState, email: &str) -> AppResult<()> {
+    // Per-email rate limit — silent on excess to prevent enumeration.
+    if let Some(pool) = state.redis.as_ref() {
+        let key = format!("{MAGIC_RATE_PREFIX}{}", email.to_lowercase());
+        let mut conn = pool.get().await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+        let count: i64 = redis::cmd("INCR")
+            .arg(&key)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis INCR: {e}")))?;
+        if count == 1 {
+            let _: () = redis::cmd("EXPIRE")
+                .arg(&key).arg(MAGIC_RATE_TTL)
+                .query_async(&mut *conn).await.unwrap_or(());
+        }
+        if count > 1 { return Ok(()); }
+    }
+
+    let (user, _) = repository::find_or_create_magic_link_user(&state.db, email).await?;
+    if user.banned { return Ok(()); }
+
+    let Some(redis_pool) = state.redis.as_ref() else { return Ok(()) };
+    let token = Uuid::new_v4().to_string();
+    let key   = format!("{MAGIC_LINK_PREFIX}{token}");
+    let mut conn = redis_pool.get().await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(i32::from(user.id).to_string())
+        .arg("EX").arg(MAGIC_LINK_TTL)
+        .arg("NX")
+        .query_async(&mut *conn)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis SET: {e}")))?;
+
+    if let Some(api_key) = state.cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned()) {
+        let http     = state.http.clone();
+        let base_url = state.cfg.api_base_url.clone();
+        let to       = email.to_owned();
+        tokio::spawn(async move {
+            let link = format!("{base_url}/api/auth/magic-link/open?token={token}");
+            let _ = resend::send_magic_link_email(&http, &api_key, &to, &link).await;
+        });
+    }
+
+    Ok(())
+}
+
+/// Consumes a one-time magic link token and issues a JWT.
+/// Marks the user's email as verified — clicking the link proves ownership.
+pub async fn verify_magic_link(state: &AppState, token: &str) -> AppResult<AuthResponse> {
+    let redis_pool = state.redis.as_ref()
+        .ok_or(AppError::Unauthorized)?;
+
+    let key = format!("{MAGIC_LINK_PREFIX}{token}");
+    let mut conn = redis_pool.get().await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+
+    let raw: Option<String> = redis::cmd("GETDEL")
+        .arg(&key)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis GETDEL: {e}")))?;
+
+    let user_id = UserId::from(
+        raw.ok_or(AppError::Unauthorized)?
+            .parse::<i32>()
+            .map_err(|_| AppError::Unauthorized)?,
+    );
+
+    let user = repository::find_by_id(&state.db, user_id)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+
+    if user.banned { return Err(AppError::Forbidden); }
+
+    if !user.verified {
+        repository::set_verified(&state.db, user_id).await?;
+    }
+
+    let jwt = auth::sign_token(user_id, &state.cfg)?;
+    Ok(AuthResponse { user_id, token: jwt, is_new: false, verified: true })
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
