@@ -8,6 +8,7 @@ pub mod contracts;
 pub mod devices;
 pub mod gifts;
 pub mod keys;
+pub mod loyalty;
 pub mod memberships;
 pub mod messages;
 pub mod nfc;
