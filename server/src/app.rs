@@ -175,18 +175,15 @@ pub fn build(state: AppState) -> Router {
             // All other sensitive APIs remain denied.
             HeaderValue::from_static("geolocation=(), microphone=()"),
         ))
-        .layer(SetResponseHeaderLayer::overriding(
+        // if_not_present so the scan page can set its own nonce-based CSP.
+        // All other HTML responses (login, error pages) get this base policy.
+        // unsafe-inline is intentionally absent — the scan page uses a per-request
+        // nonce instead; other pages have no inline scripts.
+        .layer(SetResponseHeaderLayer::if_not_present(
             header::CONTENT_SECURITY_POLICY,
-            // default-src 'self' covers the staff web app.
-            // https://cdn.jsdelivr.net is added to script-src for jsqr (the QR decoder
-            // used as an iOS Safari fallback in the staff PWA). The SRI hash on the
-            // <script> tag ensures only the exact pinned version can execute — a CDN
-            // compromise cannot inject different code without breaking the hash check.
-            // API responses are JSON — browsers do not enforce CSP on non-HTML responses.
-            // frame-ancestors 'none' prevents clickjacking.
             HeaderValue::from_static(
                 "default-src 'self'; \
-                 script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; \
+                 script-src 'self' https://cdn.jsdelivr.net; \
                  style-src 'self' 'unsafe-inline'; \
                  img-src 'self' data: blob:; \
                  connect-src 'self'; \
