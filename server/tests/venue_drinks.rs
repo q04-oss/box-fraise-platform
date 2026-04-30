@@ -23,6 +23,70 @@ use box_fraise_server::{
 };
 use sqlx::PgPool;
 
+// ── Stripe webhook idempotency ────────────────────────────────────────────────
+
+/// The `if order.status != "pending"` guard in complete_venue_order_inner is the
+/// entire safety net against double-processing when Stripe retries the webhook.
+/// A customer would be charged once but their order pushed to Square twice —
+/// or their loyalty steep credited twice — if this guard were absent or broken.
+///
+/// This test seeds a venue_order already in 'paid' status and asserts that a
+/// second complete_venue_order call is a strict no-op: no audit event written,
+/// no loyalty event credited, order status unchanged.
+#[sqlx::test(migrations = "migrations")]
+async fn complete_venue_order_is_idempotent_after_paid(pool: PgPool) {
+    let state    = common::build_state(pool.clone(), None);
+    let customer = common::create_user(&pool, "customer@idempotency.test").await;
+    let biz      = common::create_business(&pool, "Idempotency Café").await;
+    let pi_id    = "pi_idempotency_test_00000001";
+
+    // Seed an order that has already been processed (status = 'paid').
+    common::seed_paid_venue_order(&pool, biz.id, customer.id, pi_id).await;
+
+    // Calling complete_venue_order on an already-paid order must be a no-op.
+    // It should return normally — not panic, not error — and change nothing.
+    venue::complete_venue_order(&state, pi_id).await;
+
+    // ── Assert: order status unchanged ────────────────────────────────────────
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM venue_orders WHERE stripe_payment_intent_id = $1"
+    )
+    .bind(pi_id)
+    .fetch_one(&pool)
+    .await
+    .expect("order must still exist");
+
+    assert_eq!(status, "paid", "idempotency guard must leave status unchanged");
+
+    // ── Assert: no payment_confirmed audit event written ──────────────────────
+    // The guard fires before the audit — if payment_confirmed appears, the guard
+    // was bypassed and the order was reprocessed.
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events
+         WHERE event_type = 'venue_order.payment_confirmed'
+           AND metadata->>'pi_id' = $1"
+    )
+    .bind(pi_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0);
+
+    assert_eq!(audit_count, 0, "no payment_confirmed audit must be written for an already-paid order");
+
+    // ── Assert: no loyalty event credited ────────────────────────────────────
+    let loyalty_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM loyalty_events
+         WHERE user_id = $1 AND business_id = $2"
+    )
+    .bind(i32::from(customer.id))
+    .bind(biz.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(0);
+
+    assert_eq!(loyalty_count, 0, "no loyalty steep must be credited when order was already paid");
+}
+
 // ── Fixture helpers ───────────────────────────────────────────────────────────
 
 async fn insert_drink(

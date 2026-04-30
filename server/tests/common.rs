@@ -206,6 +206,32 @@ pub async fn seed_oauth_tokens(
     upsert_tokens(pool, business_id, &row).await.unwrap();
 }
 
+/// Seeds a venue_orders row in 'paid' status for testing idempotency paths.
+/// The order has no items — sufficient for testing the status guard without
+/// needing a full Create→Pay flow.
+pub async fn seed_paid_venue_order(
+    pool:        &PgPool,
+    business_id: i32,
+    user_id:     UserId,
+    pi_id:       &str,
+) -> i64 {
+    let (id,): (i64,) = sqlx::query_as(
+        "INSERT INTO venue_orders
+             (user_id, business_id, idempotency_key, stripe_payment_intent_id,
+              status, total_cents, platform_fee_cents, notes)
+         VALUES ($1, $2, $3, $4, 'paid', 500, 25, '')
+         RETURNING id"
+    )
+    .bind(i32::from(user_id))
+    .bind(business_id)
+    .bind(format!("idem-test-{pi_id}"))
+    .bind(pi_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("seed_paid_venue_order: {e}"));
+    id
+}
+
 /// Seeds a Square OAuth CSRF state token in Redis.
 /// Key: fraise:square-oauth-state:{token} → "{business_id}"
 pub async fn seed_oauth_csrf_state(redis_pool: &RedisPool, token: &str, business_id: i32) {
