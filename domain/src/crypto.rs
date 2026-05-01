@@ -27,26 +27,26 @@ use aes_gcm::{
 };
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::error::{AppError, AppResult};
+use crate::error::{DomainError, AppResult};
 
 /// Encrypts `plaintext` with AES-256-GCM using the provided hex key.
 /// Returns a hex string suitable for DB storage.
 pub fn encrypt(key_hex: &str, plaintext: &str) -> AppResult<String> {
     let key_bytes = hex::decode(key_hex)
-        .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid encryption key format")))?;
+        .map_err(|_| DomainError::Internal(anyhow::anyhow!("invalid encryption key format")))?;
     if key_bytes.len() != 32 {
-        return Err(AppError::Internal(anyhow::anyhow!(
+        return Err(DomainError::Internal(anyhow::anyhow!(
             "SQUARE_TOKEN_ENCRYPTION_KEY must be 32 bytes (64 hex chars)"
         )));
     }
 
     let cipher = Aes256Gcm::new_from_slice(&key_bytes)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("cipher init: {e}")))?;
+        .map_err(|e| DomainError::Internal(anyhow::anyhow!("cipher init: {e}")))?;
     let nonce  = Aes256Gcm::generate_nonce(&mut OsRng);
 
     let ciphertext = cipher
         .encrypt(&nonce, plaintext.as_bytes())
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("encryption failed: {e}")))?;
+        .map_err(|e| DomainError::Internal(anyhow::anyhow!("encryption failed: {e}")))?;
 
     Ok(format!("{}{}", hex::encode(nonce), hex::encode(ciphertext)))
 }
@@ -54,33 +54,33 @@ pub fn encrypt(key_hex: &str, plaintext: &str) -> AppResult<String> {
 /// Decrypts a value produced by `encrypt`. Returns the plaintext.
 pub fn decrypt(key_hex: &str, stored: &str) -> AppResult<String> {
     let key_bytes = hex::decode(key_hex)
-        .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid encryption key format")))?;
+        .map_err(|_| DomainError::Internal(anyhow::anyhow!("invalid encryption key format")))?;
     if key_bytes.len() != 32 {
-        return Err(AppError::Internal(anyhow::anyhow!(
+        return Err(DomainError::Internal(anyhow::anyhow!(
             "SQUARE_TOKEN_ENCRYPTION_KEY must be 32 bytes (64 hex chars)"
         )));
     }
 
     // Nonce is the first 24 hex chars (12 bytes).
     if stored.len() < 24 {
-        return Err(AppError::Internal(anyhow::anyhow!("ciphertext too short")));
+        return Err(DomainError::Internal(anyhow::anyhow!("ciphertext too short")));
     }
     let (nonce_hex, ct_hex) = stored.split_at(24);
     let nonce_bytes = hex::decode(nonce_hex)
-        .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid nonce in stored value")))?;
+        .map_err(|_| DomainError::Internal(anyhow::anyhow!("invalid nonce in stored value")))?;
     let ct = hex::decode(ct_hex)
-        .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid ciphertext in stored value")))?;
+        .map_err(|_| DomainError::Internal(anyhow::anyhow!("invalid ciphertext in stored value")))?;
 
     let cipher = Aes256Gcm::new_from_slice(&key_bytes)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("cipher init: {e}")))?;
+        .map_err(|e| DomainError::Internal(anyhow::anyhow!("cipher init: {e}")))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let plaintext = cipher
         .decrypt(nonce, ct.as_ref())
-        .map_err(|_| AppError::Internal(anyhow::anyhow!("decryption failed — wrong key or corrupted ciphertext")))?;
+        .map_err(|_| DomainError::Internal(anyhow::anyhow!("decryption failed — wrong key or corrupted ciphertext")))?;
 
     String::from_utf8(plaintext)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("decrypted value is not valid UTF-8: {e}")))
+        .map_err(|e| DomainError::Internal(anyhow::anyhow!("decrypted value is not valid UTF-8: {e}")))
 }
 
 /// Encrypts a `SecretString`. The secret is exposed only within this function

@@ -1,5 +1,6 @@
 pub mod app;
 pub mod domain;
+pub mod error;
 pub mod http;
 
 // Re-export shared infrastructure from the domain crate so that:
@@ -10,7 +11,6 @@ pub use box_fraise_domain::auth;
 pub use box_fraise_domain::config;
 pub use box_fraise_domain::crypto;
 pub use box_fraise_domain::db;
-pub use box_fraise_domain::error;
 pub use box_fraise_domain::types;
 
 // Re-export integrations for route files.

@@ -1,7 +1,7 @@
 use rand::Rng;
 use sqlx::PgPool;
 
-use crate::{error::{AppError, AppResult}, types::UserId};
+use crate::{error::{DomainError, AppResult}, types::UserId};
 use super::types::{UserRow, USER_COLS};
 
 // ── Lookups ───────────────────────────────────────────────────────────────────
@@ -11,7 +11,7 @@ pub async fn find_by_id(pool: &PgPool, id: UserId) -> AppResult<Option<UserRow>>
         .bind(id)
         .fetch_optional(pool)
         .await
-        .map_err(AppError::Db)
+        .map_err(DomainError::Db)
 }
 
 pub async fn find_by_email(pool: &PgPool, email: &str) -> AppResult<Option<UserRow>> {
@@ -21,7 +21,7 @@ pub async fn find_by_email(pool: &PgPool, email: &str) -> AppResult<Option<UserR
     .bind(email)
     .fetch_optional(pool)
     .await
-    .map_err(AppError::Db)
+    .map_err(DomainError::Db)
 }
 
 // ── Find or create via Apple Sign In ─────────────────────────────────────────
@@ -34,7 +34,7 @@ pub async fn find_or_create_apple(
     email:        Option<&str>,
     display_name: Option<&str>,
 ) -> AppResult<(UserRow, bool)> {
-    let mut tx = pool.begin().await.map_err(AppError::Db)?;
+    let mut tx = pool.begin().await.map_err(DomainError::Db)?;
 
     // 1. Look up by Apple user ID first — fastest path for returning users.
     let existing: Option<UserRow> = sqlx::query_as(&format!(
@@ -43,10 +43,10 @@ pub async fn find_or_create_apple(
     .bind(apple_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
 
     if let Some(user) = existing {
-        tx.commit().await.map_err(AppError::Db)?;
+        tx.commit().await.map_err(DomainError::Db)?;
         return Ok((user, false));
     }
 
@@ -71,9 +71,9 @@ pub async fn find_or_create_apple(
     .bind(&user_code)
     .fetch_one(&mut *tx)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
 
-    tx.commit().await.map_err(AppError::Db)?;
+    tx.commit().await.map_err(DomainError::Db)?;
 
     let is_new = email.is_none() || email_str.ends_with("@privaterelay.appleid.com");
 
@@ -104,10 +104,10 @@ pub async fn create_email_user(
     .bind(&user_code)
     .fetch_optional(pool)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
 
     // If ON CONFLICT fired, the email already exists — return Conflict.
-    row.ok_or_else(|| AppError::conflict("email already in use"))
+    row.ok_or_else(|| DomainError::conflict("email already in use"))
 }
 
 pub async fn find_or_create_magic_link_user(
@@ -128,13 +128,13 @@ pub async fn find_or_create_magic_link_user(
     .bind(&user_code)
     .fetch_optional(pool)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
 
     match row {
         Some(user) => Ok((user, true)),
         None => {
             let user = find_by_email(pool, email).await?
-                .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
+                .ok_or_else(|| DomainError::Internal(anyhow::anyhow!(
                     "magic link user creation race"
                 )))?;
             Ok((user, false))
@@ -148,7 +148,7 @@ pub async fn set_password(pool: &PgPool, user_id: UserId, password_hash: &str) -
         .bind(user_id)
         .execute(pool)
         .await
-        .map_err(AppError::Db)?;
+        .map_err(DomainError::Db)?;
     Ok(())
 }
 
@@ -160,7 +160,7 @@ pub async fn set_push_token(pool: &PgPool, user_id: UserId, token: &str) -> AppR
         .bind(user_id)
         .execute(pool)
         .await
-        .map_err(AppError::Db)?;
+        .map_err(DomainError::Db)?;
     Ok(())
 }
 
@@ -170,7 +170,7 @@ pub async fn set_display_name(pool: &PgPool, user_id: UserId, name: &str) -> App
         .bind(user_id)
         .execute(pool)
         .await
-        .map_err(AppError::Db)?;
+        .map_err(DomainError::Db)?;
     Ok(())
 }
 
@@ -189,7 +189,7 @@ pub async fn create_reset_token(pool: &PgPool, user_id: UserId, token: &str) -> 
     .bind(expires_at)
     .execute(pool)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
     Ok(())
 }
 
@@ -202,7 +202,7 @@ pub async fn consume_reset_token(pool: &PgPool, token: &str) -> AppResult<Option
     .bind(token)
     .fetch_optional(pool)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
     Ok(row.map(|(id,)| id))
 }
 
@@ -217,12 +217,12 @@ async fn generate_unique_code(pool: &PgPool) -> AppResult<String> {
                 .bind(&code)
                 .fetch_one(pool)
                 .await
-                .map_err(AppError::Db)?;
+                .map_err(DomainError::Db)?;
         if !exists {
             return Ok(code);
         }
     }
-    Err(AppError::Internal(anyhow::anyhow!(
+    Err(DomainError::Internal(anyhow::anyhow!(
         "could not generate a unique user_code after 10 attempts"
     )))
 }
@@ -238,12 +238,12 @@ async fn generate_unique_code_tx(
                 .bind(&code)
                 .fetch_one(&mut **tx)
                 .await
-                .map_err(AppError::Db)?;
+                .map_err(DomainError::Db)?;
         if !exists {
             return Ok(code);
         }
     }
-    Err(AppError::Internal(anyhow::anyhow!(
+    Err(DomainError::Internal(anyhow::anyhow!(
         "could not generate a unique user_code after 10 attempts"
     )))
 }
@@ -253,7 +253,7 @@ pub async fn set_verified(pool: &PgPool, user_id: UserId) -> AppResult<()> {
         .bind(user_id)
         .execute(pool)
         .await
-        .map_err(AppError::Db)?;
+        .map_err(DomainError::Db)?;
     Ok(())
 }
 
@@ -262,7 +262,7 @@ pub async fn get_verified(pool: &PgPool, user_id: UserId) -> AppResult<bool> {
         .bind(user_id)
         .fetch_one(pool)
         .await
-        .map_err(AppError::Db)?;
+        .map_err(DomainError::Db)?;
     Ok(verified)
 }
 

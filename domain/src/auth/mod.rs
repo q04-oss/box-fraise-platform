@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use secrecy::ExposeSecret;
 
-use crate::{config::Config, error::AppError, types::UserId};
+use crate::{config::Config, error::DomainError, types::UserId};
 
 // ── Claims ────────────────────────────────────────────────────────────────────
 
@@ -29,7 +29,7 @@ pub struct Claims {
 
 // ── Token operations ──────────────────────────────────────────────────────────
 
-pub fn sign_token(user_id: UserId, cfg: &Config) -> Result<String, AppError> {
+pub fn sign_token(user_id: UserId, cfg: &Config) -> Result<String, DomainError> {
     let exp = Utc::now()
         .checked_add_signed(chrono::Duration::days(90))
         .unwrap()
@@ -42,7 +42,7 @@ pub fn sign_token(user_id: UserId, cfg: &Config) -> Result<String, AppError> {
         &claims,
         &EncodingKey::from_secret(cfg.jwt_secret.expose_secret().as_bytes()),
     )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("token encoding failed: {e}")))
+    .map_err(|e| DomainError::Internal(anyhow::anyhow!("token encoding failed: {e}")))
 }
 
 pub fn verify_token(token: &str, cfg: &Config) -> Option<Claims> {

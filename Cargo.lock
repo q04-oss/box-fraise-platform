@@ -380,7 +380,6 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
- "axum",
  "base64 0.22.1",
  "bcrypt",
  "box-fraise-integrations",
@@ -448,6 +447,7 @@ dependencies = [
  "sqlx",
  "testcontainers",
  "testcontainers-modules",
+ "thiserror 2.0.18",
  "tokio",
  "tower",
  "tower-cookies",

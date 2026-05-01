@@ -1,13 +1,7 @@
-use axum::{
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    Json,
-};
-use serde_json::json;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum AppError {
+pub enum DomainError {
     #[error("unauthorized")]
     Unauthorized,
 
@@ -15,7 +9,7 @@ pub enum AppError {
     Forbidden,
 
     #[error("{0}")]
-    BadRequest(String),
+    InvalidInput(String),
 
     #[error("not found")]
     NotFound,
@@ -27,13 +21,13 @@ pub enum AppError {
     Unprocessable(String),
 
     #[error("rate limit exceeded")]
-    TooManyRequests,
+    RateLimitExceeded,
 
     #[error("payment required")]
     PaymentRequired,
 
     #[error("{0}")]
-    BadGateway(String),
+    ExternalServiceError(String),
 
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
@@ -42,9 +36,9 @@ pub enum AppError {
     Db(#[from] sqlx::Error),
 }
 
-impl AppError {
-    pub fn bad_request(msg: impl Into<String>) -> Self {
-        Self::BadRequest(msg.into())
+impl DomainError {
+    pub fn invalid_input(msg: impl Into<String>) -> Self {
+        Self::InvalidInput(msg.into())
     }
 
     pub fn conflict(msg: impl Into<String>) -> Self {
@@ -56,29 +50,4 @@ impl AppError {
     }
 }
 
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let (status, message) = match &self {
-            Self::Unauthorized      => (StatusCode::UNAUTHORIZED,          self.to_string()),
-            Self::Forbidden         => (StatusCode::FORBIDDEN,             self.to_string()),
-            Self::BadRequest(m)     => (StatusCode::BAD_REQUEST,           m.clone()),
-            Self::NotFound          => (StatusCode::NOT_FOUND,             self.to_string()),
-            Self::Conflict(m)       => (StatusCode::CONFLICT,              m.clone()),
-            Self::Unprocessable(m)  => (StatusCode::UNPROCESSABLE_ENTITY,  m.clone()),
-            Self::TooManyRequests   => (StatusCode::TOO_MANY_REQUESTS,     self.to_string()),
-            Self::PaymentRequired   => (StatusCode::PAYMENT_REQUIRED,      self.to_string()),
-            Self::BadGateway(m)     => (StatusCode::BAD_GATEWAY,           m.clone()),
-            Self::Internal(e) => {
-                tracing::error!(error = %e, "internal server error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())
-            }
-            Self::Db(e) => {
-                tracing::error!(error = %e, "database error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())
-            }
-        };
-        (status, Json(json!({ "error": message }))).into_response()
-    }
-}
-
-pub type AppResult<T> = Result<T, AppError>;
+pub type AppResult<T> = Result<T, DomainError>;

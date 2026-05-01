@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use crate::{error::{AppError, AppResult}, types::{KeyId, MessageId, UserId}};
+use crate::{error::{DomainError, AppResult}, types::{KeyId, MessageId, UserId}};
 use super::types::{ConversationSummary, MessageRow};
 
 const MSG_COLS: &str =
@@ -22,7 +22,7 @@ pub async fn can_message(pool: &PgPool, from: UserId, to: UserId) -> AppResult<b
     .bind(to)
     .fetch_one(pool)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
     if is_shop { return Ok(true); }
 
     // Rule 2: both verified.
@@ -36,7 +36,7 @@ pub async fn can_message(pool: &PgPool, from: UserId, to: UserId) -> AppResult<b
     .bind(to)
     .fetch_one(pool)
     .await
-    .map_err(AppError::Db)
+    .map_err(DomainError::Db)
 }
 
 // ── Conversations ─────────────────────────────────────────────────────────────
@@ -61,7 +61,7 @@ pub async fn list_conversations(
     .bind(user_id)
     .fetch_all(pool)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
 
     let mut summaries = Vec::with_capacity(peers.len());
     for (peer_id, peer_name) in peers {
@@ -75,7 +75,7 @@ pub async fn list_conversations(
         .bind(peer_id)
         .fetch_optional(pool)
         .await
-        .map_err(AppError::Db)?;
+        .map_err(DomainError::Db)?;
 
         let unread_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM messages
@@ -85,7 +85,7 @@ pub async fn list_conversations(
         .bind(user_id)
         .fetch_one(pool)
         .await
-        .map_err(AppError::Db)?;
+        .map_err(DomainError::Db)?;
 
         summaries.push(ConversationSummary {
             peer_id,
@@ -132,7 +132,7 @@ pub async fn thread(
         .bind(limit)
         .fetch_all(pool)
         .await
-        .map_err(AppError::Db)
+        .map_err(DomainError::Db)
     } else {
         sqlx::query_as(&format!(
             "SELECT {MSG_COLS} FROM messages
@@ -146,7 +146,7 @@ pub async fn thread(
         .bind(limit)
         .fetch_all(pool)
         .await
-        .map_err(AppError::Db)
+        .map_err(DomainError::Db)
     }
 }
 
@@ -178,7 +178,7 @@ pub async fn insert(
     .bind(one_time_pre_key_id)
     .fetch_one(pool)
     .await
-    .map_err(AppError::Db)
+    .map_err(DomainError::Db)
 }
 
 // ── Archive ───────────────────────────────────────────────────────────────────
@@ -194,6 +194,6 @@ pub async fn archive(pool: &PgPool, user_id: UserId, peer_id: UserId) -> AppResu
     .bind(peer_id)
     .execute(pool)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
     Ok(())
 }

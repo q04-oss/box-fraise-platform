@@ -24,7 +24,7 @@ use p256::{
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::*;
 
-use crate::error::AppError;
+use crate::error::DomainError;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -50,48 +50,48 @@ pub fn parse_attestation(
     _key_id:         &str,
     challenge:       Option<&[u8]>,
     rp_id:           &str,
-) -> Result<AttestationData, AppError> {
+) -> Result<AttestationData, DomainError> {
     let bytes = STANDARD
         .decode(attestation_b64)
-        .map_err(|_| AppError::bad_request("attestation: invalid base64"))?;
+        .map_err(|_| DomainError::invalid_input("attestation: invalid base64"))?;
 
     let root: Cbor = ciborium::de::from_reader(bytes.as_slice())
-        .map_err(|_| AppError::bad_request("attestation: invalid CBOR"))?;
+        .map_err(|_| DomainError::invalid_input("attestation: invalid CBOR"))?;
 
     let map = as_map(&root, "attestation")?;
 
     // Verify format — must be "apple-appattest"
     let fmt = map_text(map, "fmt")
-        .ok_or_else(|| AppError::bad_request("attestation: missing fmt"))?;
+        .ok_or_else(|| DomainError::invalid_input("attestation: missing fmt"))?;
     if fmt != "apple-appattest" {
-        return Err(AppError::bad_request(format!("attestation: unexpected fmt: {fmt}")));
+        return Err(DomainError::invalid_input(format!("attestation: unexpected fmt: {fmt}")));
     }
 
     // Extract attStmt
     let att_stmt = map_value(map, "attStmt")
-        .ok_or_else(|| AppError::bad_request("attestation: missing attStmt"))?;
+        .ok_or_else(|| DomainError::invalid_input("attestation: missing attStmt"))?;
     let att_map = as_map(att_stmt, "attStmt")?;
 
     // Extract x5c (DER-encoded certificate chain)
     let x5c_val = map_value(att_map, "x5c")
-        .ok_or_else(|| AppError::bad_request("attestation: missing x5c"))?;
+        .ok_or_else(|| DomainError::invalid_input("attestation: missing x5c"))?;
     let x5c = match x5c_val {
         Cbor::Array(arr) => arr,
-        _ => return Err(AppError::bad_request("attestation: x5c must be an array")),
+        _ => return Err(DomainError::invalid_input("attestation: x5c must be an array")),
     };
     if x5c.is_empty() {
-        return Err(AppError::bad_request("attestation: x5c is empty"));
+        return Err(DomainError::invalid_input("attestation: x5c is empty"));
     }
 
     // Leaf certificate (index 0)
     let leaf_der = match &x5c[0] {
         Cbor::Bytes(b) => b.as_slice(),
-        _ => return Err(AppError::bad_request("attestation: x5c[0] must be bytes")),
+        _ => return Err(DomainError::invalid_input("attestation: x5c[0] must be bytes")),
     };
 
     // Parse leaf certificate with x509-parser
     let (_, cert) = X509Certificate::from_der(leaf_der)
-        .map_err(|_| AppError::bad_request("attestation: failed to parse leaf cert"))?;
+        .map_err(|_| DomainError::invalid_input("attestation: failed to parse leaf cert"))?;
 
     // Extract the SPKI (SubjectPublicKeyInfo) in DER form — stored for assertion verification
     let spki_der = cert
@@ -119,16 +119,16 @@ pub fn parse_attestation(
 
     // Extract and validate authData
     let auth_data = map_bytes(map, "authData")
-        .ok_or_else(|| AppError::bad_request("attestation: missing authData"))?;
+        .ok_or_else(|| DomainError::invalid_input("attestation: missing authData"))?;
 
     if auth_data.len() < 37 {
-        return Err(AppError::bad_request("attestation: authData too short"));
+        return Err(DomainError::invalid_input("attestation: authData too short"));
     }
 
     // Bytes 0–31: SHA-256(rpId)
     let expected_rp_hash: [u8; 32] = Sha256::digest(rp_id.as_bytes()).into();
     if auth_data[..32] != expected_rp_hash {
-        return Err(AppError::bad_request("attestation: rpIdHash mismatch — wrong app ID"));
+        return Err(DomainError::invalid_input("attestation: rpIdHash mismatch — wrong app ID"));
     }
 
     // If a challenge was provided, verify the nonce in authData.
@@ -154,20 +154,20 @@ pub fn verify_assertion(
     assertion_b64:   &str,
     public_key_der:  &[u8],
     request_message: &[u8],
-) -> Result<(), AppError> {
+) -> Result<(), DomainError> {
     let bytes = STANDARD
         .decode(assertion_b64)
-        .map_err(|_| AppError::Unauthorized)?;
+        .map_err(|_| DomainError::Unauthorized)?;
 
     let root: Cbor = ciborium::de::from_reader(bytes.as_slice())
-        .map_err(|_| AppError::Unauthorized)?;
+        .map_err(|_| DomainError::Unauthorized)?;
 
-    let map = as_map(&root, "assertion").map_err(|_| AppError::Unauthorized)?;
+    let map = as_map(&root, "assertion").map_err(|_| DomainError::Unauthorized)?;
 
     let signature = map_bytes(map, "signature")
-        .ok_or(AppError::Unauthorized)?;
+        .ok_or(DomainError::Unauthorized)?;
     let auth_data = map_bytes(map, "authenticatorData")
-        .ok_or(AppError::Unauthorized)?;
+        .ok_or(DomainError::Unauthorized)?;
 
     // Reconstruct the signed digest:
     //   SHA-256(authenticatorData || SHA-256(requestMessage))
@@ -180,25 +180,25 @@ pub fn verify_assertion(
 
     // Load the P-256 public key from DER SPKI
     let verifying_key = VerifyingKey::from_public_key_der(public_key_der)
-        .map_err(|_| AppError::Unauthorized)?;
+        .map_err(|_| DomainError::Unauthorized)?;
 
     // Verify ECDSA-P256-SHA256 signature (DER-encoded)
     let sig = DerSignature::try_from(signature)
-        .map_err(|_| AppError::Unauthorized)?;
+        .map_err(|_| DomainError::Unauthorized)?;
 
     verifying_key
         .verify_prehash(&digest, &sig)
-        .map_err(|_| AppError::Unauthorized)?;
+        .map_err(|_| DomainError::Unauthorized)?;
 
     Ok(())
 }
 
 // ── CBOR helpers ──────────────────────────────────────────────────────────────
 
-fn as_map<'a>(value: &'a Cbor, ctx: &str) -> Result<&'a Vec<(Cbor, Cbor)>, AppError> {
+fn as_map<'a>(value: &'a Cbor, ctx: &str) -> Result<&'a Vec<(Cbor, Cbor)>, DomainError> {
     match value {
         Cbor::Map(m) => Ok(m),
-        _ => Err(AppError::bad_request(format!("{ctx}: expected CBOR map"))),
+        _ => Err(DomainError::invalid_input(format!("{ctx}: expected CBOR map"))),
     }
 }
 

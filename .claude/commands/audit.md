@@ -23,9 +23,11 @@ Audit the staged changes against the following classes:
 
 7. **Layer violations** — Does any route handler import `repository` or call a repository function directly? Does any `service.rs` file import `axum`, `Json`, `Router`, or any HTTP type? The rule is strict: `routes.rs → service.rs → repository.rs`, no layer may skip another.
 
+8. **Error boundary** — Does any file in `domain/` or `integrations/` import `axum`, `http::StatusCode`, or `tower`? Does any domain file construct `AppError` or reference HTTP status codes? Domain code must only use `DomainError`. `AppError` and status codes belong exclusively in `server/src/error.rs`.
+
 For each finding, report:
 - File and line number
-- Which class (1–7) it falls under
+- Which class (1–8) it falls under
 - Whether it is exploitable now, needs a precondition, or is theoretical
 - The exact attack sequence if exploitable now
 

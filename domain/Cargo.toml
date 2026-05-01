@@ -8,9 +8,6 @@ name = "box_fraise_domain"
 path = "src/lib.rs"
 
 [dependencies]
-# HTTP (only for IntoResponse on AppError — no route handlers here)
-axum = { version = "0.8", features = ["macros"] }
-
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
 

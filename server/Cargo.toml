@@ -55,6 +55,7 @@ chrono    = { workspace = true }
 uuid      = { workspace = true }
 dotenvy   = "0.15"
 anyhow    = { workspace = true }
+thiserror = { workspace = true }
 secrecy   = { workspace = true }
 url        = "2"
 tracing            = { workspace = true }

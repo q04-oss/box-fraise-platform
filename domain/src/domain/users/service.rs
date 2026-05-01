@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 
 use crate::{
-    error::{AppError, AppResult},
+    error::{DomainError, AppResult},
     types::UserId,
 };
 use super::{
@@ -16,13 +16,13 @@ pub async fn search_users(pool: &PgPool, query: &str) -> AppResult<Vec<UserSearc
 pub async fn get_public_profile(pool: &PgPool, user_id: UserId) -> AppResult<PublicProfile> {
     repository::public_profile(pool, user_id)
         .await?
-        .ok_or(AppError::NotFound)
+        .ok_or(DomainError::NotFound)
 }
 
 pub async fn get_social_access(pool: &PgPool, user_id: UserId) -> AppResult<SocialAccess> {
     repository::social_access(pool, user_id)
         .await?
-        .ok_or(AppError::NotFound)
+        .ok_or(DomainError::NotFound)
 }
 
 pub async fn list_notifications(

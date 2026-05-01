@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use ring::signature::{self, UnparsedPublicKey};
 use sqlx::PgPool;
 
-use crate::error::{AppError, AppResult};
+use crate::error::{DomainError, AppResult};
 use crate::types::{KeyId, UserId};
 use super::{
     repository,
@@ -26,12 +26,12 @@ pub async fn register_keys(
         (Some(signing_key_b64), Some(sig_b64)) => {
             let challenge = repository::consume_challenge(pool, user_id)
                 .await?
-                .ok_or_else(|| AppError::bad_request("no valid challenge found — request one first"))?;
+                .ok_or_else(|| DomainError::invalid_input("no valid challenge found — request one first"))?;
 
             verify_ed25519(challenge.as_bytes(), sig_b64, signing_key_b64)?;
         }
         (Some(_), None) => {
-            return Err(AppError::bad_request(
+            return Err(DomainError::invalid_input(
                 "challenge_sig is required when identity_signing_key is provided",
             ));
         }
@@ -80,14 +80,14 @@ const KEY_REFRESH_GRACE_DAYS: i64 = 30;
 pub async fn get_key_bundle(pool: &PgPool, target_id: UserId) -> AppResult<KeyBundleResponse> {
     let keys = repository::find_user_keys(pool, target_id)
         .await?
-        .ok_or(AppError::NotFound)?;
+        .ok_or(DomainError::NotFound)?;
 
     if keys.identity_signing_key.is_none() {
         let age_days = (chrono::Utc::now().naive_utc() - keys.updated_at).num_days();
         if age_days >= KEY_REFRESH_GRACE_DAYS {
-            return Err(AppError::Unprocessable("keys_expired".to_string()));
+            return Err(DomainError::Unprocessable("keys_expired".to_string()));
         }
-        return Err(AppError::Conflict("keys_need_refresh".to_string()));
+        return Err(DomainError::Conflict("keys_need_refresh".to_string()));
     }
 
     let otpk = repository::claim_otpk(pool, target_id).await?.map(|r| OtpkResponse {
@@ -108,7 +108,7 @@ pub async fn get_key_bundle(pool: &PgPool, target_id: UserId) -> AppResult<KeyBu
 pub async fn get_key_bundle_by_code(pool: &PgPool, code: &str) -> AppResult<KeyBundleResponse> {
     let target_id = repository::user_id_by_code(pool, code)
         .await?
-        .ok_or(AppError::NotFound)?;
+        .ok_or(DomainError::NotFound)?;
 
     get_key_bundle(pool, target_id).await
 }
@@ -118,13 +118,13 @@ pub async fn get_key_bundle_by_code(pool: &PgPool, code: &str) -> AppResult<KeyB
 fn verify_ed25519(message: &[u8], sig_b64: &str, pubkey_b64: &str) -> AppResult<()> {
     let sig = STANDARD
         .decode(sig_b64)
-        .map_err(|_| AppError::bad_request("invalid signature encoding"))?;
+        .map_err(|_| DomainError::invalid_input("invalid signature encoding"))?;
 
     let key = STANDARD
         .decode(pubkey_b64)
-        .map_err(|_| AppError::bad_request("invalid signing key encoding"))?;
+        .map_err(|_| DomainError::invalid_input("invalid signing key encoding"))?;
 
     UnparsedPublicKey::new(&signature::ED25519, &key)
         .verify(message, &sig)
-        .map_err(|_| AppError::bad_request("signature verification failed"))
+        .map_err(|_| DomainError::invalid_input("signature verification failed"))
 }

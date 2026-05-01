@@ -21,7 +21,7 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{config::Config, error::AppError, types::UserId};
+use crate::{config::Config, error::DomainError, types::UserId};
 
 // ── Claims ────────────────────────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ pub fn sign_staff_token(
     user_id:     UserId,
     business_id: i32,
     cfg:         &Config,
-) -> Result<String, AppError> {
+) -> Result<String, DomainError> {
     let exp = Utc::now()
         .checked_add_signed(chrono::Duration::hours(SHIFT_HOURS))
         .unwrap()
@@ -62,7 +62,7 @@ pub fn sign_staff_token(
         &claims,
         &EncodingKey::from_secret(cfg.staff_jwt_secret.expose_secret().as_bytes()),
     )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("staff token encoding failed: {e}")))
+    .map_err(|e| DomainError::Internal(anyhow::anyhow!("staff token encoding failed: {e}")))
 }
 
 pub fn verify_staff_token(token: &str, cfg: &Config) -> Option<StaffClaims> {

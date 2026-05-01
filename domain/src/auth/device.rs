@@ -8,7 +8,7 @@
 use k256::ecdsa::{RecoveryId, Signature};
 use sha3::{Digest, Keccak256};
 
-use crate::error::AppError;
+use crate::error::DomainError;
 
 pub struct DeviceHeader {
     pub address:   String,
@@ -27,7 +27,7 @@ pub fn parse_auth_header(value: &str) -> Option<DeviceHeader> {
 
 /// Verify the signature and return the recovered Ethereum address (lowercase, 0x-prefixed).
 /// Returns `Err` if the signature is invalid or does not match any accepted minute.
-pub fn verify_signature(header: &DeviceHeader) -> Result<String, AppError> {
+pub fn verify_signature(header: &DeviceHeader) -> Result<String, DomainError> {
     let now_minute = unix_minute_now();
 
     // Accept current minute and ±1 to handle clock skew.
@@ -40,7 +40,7 @@ pub fn verify_signature(header: &DeviceHeader) -> Result<String, AppError> {
         }
     }
 
-    Err(AppError::Unauthorized)
+    Err(DomainError::Unauthorized)
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────

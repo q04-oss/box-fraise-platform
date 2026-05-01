@@ -120,3 +120,38 @@ get_thread
 `get_key_bundle` atomically claims one OTPK while returning the bundle.
 These cannot be separated: X3DH protocol requires exactly one fresh
 pre-key per session. The comment in `keys/service.rs` explains this.
+
+---
+
+## Error boundary
+
+HTTP status codes are assigned exactly once, at the HTTP boundary, by
+`server/src/error.rs`. Domain and integrations crates know nothing about
+HTTP.
+
+**`DomainError`** — `domain/src/error.rs`
+
+- Plain Rust enum, no axum imports, no status codes.
+- Variants describe domain states: `Unauthorized`, `Forbidden`,
+  `InvalidInput`, `NotFound`, `Conflict`, `Unprocessable`,
+  `RateLimitExceeded`, `PaymentRequired`, `ExternalServiceError`,
+  `Internal`, `Db`.
+- Helper constructors: `DomainError::invalid_input(msg)`,
+  `DomainError::conflict(msg)`, `DomainError::unprocessable(msg)`.
+
+**`AppError`** — `server/src/error.rs`
+
+- HTTP-aware: implements `IntoResponse`, maps variants to status codes.
+- Implements `From<DomainError>` so `?` propagation converts domain
+  errors automatically at the route boundary.
+- This is the ONLY type in the codebase that knows about HTTP status codes.
+
+**Rules:**
+
+- Never `use axum` or `use http` in `domain/` or `integrations/`.
+- Never construct `AppError` inside `domain/` or `integrations/`.
+- If you need a new error class, add a variant to `DomainError` and add
+  the matching arm to `From<DomainError> for AppError` in
+  `server/src/error.rs`.
+- The `From` impl is the single mapping table — all status-code decisions
+  live there and nowhere else.

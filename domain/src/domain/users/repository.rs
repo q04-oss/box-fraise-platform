@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use crate::{error::{AppError, AppResult}, types::UserId};
+use crate::{error::{DomainError, AppResult}, types::UserId};
 use super::types::*;
 
 // ── Search ────────────────────────────────────────────────────────────────────
@@ -20,7 +20,7 @@ pub async fn search(pool: &PgPool, query: &str) -> AppResult<Vec<UserSearchResul
     .bind(format!("%{}%", query.trim()))
     .fetch_all(pool)
     .await
-    .map_err(AppError::Db)
+    .map_err(DomainError::Db)
 }
 
 // ── Public profile ────────────────────────────────────────────────────────────
@@ -44,7 +44,7 @@ pub async fn public_profile(pool: &PgPool, id: UserId) -> AppResult<Option<Publi
     .bind(id)
     .fetch_optional(pool)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
 
     Ok(row.map(|r| PublicProfile {
         id:           r.id,
@@ -66,7 +66,7 @@ pub async fn social_access(pool: &PgPool, user_id: UserId) -> AppResult<Option<S
     .bind(user_id)
     .fetch_optional(pool)
     .await
-    .map_err(AppError::Db)
+    .map_err(DomainError::Db)
 }
 
 // ── Notifications ─────────────────────────────────────────────────────────────
@@ -85,7 +85,7 @@ pub async fn list_notifications(
     .bind(user_id)
     .fetch_all(pool)
     .await
-    .map_err(AppError::Db)
+    .map_err(DomainError::Db)
 }
 
 /// Ownership enforced in WHERE — users cannot read-mark other users' notifications.
@@ -98,10 +98,10 @@ pub async fn mark_read(pool: &PgPool, user_id: UserId, notif_id: i32) -> AppResu
     .bind(user_id)
     .execute(pool)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
 
     if result.rows_affected() == 0 {
-        return Err(AppError::NotFound);
+        return Err(DomainError::NotFound);
     }
     Ok(())
 }
@@ -114,7 +114,7 @@ pub async fn mark_all_read(pool: &PgPool, user_id: UserId) -> AppResult<()> {
     .bind(user_id)
     .execute(pool)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
     Ok(())
 }
 

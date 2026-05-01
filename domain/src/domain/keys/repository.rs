@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use crate::{error::{AppError, AppResult}, types::{KeyId, UserId}};
+use crate::{error::{DomainError, AppResult}, types::{KeyId, UserId}};
 use super::types::{OtpkRow, UserKeysRow};
 
 // ── Challenges ────────────────────────────────────────────────────────────────
@@ -24,7 +24,7 @@ pub async fn create_challenge(pool: &PgPool, user_id: UserId) -> AppResult<Strin
     .bind(expires_at)
     .execute(pool)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
 
     Ok(challenge)
 }
@@ -47,7 +47,7 @@ pub async fn consume_challenge(pool: &PgPool, user_id: UserId) -> AppResult<Opti
     .bind(user_id)
     .fetch_optional(pool)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
 
     Ok(row.map(|(c,)| c))
 }
@@ -80,7 +80,7 @@ pub async fn upsert_user_keys(
     .bind(signed_pre_key_sig)
     .execute(pool)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
     Ok(())
 }
 
@@ -93,7 +93,7 @@ pub async fn find_user_keys(pool: &PgPool, user_id: UserId) -> AppResult<Option<
     .bind(user_id)
     .fetch_optional(pool)
     .await
-    .map_err(AppError::Db)
+    .map_err(DomainError::Db)
 }
 
 // ── One-time pre-keys ─────────────────────────────────────────────────────────
@@ -121,7 +121,7 @@ pub async fn insert_otpks(
     .bind(&public_keys)
     .execute(pool)
     .await
-    .map_err(AppError::Db)?;
+    .map_err(DomainError::Db)?;
 
     Ok(())
 }
@@ -132,7 +132,7 @@ pub async fn count_otpks(pool: &PgPool, user_id: UserId) -> AppResult<i64> {
             .bind(user_id)
             .fetch_one(pool)
             .await
-            .map_err(AppError::Db)?;
+            .map_err(DomainError::Db)?;
     Ok(count)
 }
 
@@ -153,7 +153,7 @@ pub async fn claim_otpk(pool: &PgPool, user_id: UserId) -> AppResult<Option<Otpk
     .bind(user_id)
     .fetch_optional(pool)
     .await
-    .map_err(AppError::Db)
+    .map_err(DomainError::Db)
 }
 
 // ── Bundle lookup ─────────────────────────────────────────────────────────────
@@ -164,6 +164,6 @@ pub async fn user_id_by_code(pool: &PgPool, code: &str) -> AppResult<Option<User
             .bind(code)
             .fetch_optional(pool)
             .await
-            .map_err(AppError::Db)?;
+            .map_err(DomainError::Db)?;
     Ok(row.map(|(id,)| id))
 }

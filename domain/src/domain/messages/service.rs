@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 
 use crate::{
-    error::{AppError, AppResult},
+    error::{DomainError, AppResult},
     types::{MessageId, UserId},
 };
 use super::{
@@ -44,7 +44,7 @@ pub async fn send_message(
     body:    SendMessageBody,
 ) -> AppResult<MessageRow> {
     if !repository::can_message(pool, user_id, body.recipient_id).await? {
-        return Err(AppError::Forbidden);
+        return Err(DomainError::Forbidden);
     }
 
     let message = repository::insert(

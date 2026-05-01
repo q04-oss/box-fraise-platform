@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{
     audit, auth,
     config::Config,
-    error::{AppError, AppResult},
+    error::{DomainError, AppResult},
     types::UserId,
 };
 use box_fraise_integrations::resend;
@@ -43,7 +43,7 @@ pub async fn authenticate_apple(
         repository::find_or_create_apple(pool, &claims.sub, email, display_name).await?;
 
     if user.banned {
-        return Err(AppError::Forbidden);
+        return Err(DomainError::Forbidden);
     }
 
     let token = auth::sign_token(user.id, cfg)?;
@@ -62,17 +62,17 @@ pub async fn authenticate_demo(
         .review_pin
         .as_ref()
         .map(|s| s.expose_secret())
-        .ok_or(AppError::Unauthorized)?;
+        .ok_or(DomainError::Unauthorized)?;
 
     if !constant_time_eq(pin.as_bytes(), expected.as_bytes()) {
         audit::write(pool, None, None, "auth.demo_login_failed",
             serde_json::json!({ "reason": "invalid_pin" }), ip).await;
-        return Err(AppError::Unauthorized);
+        return Err(DomainError::Unauthorized);
     }
 
     let user = repository::find_by_email(pool, "demo@fraise.box")
         .await?
-        .ok_or(AppError::Unauthorized)?;
+        .ok_or(DomainError::Unauthorized)?;
 
     let token = auth::sign_token(user.id, cfg)?;
     Ok(AuthResponse { user_id: user.id, token, is_new: false, verified: user.verified })
@@ -90,7 +90,7 @@ pub async fn register_user(
     display_name: Option<&str>,
 ) -> AppResult<AuthResponse> {
     let hash = bcrypt::hash(password, 10)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("bcrypt: {e}")))?;
+        .map_err(|e| DomainError::Internal(anyhow::anyhow!("bcrypt: {e}")))?;
 
     let user = repository::create_email_user(pool, email, &hash, display_name).await?;
 
@@ -125,24 +125,24 @@ pub async fn login_user(
         None => {
             audit::write(pool, None, None, "auth.login_failed",
                 serde_json::json!({ "reason": "user_not_found" }), ip).await;
-            return Err(AppError::Unauthorized);
+            return Err(DomainError::Unauthorized);
         }
     };
 
     if user.banned {
         audit::write(pool, Some(user.id.into()), None, "auth.login_blocked",
             serde_json::json!({ "reason": "banned" }), ip).await;
-        return Err(AppError::Forbidden);
+        return Err(DomainError::Forbidden);
     }
 
-    let hash = user.password_hash.as_deref().ok_or(AppError::Unauthorized)?;
+    let hash = user.password_hash.as_deref().ok_or(DomainError::Unauthorized)?;
     let valid = bcrypt::verify(password, hash)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("bcrypt: {e}")))?;
+        .map_err(|e| DomainError::Internal(anyhow::anyhow!("bcrypt: {e}")))?;
 
     if !valid {
         audit::write(pool, Some(user.id.into()), None, "auth.login_failed",
             serde_json::json!({ "reason": "invalid_password" }), ip).await;
-        return Err(AppError::Unauthorized);
+        return Err(DomainError::Unauthorized);
     }
 
     let token = auth::sign_token(user.id, cfg)?;
@@ -161,10 +161,10 @@ pub async fn request_password_reset(
     if let Some(pool_r) = redis {
         let key = format!("{RESET_RATE_PREFIX}{}", email.to_lowercase());
         let mut conn = pool_r.get().await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+            .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis: {e}")))?;
         let count: i64 = redis::cmd("INCR").arg(&key)
             .query_async(&mut *conn).await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis INCR: {e}")))?;
+            .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis INCR: {e}")))?;
         if count == 1 {
             let _: () = redis::cmd("EXPIRE").arg(&key).arg(RESET_RATE_TTL)
                 .query_async(&mut *conn).await.unwrap_or(());
@@ -194,10 +194,10 @@ pub async fn request_password_reset(
 pub async fn reset_password(pool: &PgPool, token: &str, new_password: &str) -> AppResult<()> {
     let user_id = repository::consume_reset_token(pool, token)
         .await?
-        .ok_or_else(|| AppError::bad_request("invalid or expired reset token"))?;
+        .ok_or_else(|| DomainError::invalid_input("invalid or expired reset token"))?;
 
     let hash = bcrypt::hash(new_password, 10)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("bcrypt: {e}")))?;
+        .map_err(|e| DomainError::Internal(anyhow::anyhow!("bcrypt: {e}")))?;
 
     repository::set_password(pool, user_id, &hash).await
 }
@@ -207,9 +207,9 @@ pub async fn reset_password(pool: &PgPool, token: &str, new_password: &str) -> A
 pub async fn get_active_user(pool: &PgPool, user_id: UserId) -> AppResult<UserRow> {
     let user = repository::find_by_id(pool, user_id)
         .await?
-        .ok_or(AppError::Unauthorized)?;
+        .ok_or(DomainError::Unauthorized)?;
 
-    if user.banned { return Err(AppError::Forbidden); }
+    if user.banned { return Err(DomainError::Forbidden); }
     Ok(user)
 }
 
@@ -225,10 +225,10 @@ pub async fn request_magic_link(
     if let Some(pool_r) = redis {
         let key = format!("{MAGIC_RATE_PREFIX}{}", email.to_lowercase());
         let mut conn = pool_r.get().await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+            .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis: {e}")))?;
         let count: i64 = redis::cmd("INCR").arg(&key)
             .query_async(&mut *conn).await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis INCR: {e}")))?;
+            .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis INCR: {e}")))?;
         if count == 1 {
             let _: () = redis::cmd("EXPIRE").arg(&key).arg(MAGIC_RATE_TTL)
                 .query_async(&mut *conn).await.unwrap_or(());
@@ -244,12 +244,12 @@ pub async fn request_magic_link(
     let token = Uuid::new_v4().to_string();
     let key   = format!("{MAGIC_LINK_PREFIX}{token}");
     let mut conn = redis_pool.get().await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+        .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis: {e}")))?;
     let _: () = redis::cmd("SET")
         .arg(&key).arg(i32::from(user.id).to_string())
         .arg("EX").arg(MAGIC_LINK_TTL).arg("NX")
         .query_async(&mut *conn).await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis SET: {e}")))?;
+        .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis SET: {e}")))?;
 
     if let Some(api_key) = cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned()) {
         let http     = http.clone();
@@ -272,31 +272,31 @@ pub async fn verify_magic_link(
     token: &str,
     ip:    Option<IpAddr>,
 ) -> AppResult<AuthResponse> {
-    let redis_pool = redis.ok_or(AppError::Unauthorized)?;
+    let redis_pool = redis.ok_or(DomainError::Unauthorized)?;
 
     let key = format!("{MAGIC_LINK_PREFIX}{token}");
     let mut conn = redis_pool.get().await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+        .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis: {e}")))?;
 
     let raw: Option<String> = redis::cmd("GETDEL").arg(&key)
         .query_async(&mut *conn).await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis GETDEL: {e}")))?;
+        .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis GETDEL: {e}")))?;
 
     let user_id = UserId::from(match raw {
-        Some(s) => s.parse::<i32>().map_err(|_| AppError::Unauthorized)?,
+        Some(s) => s.parse::<i32>().map_err(|_| DomainError::Unauthorized)?,
         None => {
             audit::write(pool, None, None, "auth.magic_link_invalid",
                 serde_json::json!({ "reason": "token_expired_or_consumed" }), ip).await;
-            return Err(AppError::Unauthorized);
+            return Err(DomainError::Unauthorized);
         }
     });
 
-    let user = repository::find_by_id(pool, user_id).await?.ok_or(AppError::Unauthorized)?;
+    let user = repository::find_by_id(pool, user_id).await?.ok_or(DomainError::Unauthorized)?;
 
     if user.banned {
         audit::write(pool, Some(user_id.into()), None, "auth.login_blocked",
             serde_json::json!({ "reason": "banned", "via": "magic_link" }), ip).await;
-        return Err(AppError::Forbidden);
+        return Err(DomainError::Forbidden);
     }
 
     if !user.verified {
@@ -314,25 +314,25 @@ pub async fn verify_email(
     redis: Option<&deadpool_redis::Pool>,
     token: &str,
 ) -> AppResult<String> {
-    let redis_pool = redis.ok_or(AppError::Unauthorized)?;
+    let redis_pool = redis.ok_or(DomainError::Unauthorized)?;
 
     let key = format!("{VERIFY_PREFIX}{token}");
     let mut conn = redis_pool.get().await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+        .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis: {e}")))?;
 
     let user_id_str: Option<String> = redis::cmd("GETDEL").arg(&key)
         .query_async(&mut *conn).await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis GETDEL: {e}")))?;
+        .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis GETDEL: {e}")))?;
 
     let user_id_raw = user_id_str
-        .ok_or(AppError::Unauthorized)?
+        .ok_or(DomainError::Unauthorized)?
         .parse::<i32>()
-        .map_err(|_| AppError::Unauthorized)?;
+        .map_err(|_| DomainError::Unauthorized)?;
 
     let user_id = UserId::from(user_id_raw);
     repository::set_verified(pool, user_id).await?;
 
-    let user = repository::find_by_id(pool, user_id).await?.ok_or(AppError::NotFound)?;
+    let user = repository::find_by_id(pool, user_id).await?.ok_or(DomainError::NotFound)?;
 
     audit::write(pool, Some(user_id_raw), None, "auth.email_verified",
         serde_json::json!({ "email": user.email }), None).await;
@@ -350,18 +350,18 @@ async fn resend_verification(
     if let Some(redis_pool) = redis {
         let key = format!("{RESEND_RATE_PREFIX}{}", i32::from(user_id));
         let mut conn = redis_pool.get().await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+            .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis: {e}")))?;
 
         let count: i64 = redis::cmd("INCR").arg(&key)
             .query_async(&mut *conn).await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis INCR: {e}")))?;
+            .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis INCR: {e}")))?;
 
         if count == 1 {
             let _: () = redis::cmd("EXPIRE").arg(&key).arg(RESEND_RATE_TTL)
                 .query_async(&mut *conn).await.unwrap_or(());
         }
         if count > 1 {
-            return Err(AppError::Unprocessable(
+            return Err(DomainError::Unprocessable(
                 "please wait a few minutes before requesting another verification email".into(),
             ));
         }
@@ -369,7 +369,7 @@ async fn resend_verification(
 
     let api_key = cfg.resend_api_key.as_ref()
         .map(|k| k.expose_secret().to_owned())
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("email not configured")))?;
+        .ok_or_else(|| DomainError::Internal(anyhow::anyhow!("email not configured")))?;
 
     if let Some(verify_url) = issue_verification_token(redis, user_id, &cfg.api_base_url).await {
         let _ = resend::send_verification_email(http, &api_key, email, &verify_url).await;
@@ -392,7 +392,7 @@ pub async fn update_display_name(pool: &PgPool, user_id: UserId, name: &str) -> 
 pub async fn is_user_verified(pool: &PgPool, user_id: UserId) -> AppResult<bool> {
     let user = repository::find_by_id(pool, user_id)
         .await?
-        .ok_or(AppError::NotFound)?;
+        .ok_or(DomainError::NotFound)?;
     Ok(user.verified)
 }
 
@@ -406,7 +406,7 @@ pub async fn resend_verification_email(
 ) -> AppResult<()> {
     let user = repository::find_by_id(pool, user_id)
         .await?
-        .ok_or(AppError::NotFound)?;
+        .ok_or(DomainError::NotFound)?;
     resend_verification(cfg, http, redis, user_id, &user.email).await
 }
 
