@@ -1,13 +1,13 @@
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
-use crate::types::UserId;
+use crate::types::{KeyId, MessageId, UserId};
 
 // ── Stored row ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct MessageRow {
-    pub id:                    i32,
+    pub id:                    MessageId,
     pub sender_id:             UserId,
     pub recipient_id:          UserId,
     pub body:                  String,
@@ -19,7 +19,7 @@ pub struct MessageRow {
     pub encrypted:             bool,
     pub ephemeral_key:         Option<String>,
     pub sender_identity_key:   Option<String>,
-    pub one_time_pre_key_id:   Option<i32>,
+    pub one_time_pre_key_id:   Option<KeyId>,
     pub created_at:            NaiveDateTime,
 }
 
@@ -33,12 +33,12 @@ pub struct SendMessageBody {
     pub encrypted:           Option<bool>,
     pub ephemeral_key:       Option<String>,
     pub sender_identity_key: Option<String>,
-    pub one_time_pre_key_id: Option<i32>,
+    pub one_time_pre_key_id: Option<KeyId>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ThreadQuery {
-    pub before: Option<i32>,
+    pub before: Option<MessageId>,
     pub limit:  Option<i64>,
 }
 

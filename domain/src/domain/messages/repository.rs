@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use crate::{error::{AppError, AppResult}, types::UserId};
+use crate::{error::{AppError, AppResult}, types::{KeyId, MessageId, UserId}};
 use super::types::{ConversationSummary, MessageRow};
 
 const MSG_COLS: &str =
@@ -104,7 +104,7 @@ pub async fn thread(
     pool:      &PgPool,
     user_id:   UserId,
     peer_id:   UserId,
-    before_id: Option<i32>,
+    before_id: Option<MessageId>,
     limit:     i64,
 ) -> AppResult<Vec<MessageRow>> {
     // Mark messages from the peer as read.
@@ -160,7 +160,7 @@ pub async fn insert(
     encrypted:           bool,
     ephemeral_key:       Option<&str>,
     sender_identity_key: Option<&str>,
-    one_time_pre_key_id: Option<i32>,
+    one_time_pre_key_id: Option<KeyId>,
 ) -> AppResult<MessageRow> {
     sqlx::query_as(&format!(
         "INSERT INTO messages

@@ -3,7 +3,7 @@ use ring::signature::{self, UnparsedPublicKey};
 use sqlx::PgPool;
 
 use crate::error::{AppError, AppResult};
-use crate::types::UserId;
+use crate::types::{KeyId, UserId};
 use super::{
     repository,
     types::{KeyBundleResponse, OtpkResponse, RegisterKeysBody},
@@ -49,7 +49,7 @@ pub async fn register_keys(
     .await?;
 
     if !body.one_time_pre_keys.is_empty() {
-        let pairs: Vec<(i32, String)> = body
+        let pairs: Vec<(KeyId, String)> = body
             .one_time_pre_keys
             .into_iter()
             .map(|k| (k.key_id, k.public_key))
@@ -62,7 +62,7 @@ pub async fn register_keys(
 
 // ── OPK management ────────────────────────────────────────────────────────────
 
-pub async fn upload_otpks(pool: &PgPool, user_id: UserId, keys: Vec<(i32, String)>) -> AppResult<()> {
+pub async fn upload_otpks(pool: &PgPool, user_id: UserId, keys: Vec<(KeyId, String)>) -> AppResult<()> {
     repository::insert_otpks(pool, user_id, &keys).await
 }
 

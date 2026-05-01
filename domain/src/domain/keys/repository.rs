@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use crate::{error::{AppError, AppResult}, types::UserId};
+use crate::{error::{AppError, AppResult}, types::{KeyId, UserId}};
 use super::types::{OtpkRow, UserKeysRow};
 
 // ── Challenges ────────────────────────────────────────────────────────────────
@@ -102,13 +102,13 @@ pub async fn find_user_keys(pool: &PgPool, user_id: UserId) -> AppResult<Option<
 pub async fn insert_otpks(
     pool:    &PgPool,
     user_id: UserId,
-    keys:    &[(i32, String)],
+    keys:    &[(KeyId, String)],
 ) -> AppResult<()> {
     if keys.is_empty() {
         return Ok(());
     }
 
-    let key_ids:     Vec<i32>    = keys.iter().map(|(id, _)| *id).collect();
+    let key_ids:     Vec<KeyId>  = keys.iter().map(|(id, _)| *id).collect();
     let public_keys: Vec<String> = keys.iter().map(|(_, k)| k.clone()).collect();
 
     sqlx::query(
