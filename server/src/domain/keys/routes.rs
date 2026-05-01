@@ -59,7 +59,7 @@ async fn otpk_count(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<OtpkCountResponse>> {
-    let count = service::otpk_count(&state.db, user_id).await?;
+    let count = service::get_otpk_count(&state.db, user_id).await?;
     Ok(Json(OtpkCountResponse { count }))
 }
 
@@ -68,7 +68,7 @@ async fn bundle_by_id(
     RequireUser(_): RequireUser,
     Path(target_id): Path<UserId>,
 ) -> AppResult<Json<KeyBundleResponse>> {
-    Ok(Json(service::fetch_bundle(&state.db, target_id).await?))
+    Ok(Json(service::get_key_bundle(&state.db, target_id).await?))
 }
 
 async fn bundle_by_code(
@@ -76,5 +76,5 @@ async fn bundle_by_code(
     RequireUser(_): RequireUser,
     Path(code): Path<String>,
 ) -> AppResult<Json<KeyBundleResponse>> {
-    Ok(Json(service::fetch_bundle_by_code(&state.db, &code).await?))
+    Ok(Json(service::get_key_bundle_by_code(&state.db, &code).await?))
 }

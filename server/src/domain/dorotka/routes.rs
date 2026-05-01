@@ -57,7 +57,7 @@ async fn ask(
         .map_err(|e| AppError::bad_request(&e.to_string()))?;
 
     let context = context_from_host(&headers);
-    let system  = service::system_prompt(context);
+    let system  = service::get_system_prompt(context);
 
     let api_key = state.cfg.anthropic_api_key.as_ref()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!(

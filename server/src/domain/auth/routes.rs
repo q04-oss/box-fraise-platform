@@ -46,7 +46,7 @@ async fn apple(
     State(state): State<AppState>,
     AppJson(body): AppJson<AppleAuthBody>,
 ) -> AppResult<Json<AuthResponse>> {
-    let resp = service::apple_sign_in(
+    let resp = service::authenticate_apple(
         &state.db, &state.cfg, &state.http,
         &body.identity_token, body.display_name.as_deref(),
     ).await?;
@@ -60,14 +60,14 @@ async fn demo(
     AppJson(body): AppJson<DemoAuthBody>,
 ) -> AppResult<Json<AuthResponse>> {
     let ip = client_ip(&headers, Some(&ConnectInfo(addr)));
-    Ok(Json(service::demo_login(&state.db, &state.cfg, &body.pin, Some(ip)).await?))
+    Ok(Json(service::authenticate_demo(&state.db, &state.cfg, &body.pin, Some(ip)).await?))
 }
 
 async fn register(
     State(state): State<AppState>,
     AppJson(body): AppJson<RegisterBody>,
 ) -> AppResult<Json<AuthResponse>> {
-    Ok(Json(service::register(
+    Ok(Json(service::register_user(
         &state.db, &state.cfg, &state.http, state.redis.as_ref(),
         &body.email, &body.password, body.display_name.as_deref(),
     ).await?))
@@ -80,14 +80,14 @@ async fn login(
     AppJson(body): AppJson<LoginBody>,
 ) -> AppResult<Json<AuthResponse>> {
     let ip = client_ip(&headers, Some(&ConnectInfo(addr)));
-    Ok(Json(service::login(&state.db, &state.cfg, &body.email, &body.password, Some(ip)).await?))
+    Ok(Json(service::login_user(&state.db, &state.cfg, &body.email, &body.password, Some(ip)).await?))
 }
 
 async fn me(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<MeResponse>> {
-    let user = service::require_active(&state.db, user_id).await?;
+    let user = service::get_active_user(&state.db, user_id).await?;
     Ok(Json(MeResponse { user }))
 }
 
@@ -118,7 +118,7 @@ async fn forgot_password(
     State(state): State<AppState>,
     AppJson(body): AppJson<ForgotPasswordBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    service::forgot_password(&state.db, &state.cfg, &state.http, state.redis.as_ref(), &body.email).await?;
+    service::request_password_reset(&state.db, &state.cfg, &state.http, state.redis.as_ref(), &body.email).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -155,9 +155,12 @@ async fn resend_verification(
     State(state): State<AppState>,
     RequireUser(uid): RequireUser,
 ) -> AppResult<Json<serde_json::Value>> {
-    let already_verified = service::request_resend_verification(
-        &state.db, &state.cfg, &state.http, state.redis.as_ref(), uid,
-    ).await?;
+    let already_verified = service::is_user_verified(&state.db, uid).await?;
+    if !already_verified {
+        service::resend_verification_email(
+            &state.db, &state.cfg, &state.http, state.redis.as_ref(), uid,
+        ).await?;
+    }
     Ok(Json(serde_json::json!({ "ok": true, "already_verified": already_verified })))
 }
 

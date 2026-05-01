@@ -39,7 +39,7 @@ sentences unless depth is genuinely required.";
 
 /// Returns the appropriate system prompt for the given context identifier.
 /// Unknown contexts fall back to the platform voice — never error on this.
-pub fn system_prompt(context: &str) -> &'static str {
+pub fn get_system_prompt(context: &str) -> &'static str {
     match context {
         "whisked" => SYSTEM_WHISKED,
         _         => SYSTEM_FRAISE,

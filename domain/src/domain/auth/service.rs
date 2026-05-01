@@ -29,7 +29,7 @@ const RESET_RATE_TTL:     u64  = 300;
 
 // ── Apple Sign In ─────────────────────────────────────────────────────────────
 
-pub async fn apple_sign_in(
+pub async fn authenticate_apple(
     pool:           &PgPool,
     cfg:            &Arc<Config>,
     http:           &reqwest::Client,
@@ -52,7 +52,7 @@ pub async fn apple_sign_in(
 
 // ── Demo (Apple App Review) ───────────────────────────────────────────────────
 
-pub async fn demo_login(
+pub async fn authenticate_demo(
     pool: &PgPool,
     cfg:  &Arc<Config>,
     pin:  &str,
@@ -80,7 +80,7 @@ pub async fn demo_login(
 
 // ── Email + password ──────────────────────────────────────────────────────────
 
-pub async fn register(
+pub async fn register_user(
     pool:         &PgPool,
     cfg:          &Arc<Config>,
     http:         &reqwest::Client,
@@ -113,7 +113,7 @@ pub async fn register(
     Ok(AuthResponse { user_id: user.id, token, is_new: true, verified: user.verified })
 }
 
-pub async fn login(
+pub async fn login_user(
     pool:     &PgPool,
     cfg:      &Arc<Config>,
     email:    &str,
@@ -151,7 +151,7 @@ pub async fn login(
 
 // ── Password reset ────────────────────────────────────────────────────────────
 
-pub async fn forgot_password(
+pub async fn request_password_reset(
     pool:  &PgPool,
     cfg:   &Arc<Config>,
     http:  &reqwest::Client,
@@ -204,7 +204,7 @@ pub async fn reset_password(pool: &PgPool, token: &str, new_password: &str) -> A
 
 // ── Require active user ───────────────────────────────────────────────────────
 
-pub async fn require_active(pool: &PgPool, user_id: UserId) -> AppResult<UserRow> {
+pub async fn get_active_user(pool: &PgPool, user_id: UserId) -> AppResult<UserRow> {
     let user = repository::find_by_id(pool, user_id)
         .await?
         .ok_or(AppError::Unauthorized)?;
@@ -340,7 +340,7 @@ pub async fn verify_email(
     Ok(user.email)
 }
 
-pub async fn resend_verification(
+async fn resend_verification(
     cfg:     &Arc<Config>,
     http:    &reqwest::Client,
     redis:   Option<&deadpool_redis::Pool>,
@@ -388,26 +388,26 @@ pub async fn update_display_name(pool: &PgPool, user_id: UserId, name: &str) -> 
     repository::set_display_name(pool, user_id, name).await
 }
 
-/// Looks up the user, checks whether they are already verified, and re-issues
-/// a verification email if not. Returns `true` when the user was already
-/// verified (the caller can surface this to the client).
-pub async fn request_resend_verification(
+// QUERY — no side effects
+pub async fn is_user_verified(pool: &PgPool, user_id: UserId) -> AppResult<bool> {
+    let user = repository::find_by_id(pool, user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(user.verified)
+}
+
+// COMMAND — sends verification email; caller must check is_user_verified first
+pub async fn resend_verification_email(
     pool:    &PgPool,
     cfg:     &Arc<Config>,
     http:    &reqwest::Client,
     redis:   Option<&deadpool_redis::Pool>,
     user_id: UserId,
-) -> AppResult<bool> {
+) -> AppResult<()> {
     let user = repository::find_by_id(pool, user_id)
         .await?
         .ok_or(AppError::NotFound)?;
-
-    if user.verified {
-        return Ok(true);
-    }
-
-    resend_verification(cfg, http, redis, user_id, &user.email).await?;
-    Ok(false)
+    resend_verification(cfg, http, redis, user_id, &user.email).await
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

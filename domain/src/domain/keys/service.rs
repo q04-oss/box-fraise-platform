@@ -66,7 +66,7 @@ pub async fn upload_otpks(pool: &PgPool, user_id: UserId, keys: Vec<(KeyId, Stri
     repository::insert_otpks(pool, user_id, &keys).await
 }
 
-pub async fn otpk_count(pool: &PgPool, user_id: UserId) -> AppResult<i64> {
+pub async fn get_otpk_count(pool: &PgPool, user_id: UserId) -> AppResult<i64> {
     repository::count_otpks(pool, user_id).await
 }
 
@@ -74,7 +74,10 @@ pub async fn otpk_count(pool: &PgPool, user_id: UserId) -> AppResult<i64> {
 
 const KEY_REFRESH_GRACE_DAYS: i64 = 30;
 
-pub async fn fetch_bundle(pool: &PgPool, target_id: UserId) -> AppResult<KeyBundleResponse> {
+// QUERY — reads key material and atomically claims one OTPK.
+// OTPK consumption cannot be separated: X3DH requires the initiating party
+// receive exactly one fresh pre-key per session establishment.
+pub async fn get_key_bundle(pool: &PgPool, target_id: UserId) -> AppResult<KeyBundleResponse> {
     let keys = repository::find_user_keys(pool, target_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -102,12 +105,12 @@ pub async fn fetch_bundle(pool: &PgPool, target_id: UserId) -> AppResult<KeyBund
     })
 }
 
-pub async fn fetch_bundle_by_code(pool: &PgPool, code: &str) -> AppResult<KeyBundleResponse> {
+pub async fn get_key_bundle_by_code(pool: &PgPool, code: &str) -> AppResult<KeyBundleResponse> {
     let target_id = repository::user_id_by_code(pool, code)
         .await?
         .ok_or(AppError::NotFound)?;
 
-    fetch_bundle(pool, target_id).await
+    get_key_bundle(pool, target_id).await
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
