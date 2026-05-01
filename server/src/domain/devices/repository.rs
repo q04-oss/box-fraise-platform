@@ -4,49 +4,6 @@ use sqlx::PgPool;
 use crate::{error::{AppError, AppResult}, types::UserId};
 use super::types::DeviceRow;
 
-// ── Pairing tokens ────────────────────────────────────────────────────────────
-
-pub async fn create_pair_token(pool: &PgPool, user_id: UserId) -> AppResult<String> {
-    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let rng = SystemRandom::new();
-    let mut buf = [0u8; 8];
-    rng.fill(&mut buf).map_err(|_| crate::error::AppError::Internal(anyhow::anyhow!("rng failed")))?;
-    let token: String = buf
-        .iter()
-        .map(|&b| CHARSET[b as usize % CHARSET.len()] as char)
-        .collect();
-
-    let expires_at = chrono::Utc::now().naive_utc() + chrono::Duration::minutes(5);
-
-    sqlx::query(
-        "INSERT INTO device_pairing_tokens (token, user_id, expires_at)
-         VALUES ($1, $2, $3)",
-    )
-    .bind(&token)
-    .bind(user_id)
-    .bind(expires_at)
-    .execute(pool)
-    .await
-    .map_err(AppError::Db)?;
-
-    Ok(token)
-}
-
-/// Atomically consume a pairing token. Returns the owning user_id on success.
-pub async fn consume_pair_token(pool: &PgPool, token: &str) -> AppResult<Option<UserId>> {
-    let row: Option<(UserId,)> = sqlx::query_as(
-        "DELETE FROM device_pairing_tokens
-         WHERE UPPER(token) = UPPER($1) AND expires_at > NOW()
-         RETURNING user_id",
-    )
-    .bind(token)
-    .fetch_optional(pool)
-    .await
-    .map_err(AppError::Db)?;
-
-    Ok(row.map(|(id,)| id))
-}
-
 // ── Device registration ───────────────────────────────────────────────────────
 
 pub async fn insert_device(

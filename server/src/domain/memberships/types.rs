@@ -48,17 +48,6 @@ pub struct PaymentIntentBody {
     pub tier: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct WaitlistBody {
-    pub tier: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ContributeBody {
-    /// Amount in cents to contribute to the recipient's membership fund.
-    pub amount_cents: i32,
-}
-
 // ── Response bodies ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]

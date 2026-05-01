@@ -50,11 +50,6 @@ pub struct PaymentIntentBody {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct RateOrderBody {
-    pub rating: i32,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct ScanCollectBody {
     pub nfc_token: String,
 }

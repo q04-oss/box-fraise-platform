@@ -51,9 +51,6 @@ async fn webhook(State(state): State<AppState>, headers: HeaderMap, body: Bytes)
         "payment_intent.succeeded" => {
             handle_pi_succeeded(&state, &event).await;
         }
-        "identity.verification_session.verified" => {
-            handle_identity_verified(&state, &event).await;
-        }
         _ => {} // acknowledged but not handled
     }
 
@@ -75,11 +72,6 @@ async fn handle_pi_succeeded(state: &AppState, event: &serde_json::Value) {
         "rsvp" => complete_rsvp(state, pi_id).await,
         "membership" => complete_membership(state, pi_id).await,
         "tip" => complete_tip(state, pi_id).await,
-        "portal_access" => complete_portal_access(state, pi_id).await,
-        // Venue drink orders: push to Square POS + credit loyalty steep.
-        "venue_order" => {
-            crate::domain::venue_drinks::service::complete_venue_order(state, pi_id).await
-        }
         _ => {
             tracing::info!(
                 pi_id,
@@ -429,124 +421,3 @@ async fn complete_tip(state: &AppState, pi_id: &str) {
     }
 }
 
-// ── portal_access ─────────────────────────────────────────────────────────────
-
-async fn complete_portal_access(state: &AppState, pi_id: &str) {
-    #[derive(sqlx::FromRow)]
-    struct PortalRow {
-        buyer_id: i32,
-        owner_id: i32,
-        amount_cents: i64,
-    }
-
-    let result: Result<Option<PortalRow>, _> = sqlx::query_as(
-        "UPDATE portal_access SET status = 'active'
-         WHERE stripe_payment_intent_id = $1 AND status = 'pending'
-         RETURNING buyer_id, owner_id, amount_cents",
-    )
-    .bind(pi_id)
-    .fetch_optional(&state.db)
-    .await;
-
-    match result {
-        Ok(Some(row)) => {
-            tracing::info!(
-                pi_id,
-                buyer = row.buyer_id,
-                owner = row.owner_id,
-                "portal access activated via webhook"
-            );
-            audit::write(
-                &state.db,
-                Some(row.buyer_id),
-                None,
-                "payment.portal_access_activated",
-                serde_json::json!({
-                    "pi_id":        pi_id,
-                    "buyer_id":     row.buyer_id,
-                    "owner_id":     row.owner_id,
-                    "amount_cents": row.amount_cents,
-                    "outcome":      "activated",
-                }),
-                None,
-            )
-            .await;
-        }
-        Ok(None) => tracing::warn!(pi_id, "no pending portal_access found for webhook pi"),
-        Err(e) => tracing::error!(pi_id, error = %e, "complete_portal_access failed"),
-    }
-}
-
-// ── identity.verification_session.verified ────────────────────────────────────
-
-async fn handle_identity_verified(state: &AppState, event: &serde_json::Value) {
-    let session = &event["data"]["object"];
-    let session_id = session["id"].as_str().unwrap_or_default();
-
-    let verified_name = session["verified_outputs"]["name"].as_str();
-    let verified_dob = session["verified_outputs"]["dob"]
-        .as_str()
-        .or_else(|| session["verified_outputs"]["date_of_birth"].as_str());
-
-    // Resolve user_id from the stored session record — not from metadata.
-    // Sessions are stored in identity_verification_sessions at creation time
-    // by the verification initiation endpoint.
-    let user_id: Option<i32> = sqlx::query_scalar(
-        "UPDATE identity_verification_sessions
-         SET status = 'verified'
-         WHERE stripe_session_id = $1 AND status = 'pending'
-         RETURNING user_id",
-    )
-    .bind(session_id)
-    .fetch_optional(&state.db)
-    .await
-    .unwrap_or(None);
-
-    let Some(uid) = user_id else {
-        tracing::warn!(
-            session_id,
-            "no pending identity_verification_session found for webhook"
-        );
-        return;
-    };
-
-    let expires = chrono::Utc::now()
-        .checked_add_signed(chrono::Duration::days(730)) // 2 years
-        .unwrap()
-        .naive_utc();
-
-    let result = sqlx::query(
-        "UPDATE users
-         SET identity_verified = true,
-             identity_verified_at = NOW(),
-             identity_verified_expires_at = $2,
-             id_verified_name = $3,
-             id_verified_dob  = $4
-         WHERE id = $1",
-    )
-    .bind(uid)
-    .bind(expires)
-    .bind(verified_name)
-    .bind(verified_dob)
-    .execute(&state.db)
-    .await;
-
-    match result {
-        Ok(_) => {
-            tracing::info!(uid, session_id, "identity verified via webhook");
-            audit::write(
-                &state.db,
-                Some(uid),
-                None,
-                "identity.verified",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "outcome":    "verified",
-                }),
-                None,
-            )
-            .await;
-        }
-        Err(e) => tracing::error!(uid, session_id, error = %e, "handle_identity_verified failed"),
-    }
-}

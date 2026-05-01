@@ -28,22 +28,18 @@ pub async fn search(pool: &PgPool, query: &str) -> AppResult<Vec<UserSearchResul
 pub async fn public_profile(pool: &PgPool, id: UserId) -> AppResult<Option<PublicProfile>> {
     #[derive(sqlx::FromRow)]
     struct Row {
-        id:             UserId,
-        display_name:   Option<String>,
-        portrait_url:   Option<String>,
-        is_dj:          bool,
-        verified:       bool,
-        user_code:      Option<String>,
-        follower_count: Option<i64>,
+        id:           UserId,
+        display_name: Option<String>,
+        portrait_url: Option<String>,
+        is_dj:        bool,
+        verified:     bool,
+        user_code:    Option<String>,
     }
 
     let row: Option<Row> = sqlx::query_as(
-        "SELECT u.id, u.display_name, u.portrait_url, u.is_dj, u.verified, u.user_code,
-                COUNT(f.follower_id)::bigint AS follower_count
-         FROM users u
-         LEFT JOIN user_follows f ON f.following_id = u.id
-         WHERE u.id = $1 AND u.banned = false
-         GROUP BY u.id",
+        "SELECT id, display_name, portrait_url, is_dj, verified, user_code
+         FROM users
+         WHERE id = $1 AND banned = false",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -51,13 +47,12 @@ pub async fn public_profile(pool: &PgPool, id: UserId) -> AppResult<Option<Publi
     .map_err(AppError::Db)?;
 
     Ok(row.map(|r| PublicProfile {
-        id:             r.id,
-        display_name:   r.display_name,
-        portrait_url:   r.portrait_url,
-        is_dj:          r.is_dj,
-        verified:       r.verified,
-        user_code:      r.user_code,
-        follower_count: r.follower_count.unwrap_or(0),
+        id:           r.id,
+        display_name: r.display_name,
+        portrait_url: r.portrait_url,
+        is_dj:        r.is_dj,
+        verified:     r.verified,
+        user_code:    r.user_code,
     }))
 }
 
@@ -123,93 +118,6 @@ pub async fn set_wallet(pool: &PgPool, user_id: UserId, address: &str) -> AppRes
     Ok(())
 }
 
-// ── Follows ───────────────────────────────────────────────────────────────────
-
-pub async fn follow(pool: &PgPool, follower_id: UserId, following_id: UserId) -> AppResult<()> {
-    sqlx::query(
-        "INSERT INTO user_follows (follower_id, following_id)
-         VALUES ($1, $2)
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(follower_id)
-    .bind(following_id)
-    .execute(pool)
-    .await
-    .map_err(AppError::Db)?;
-    Ok(())
-}
-
-pub async fn unfollow(pool: &PgPool, follower_id: UserId, following_id: UserId) -> AppResult<()> {
-    sqlx::query(
-        "DELETE FROM user_follows
-         WHERE follower_id = $1 AND following_id = $2",
-    )
-    .bind(follower_id)
-    .bind(following_id)
-    .execute(pool)
-    .await
-    .map_err(AppError::Db)?;
-    Ok(())
-}
-
-pub async fn follow_status(
-    pool:         &PgPool,
-    follower_id:  UserId,
-    following_id: UserId,
-) -> AppResult<bool> {
-    sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (
-             SELECT 1 FROM user_follows
-             WHERE follower_id = $1 AND following_id = $2
-         )",
-    )
-    .bind(follower_id)
-    .bind(following_id)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Db)
-}
-
-pub async fn follower_count(pool: &PgPool, user_id: UserId) -> AppResult<i64> {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM user_follows WHERE following_id = $1",
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Db)
-}
-
-pub async fn list_followers(pool: &PgPool, user_id: UserId) -> AppResult<Vec<UserSearchResult>> {
-    sqlx::query_as::<_, UserSearchResult>(
-        "SELECT u.id, u.display_name, u.portrait_url, u.verified, u.user_code
-         FROM user_follows f
-         JOIN users u ON u.id = f.follower_id
-         WHERE f.following_id = $1 AND u.banned = false
-         ORDER BY f.created_at DESC
-         LIMIT 100",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map_err(AppError::Db)
-}
-
-pub async fn list_following(pool: &PgPool, user_id: UserId) -> AppResult<Vec<UserSearchResult>> {
-    sqlx::query_as::<_, UserSearchResult>(
-        "SELECT u.id, u.display_name, u.portrait_url, u.verified, u.user_code
-         FROM user_follows f
-         JOIN users u ON u.id = f.following_id
-         WHERE f.follower_id = $1 AND u.banned = false
-         ORDER BY f.created_at DESC
-         LIMIT 100",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map_err(AppError::Db)
-}
-
 // ── Notifications ─────────────────────────────────────────────────────────────
 
 pub async fn list_notifications(
@@ -259,51 +167,3 @@ pub async fn mark_all_read(pool: &PgPool, user_id: UserId) -> AppResult<()> {
     Ok(())
 }
 
-// ── Feed ──────────────────────────────────────────────────────────────────────
-
-pub async fn feed(pool: &PgPool, user_id: UserId) -> AppResult<Vec<FeedItem>> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        user_id:      UserId,
-        display_name: Option<String>,
-        portrait_url: Option<String>,
-        variety_name: String,
-        location_name: String,
-        created_at:   chrono::NaiveDateTime,
-    }
-
-    let rows: Vec<Row> = sqlx::query_as(
-        "SELECT u.id AS user_id, u.display_name, u.portrait_url,
-                v.name AS variety_name, l.name AS location_name,
-                o.created_at
-         FROM orders o
-         JOIN users     u ON u.id = o.user_id
-         JOIN varieties v ON v.id = o.variety_id
-         JOIN locations l ON l.id = o.location_id
-         WHERE o.user_id IN (
-             SELECT following_id FROM user_follows WHERE follower_id = $1
-         )
-         AND o.status = 'collected'
-         ORDER BY o.created_at DESC
-         LIMIT 30",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map_err(AppError::Db)?;
-
-    Ok(rows
-        .into_iter()
-        .map(|r| FeedItem {
-            user_id:      r.user_id,
-            display_name: r.display_name,
-            portrait_url: r.portrait_url,
-            event:        "collected_order".to_owned(),
-            data: serde_json::json!({
-                "variety_name":  r.variety_name,
-                "location_name": r.location_name,
-            }),
-            created_at: r.created_at,
-        })
-        .collect())
-}

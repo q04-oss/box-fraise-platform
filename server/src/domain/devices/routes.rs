@@ -1,4 +1,4 @@
-﻿use axum::{
+use axum::{
     extract::{Path, State},
     routing::{get, patch, post},
     Json, Router,
@@ -14,8 +14,6 @@ use super::{repository, service, types::*};
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/devices/pair-token",        post(pair_token))
-        .route("/api/devices/register",          post(register))
         .route("/api/devices/me",                get(device_me))
         .route("/api/devices/{address}/role",     patch(update_role))
         .route("/api/devices",                   get(list))
@@ -23,29 +21,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/devices/attest",            post(attest))
 }
 
-// â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-async fn pair_token(
-    State(state): State<AppState>,
-    RequireUser(user_id): RequireUser,
-) -> AppResult<Json<PairTokenResponse>> {
-    let token = service::create_pair_token(&state, user_id).await?;
-    Ok(Json(PairTokenResponse { token }))
-}
-
-async fn register(
-    State(state): State<AppState>,
-    AppJson(body): AppJson<RegisterDeviceBody>,
-) -> AppResult<Json<DeviceRow>> {
-    let device = service::register_device(
-        &state,
-        &body.device_address,
-        &body.signature,
-        &body.pairing_token,
-    )
-    .await?;
-    Ok(Json(device))
-}
+// ── Handlers ──────────────────────────────────────────────────────────────────
 
 async fn device_me(
     State(_state): State<AppState>,

@@ -19,16 +19,13 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/orders", post(create).get(list))
         .route("/api/orders/payment-intent", post(payment_intent))
-        .route("/api/orders/pay-with-balance", post(pay_with_balance))
         .route("/api/orders/scan-collect", post(scan_collect))
-        .route("/api/orders/clip", post(clip))
         .route("/api/orders/{id}/confirm", post(confirm))
-        .route("/api/orders/{id}/rate", post(rate))
         .route("/api/orders/{id}/receipt", get(receipt))
         .route("/api/orders/{nfc_token}/collect", post(device_collect))
 }
 
-// â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Handlers ──────────────────────────────────────────────────────────────────
 
 async fn create(
     State(state): State<AppState>,
@@ -62,16 +59,6 @@ async fn payment_intent(
     ))
 }
 
-async fn pay_with_balance(
-    State(state): State<AppState>,
-    RequireUser(user_id): RequireUser,
-    AppJson(body): AppJson<CreateOrderBody>,
-) -> AppResult<Json<OrderRow>> {
-    Ok(Json(
-        service::pay_with_balance(&state, user_id, body).await?,
-    ))
-}
-
 async fn confirm(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
@@ -80,19 +67,6 @@ async fn confirm(
     Ok(Json(
         service::confirm_order(&state, order_id, user_id).await?,
     ))
-}
-
-async fn rate(
-    State(state): State<AppState>,
-    RequireUser(user_id): RequireUser,
-    Path(order_id): Path<OrderId>,
-    AppJson(body): AppJson<RateOrderBody>,
-) -> AppResult<Json<serde_json::Value>> {
-    if !(1..=5).contains(&body.rating) {
-        return Err(AppError::bad_request("rating must be 1â€“5"));
-    }
-    repository::set_rating(&state.db, order_id, user_id, body.rating).await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn receipt(
@@ -172,29 +146,4 @@ async fn device_collect(
     }
 
     Ok(Json(order))
-}
-
-/// App Clip guest order â€” creates a payment intent without requiring auth.
-async fn clip(
-    State(state): State<AppState>,
-    AppJson(body): AppJson<CreateOrderBody>,
-) -> AppResult<Json<serde_json::Value>> {
-    let (price,): (i32,) =
-        sqlx::query_as("SELECT price_cents FROM varieties WHERE id = $1 AND active = true")
-            .bind(body.variety_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(AppError::Db)?
-            .ok_or(AppError::NotFound)?;
-
-    let total_cents = price * body.quantity;
-    let pi = state
-        .stripe()
-        .create_payment_intent(total_cents as i64, "cad", None, &[])
-        .await?;
-
-    Ok(Json(serde_json::json!({
-        "client_secret": pi.client_secret,
-        "total_cents":   total_cents,
-    })))
 }

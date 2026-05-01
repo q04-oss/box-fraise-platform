@@ -17,13 +17,6 @@ pub struct DeviceRow {
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub struct RegisterDeviceBody {
-    pub device_address: String,
-    pub signature:      String,
-    pub pairing_token:  String,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct UpdateRoleBody {
     pub role: String,
 }
@@ -39,11 +32,4 @@ pub struct AttestBody {
     /// Server-issued challenge (base64). Obtained from GET /api/devices/attest-challenge.
     /// Optional for backwards compatibility with clients pre-dating challenge enforcement.
     pub challenge:   Option<String>,
-}
-
-// ── Response bodies ───────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub struct PairTokenResponse {
-    pub token: String,
 }

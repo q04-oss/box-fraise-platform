@@ -1,22 +1,18 @@
 use sqlx::PgPool;
 
-use crate::{error::{AppError, AppResult}, types::UserId};
+use crate::error::{AppError, AppResult};
 use super::types::{BatchStatusEntry, LocationRow, TimeSlotRow, VarietyRow};
 
 // ── Varieties ─────────────────────────────────────────────────────────────────
 
 pub async fn list_varieties(pool: &PgPool) -> AppResult<Vec<VarietyRow>> {
     sqlx::query_as(
-        "SELECT v.id, v.name, v.description, v.farm_source, v.price_cents, v.stock,
-                v.harvest_date, v.location_id, v.image_url, v.active,
-                v.variety_type, v.social_tier, v.time_credits_days,
-                AVG(o.rating)::float8  AS avg_rating,
-                COUNT(o.rating)        AS rating_count
-         FROM varieties v
-         LEFT JOIN orders o ON o.variety_id = v.id AND o.rating IS NOT NULL
-         WHERE v.active = true
-         GROUP BY v.id
-         ORDER BY v.id",
+        "SELECT id, name, description, farm_source, price_cents, stock,
+                harvest_date, location_id, image_url, active,
+                variety_type, social_tier, time_credits_days
+         FROM varieties
+         WHERE active = true
+         ORDER BY id",
     )
     .fetch_all(pool)
     .await
@@ -25,40 +21,14 @@ pub async fn list_varieties(pool: &PgPool) -> AppResult<Vec<VarietyRow>> {
 
 pub async fn find_variety(pool: &PgPool, id: i32) -> AppResult<Option<VarietyRow>> {
     sqlx::query_as(
-        "SELECT v.id, v.name, v.description, v.farm_source, v.price_cents, v.stock,
-                v.harvest_date, v.location_id, v.image_url, v.active,
-                v.variety_type, v.social_tier, v.time_credits_days,
-                AVG(o.rating)::float8 AS avg_rating,
-                COUNT(o.rating)       AS rating_count
-         FROM varieties v
-         LEFT JOIN orders o ON o.variety_id = v.id AND o.rating IS NOT NULL
-         WHERE v.id = $1
-         GROUP BY v.id",
+        "SELECT id, name, description, farm_source, price_cents, stock,
+                harvest_date, location_id, image_url, active,
+                variety_type, social_tier, time_credits_days
+         FROM varieties
+         WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(pool)
-    .await
-    .map_err(AppError::Db)
-}
-
-/// Varieties the user has collected at least once ("passport").
-pub async fn user_passport(pool: &PgPool, user_id: UserId) -> AppResult<Vec<VarietyRow>> {
-    sqlx::query_as(
-        "SELECT DISTINCT ON (v.id)
-                v.id, v.name, v.description, v.farm_source, v.price_cents, v.stock,
-                v.harvest_date, v.location_id, v.image_url, v.active,
-                v.variety_type, v.social_tier, v.time_credits_days,
-                AVG(o2.rating)::float8 AS avg_rating,
-                COUNT(o2.rating)       AS rating_count
-         FROM orders o
-         JOIN varieties v ON v.id = o.variety_id
-         LEFT JOIN orders o2 ON o2.variety_id = v.id AND o2.rating IS NOT NULL
-         WHERE o.user_id = $1 AND o.status = 'collected'
-         GROUP BY v.id
-         ORDER BY v.id",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
     .await
     .map_err(AppError::Db)
 }

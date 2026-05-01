@@ -1,7 +1,6 @@
 use secrecy::ExposeSecret;
 use sqlx::PgPool;
 
-use crate::types::StripeCustomerId;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::info;
 
@@ -17,15 +16,6 @@ pub async fn start(state: AppState) -> anyhow::Result<()> {
         sched.add(Job::new_async("0 0 2 * * *", move |_, _| {
             let db = db.clone();
             Box::pin(async move { expire_contracts(&db).await; })
-        })?).await?;
-    }
-
-    // 08:00 daily — process standing orders.
-    {
-        let s = state.clone();
-        sched.add(Job::new_async("0 0 8 * * *", move |_, _| {
-            let s = s.clone();
-            Box::pin(async move { process_standing_orders(&s).await; })
         })?).await?;
     }
 
@@ -47,19 +37,8 @@ pub async fn start(state: AppState) -> anyhow::Result<()> {
         })?).await?;
     }
 
-    // Every 5 minutes — alert operator if Square push failures occurred.
-    // A customer paid but their order wasn't sent to the POS; silent failure
-    // without this alert means the operator only discovers it from customer complaints.
-    {
-        let s = state.clone();
-        sched.add(Job::new_async("0 */5 * * * *", move |_, _| {
-            let s = s.clone();
-            Box::pin(async move { alert_square_push_failures(&s).await; })
-        })?).await?;
-    }
-
     sched.start().await?;
-    info!("cron scheduler started (5 jobs)");
+    info!("cron scheduler started (3 jobs)");
     Ok(())
 }
 
@@ -80,176 +59,6 @@ async fn expire_contracts(pool: &PgPool) {
         Ok(r)  => info!(rows = r.rows_affected(), "expired employment contracts"),
         Err(e) => tracing::error!(error = %e, "expire_contracts job failed"),
     }
-}
-
-// ── Standing orders ───────────────────────────────────────────────────────────
-
-#[derive(sqlx::FromRow)]
-struct StandingOrder {
-    id:                     i32,
-    user_id:                i32,
-    variety_id:             i32,
-    location_id:            i32,
-    quantity:               i32,
-    total_cents:            i64,
-    frequency:              String, // "daily" | "weekly" | "monthly"
-    stripe_payment_method_id: String,
-    stripe_customer_id:     StripeCustomerId,
-    user_email:             Option<String>,
-    variety_name:           String,
-}
-
-async fn process_standing_orders(state: &AppState) {
-    // Fetch all active standing orders due today where the user has a saved
-    // payment method. A LIMIT guards against runaway batch size.
-    let orders: Vec<StandingOrder> = match sqlx::query_as(
-        "SELECT
-             so.id, so.user_id, so.variety_id, so.location_id,
-             so.quantity, so.total_cents, so.frequency,
-             so.stripe_payment_method_id,
-             u.stripe_customer_id,
-             u.email      AS user_email,
-             v.name       AS variety_name
-         FROM standing_orders so
-         JOIN users u ON u.id = so.user_id
-         JOIN catalog_varieties v ON v.id = so.variety_id
-         WHERE so.status = 'active'
-           AND so.next_due_at <= NOW()
-           AND so.stripe_payment_method_id IS NOT NULL
-           AND u.stripe_customer_id IS NOT NULL
-         LIMIT 500",
-    )
-    .fetch_all(&state.db)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::error!(error = %e, "process_standing_orders: query failed");
-            return;
-        }
-    };
-
-    info!(count = orders.len(), "processing standing orders");
-
-    for order in orders {
-        charge_standing_order(state, &order).await;
-    }
-}
-
-async fn charge_standing_order(state: &AppState, order: &StandingOrder) {
-    let so_id   = order.id;
-    let user_id = order.user_id;
-
-    let pi_result = state
-        .stripe()
-        .charge_off_session(
-            order.total_cents,
-            "cad",
-            order.stripe_customer_id.as_str(),
-            &order.stripe_payment_method_id,
-            &[
-                ("type",             "standing_order"),
-                ("standing_order_id", &so_id.to_string()),
-                ("user_id",          &user_id.to_string()),
-            ],
-        )
-        .await;
-
-    match pi_result {
-        Ok(pi) if pi.status == "succeeded" => {
-            // Create the order row and advance next_due_at in a single transaction.
-            let tx_result = fulfill_standing_order(state, order, &pi.id).await;
-            if let Err(e) = tx_result {
-                tracing::error!(so_id, error = %e, "standing order fulfillment failed after charge");
-            } else {
-                tracing::info!(so_id, user_id, "standing order charged and fulfilled");
-                send_standing_order_email(state, order).await;
-            }
-        }
-        Ok(pi) => {
-            // Payment requires action or was declined — record the failure.
-            tracing::warn!(so_id, status = %pi.status, "standing order charge not succeeded");
-            record_standing_order_failure(state, so_id).await;
-        }
-        Err(e) => {
-            tracing::error!(so_id, error = %e, "standing order Stripe charge failed");
-            record_standing_order_failure(state, so_id).await;
-        }
-    }
-}
-
-async fn fulfill_standing_order(
-    state:    &AppState,
-    order:    &StandingOrder,
-    pi_id:    &str,
-) -> Result<(), sqlx::Error> {
-    let mut tx = state.db.begin().await?;
-
-    // Insert the new order.
-    sqlx::query(
-        "INSERT INTO orders
-             (user_id, variety_id, location_id, quantity, total_cents,
-              stripe_payment_intent_id, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'paid')",
-    )
-    .bind(order.user_id)
-    .bind(order.variety_id)
-    .bind(order.location_id)
-    .bind(order.quantity)
-    .bind(order.total_cents)
-    .bind(pi_id)
-    .execute(&mut *tx)
-    .await?;
-
-    // Advance next_due_at based on frequency and reset failure_count.
-    sqlx::query(
-        "UPDATE standing_orders
-         SET next_due_at = next_due_at + CASE frequency
-                 WHEN 'weekly'  THEN INTERVAL '7 days'
-                 WHEN 'monthly' THEN INTERVAL '1 month'
-                 ELSE                INTERVAL '1 day'
-             END,
-             failure_count = 0
-         WHERE id = $1",
-    )
-    .bind(order.id)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-    Ok(())
-}
-
-async fn record_standing_order_failure(state: &AppState, so_id: i32) {
-    // After 3 consecutive failures, pause the standing order so the user can
-    // update their payment method without being silently recharged on retry.
-    let _ = sqlx::query(
-        "UPDATE standing_orders
-         SET failure_count = failure_count + 1,
-             status = CASE WHEN failure_count + 1 >= 3 THEN 'paused' ELSE status END
-         WHERE id = $1",
-    )
-    .bind(so_id)
-    .execute(&state.db)
-    .await;
-}
-
-async fn send_standing_order_email(state: &AppState, order: &StandingOrder) {
-    let Some(ref key) = state.cfg.resend_api_key else { return };
-    let Some(ref email) = order.user_email else { return };
-
-    let http    = state.http.clone();
-    let key     = key.expose_secret().to_owned();
-    let email   = email.clone();
-    let variety = order.variety_name.clone();
-    let total   = order.total_cents as i32;
-    let oid     = order.id; // use standing_order id as reference; real order_id from DB insert is opaque here
-
-    tokio::spawn(async move {
-        if let Err(e) = resend::send_order_confirmation(&http, &key, &email, oid, &variety, total).await {
-            tracing::error!(standing_order_id = oid, error = %e, "standing order confirmation email delivery failed");
-        }
-    });
 }
 
 // ── Membership reminders ──────────────────────────────────────────────────────
@@ -330,86 +139,9 @@ async fn send_renewal_reminder(
     }
 }
 
-// ── Square push failure alerts ────────────────────────────────────────────────
-
-async fn alert_square_push_failures(state: &AppState) {
-    let (Some(ref operator_email), Some(ref key)) =
-        (&state.cfg.operator_email, &state.cfg.resend_api_key)
-    else {
-        return; // alerting not configured
-    };
-
-    #[derive(sqlx::FromRow)]
-    struct FailureRow {
-        business_id: Option<i32>,
-        metadata:    serde_json::Value,
-    }
-
-    let rows: Vec<FailureRow> = match sqlx::query_as(
-        "SELECT business_id, metadata
-         FROM audit_events
-         WHERE event_kind = 'venue_order.square_push_failed'
-           AND created_at > NOW() - INTERVAL '10 minutes'
-         ORDER BY created_at DESC",
-    )
-    .fetch_all(&state.db)
-    .await
-    {
-        Ok(r)  => r,
-        Err(e) => {
-            tracing::error!(error = %e, "alert_square_push_failures: query failed");
-            return;
-        }
-    };
-
-    if rows.is_empty() { return; }
-
-    let count = rows.len();
-    tracing::warn!(count, "Square push failures detected — alerting operator");
-
-    let rows_html: String = rows.iter().map(|r| {
-        let order_id = r.metadata["order_id"].as_i64().map(|n| n.to_string()).unwrap_or_else(|| "—".into());
-        let pi_id    = r.metadata["pi_id"].as_str().unwrap_or("—");
-        let error    = r.metadata["error"].as_str().unwrap_or("—");
-        let biz_id   = r.business_id.map(|n| n.to_string()).unwrap_or_else(|| "—".into());
-        format!("<tr><td>{biz_id}</td><td>{order_id}</td><td style='font-family:monospace'>{pi_id}</td><td>{error}</td></tr>")
-    }).collect();
-
-    let plural  = if count == 1 { "" } else { "s" };
-    let subject = format!("⚠ {count} Square push failure{plural} — orders need attention");
-    let html    = format!(
-        "<h2>{count} Square push failure{plural} in the last 10 minutes</h2>\
-         <p>The following customers paid but their orders were not sent to the POS. \
-         They may need to be manually fulfilled or refunded.</p>\
-         <table border='1' cellpadding='6' style='border-collapse:collapse;font-size:14px'>\
-           <tr style='background:#f5f5f5'>\
-             <th>Business</th><th>Order ID</th><th>Stripe PI</th><th>Error</th>\
-           </tr>\
-           {rows_html}\
-         </table>\
-         <p style='color:#888;font-size:12px'>Sent by Maison Fraise platform — check audit_events for full detail.</p>"
-    );
-
-    let http  = state.http.clone();
-    let key   = key.expose_secret().to_owned();
-    let email = operator_email.clone();
-    tokio::spawn(async move {
-        if let Err(e) = resend::send(&http, &key, &email, &subject, &html).await {
-            tracing::error!(error = %e, "operator Square-failure alert email delivery failed");
-        }
-    });
-}
-
 // ── January reset ─────────────────────────────────────────────────────────────
 
 async fn january_reset(pool: &PgPool) {
-    if let Err(e) = sqlx::query("UPDATE membership_funds SET balance_cents = 0")
-        .execute(pool)
-        .await
-    {
-        tracing::error!(error = %e, "january_reset: fund reset failed");
-    }
-
     if let Err(e) = sqlx::query(
         "UPDATE memberships
          SET status = 'expired'

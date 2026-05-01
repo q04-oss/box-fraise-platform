@@ -7,14 +7,12 @@
 use crate::{
     app::AppState,
     error::AppResult,
-    http::extractors::auth::RequireUser,
 };
 use super::{repository, types::*};
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/varieties",                    get(varieties))
-        .route("/api/varieties/passport",           get(passport))
         .route("/api/locations",                    get(locations))
         .route("/api/locations/{id}/batch-status",   get(batch_status))
         .route("/api/slots",                        get(slots))
@@ -25,13 +23,6 @@ pub fn router() -> Router<AppState> {
 
 async fn varieties(State(state): State<AppState>) -> AppResult<Json<Vec<VarietyRow>>> {
     Ok(Json(repository::list_varieties(&state.db).await?))
-}
-
-async fn passport(
-    State(state): State<AppState>,
-    RequireUser(user_id): RequireUser,
-) -> AppResult<Json<Vec<VarietyRow>>> {
-    Ok(Json(repository::user_passport(&state.db, user_id).await?))
 }
 
 async fn locations(State(state): State<AppState>) -> AppResult<Json<Vec<LocationRow>>> {

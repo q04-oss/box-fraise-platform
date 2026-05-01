@@ -1,5 +1,5 @@
 use chrono::NaiveDateTime;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct PopupRow {
@@ -21,18 +21,4 @@ pub struct RsvpRow {
     pub status:                   String,
     pub stripe_payment_intent_id: Option<String>,
     pub created_at:               NaiveDateTime,
-}
-
-#[derive(Debug, sqlx::FromRow, Serialize)]
-pub struct NominationRow {
-    pub id:          i32,
-    pub popup_id:    i32,
-    pub nominator_id: i32,
-    pub nominee_id:  i32,
-    pub created_at:  NaiveDateTime,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct NominateBody {
-    pub message: Option<String>,
 }

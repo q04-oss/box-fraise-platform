@@ -15,7 +15,6 @@ pub struct PublicProfile {
     pub is_dj:        bool,
     pub verified:     bool,
     pub user_code:    Option<String>,
-    pub follower_count: i64,
 }
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
@@ -52,18 +51,6 @@ pub struct NotificationRow {
     pub read:       bool,
     pub data:       Option<serde_json::Value>,
     pub created_at: NaiveDateTime,
-}
-
-// ── Feed ──────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub struct FeedItem {
-    pub user_id:      UserId,
-    pub display_name: Option<String>,
-    pub portrait_url: Option<String>,
-    pub event:        String,        // "collected_order", "joined_popup", etc.
-    pub data:         serde_json::Value,
-    pub created_at:   NaiveDateTime,
 }
 
 // ── Request bodies ────────────────────────────────────────────────────────────

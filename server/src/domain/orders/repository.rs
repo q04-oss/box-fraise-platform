@@ -120,31 +120,6 @@ pub async fn set_status(pool: &PgPool, order_id: OrderId, status: &str) -> AppRe
     Ok(())
 }
 
-pub async fn set_rating(
-    pool: &PgPool,
-    order_id: OrderId,
-    user_id: UserId,
-    rating: i32,
-) -> AppResult<()> {
-    let rows = sqlx::query(
-        "UPDATE orders SET rating = $1
-         WHERE id = $2 AND user_id = $3 AND status = 'collected' AND rating IS NULL",
-    )
-    .bind(rating)
-    .bind(order_id)
-    .bind(user_id)
-    .execute(pool)
-    .await
-    .map_err(AppError::Db)?;
-
-    if rows.rows_affected() == 0 {
-        return Err(AppError::bad_request(
-            "order not found, not yours, not collected, or already rated",
-        ));
-    }
-    Ok(())
-}
-
 /// Atomically collect an order by NFC token. Returns the updated order.
 pub async fn collect_by_nfc(
     pool: &PgPool,
@@ -219,23 +194,3 @@ pub async fn check_referral(pool: &PgPool, user_id: UserId, code: &str) -> AppRe
     Ok(valid)
 }
 
-// ── Balance payment ───────────────────────────────────────────────────────────
-
-/// Atomically deduct from ad_balance_cents. Returns false if insufficient funds.
-pub async fn deduct_balance(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    user_id: UserId,
-    amount_cents: i32,
-) -> AppResult<bool> {
-    let rows = sqlx::query(
-        "UPDATE users
-         SET ad_balance_cents = ad_balance_cents - $1
-         WHERE id = $2 AND ad_balance_cents >= $1",
-    )
-    .bind(amount_cents)
-    .bind(user_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(AppError::Db)?;
-    Ok(rows.rows_affected() > 0)
-}

@@ -1,4 +1,4 @@
-﻿use axum::{
+use axum::{
     extract::{Path, Query, State},
     routing::{get, patch, post},
     Json, Router,
@@ -17,12 +17,6 @@ pub fn router() -> Router<AppState> {
         // Search & profiles
         .route("/api/users/search",                  get(search))
         .route("/api/users/{id}/public-profile",      get(public_profile))
-        .route("/api/users/{id}/follow-status",       get(follow_status))
-        .route("/api/users/{id}/followers",           get(followers))
-        .route("/api/users/{id}/followers-list",      get(followers_list))
-        .route("/api/users/{id}/following",           get(following))
-        // Social actions
-        .route("/api/users/{id}/follow",              post(follow).delete(unfollow))
         // My profile mutations
         .route("/api/users/me/wallet",               patch(wallet))
         .route("/api/users/me/social-access",        get(social_access))
@@ -31,11 +25,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/notifications",                 get(list_notifications))
         .route("/api/notifications/read-all",        post(read_all))
         .route("/api/notifications/{id}/read",        patch(mark_read))
-        // Feed
-        .route("/api/feed",                          get(feed))
 }
 
-// â”€â”€ Search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Search ────────────────────────────────────────────────────────────────────
 
 async fn search(
     State(state): State<AppState>,
@@ -44,12 +36,12 @@ async fn search(
 ) -> AppResult<Json<Vec<UserSearchResult>>> {
     let trimmed = q.q.trim();
     if trimmed.is_empty() || trimmed.len() > 50 {
-        return Err(AppError::bad_request("q must be 1â€“50 characters"));
+        return Err(AppError::bad_request("q must be 1-50 characters"));
     }
     Ok(Json(repository::search(&state.db, trimmed).await?))
 }
 
-// â”€â”€ Public profile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Public profile ────────────────────────────────────────────────────────────
 
 async fn public_profile(
     State(state): State<AppState>,
@@ -61,65 +53,7 @@ async fn public_profile(
         .map(Json)
 }
 
-// â”€â”€ Follow status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-async fn follow_status(
-    State(state): State<AppState>,
-    RequireUser(me): RequireUser,
-    Path(target_id): Path<UserId>,
-) -> AppResult<Json<serde_json::Value>> {
-    let following = repository::follow_status(&state.db, me, target_id).await?;
-    Ok(Json(serde_json::json!({ "following": following })))
-}
-
-// â”€â”€ Followers / following lists â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-async fn followers(
-    State(state): State<AppState>,
-    Path(user_id): Path<UserId>,
-) -> AppResult<Json<serde_json::Value>> {
-    let count = repository::follower_count(&state.db, user_id).await?;
-    Ok(Json(serde_json::json!({ "count": count })))
-}
-
-async fn followers_list(
-    State(state): State<AppState>,
-    Path(user_id): Path<UserId>,
-) -> AppResult<Json<Vec<UserSearchResult>>> {
-    Ok(Json(repository::list_followers(&state.db, user_id).await?))
-}
-
-async fn following(
-    State(state): State<AppState>,
-    Path(user_id): Path<UserId>,
-) -> AppResult<Json<Vec<UserSearchResult>>> {
-    Ok(Json(repository::list_following(&state.db, user_id).await?))
-}
-
-// â”€â”€ Follow / unfollow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-async fn follow(
-    State(state): State<AppState>,
-    RequireUser(me): RequireUser,
-    Path(target_id): Path<UserId>,
-) -> AppResult<Json<serde_json::Value>> {
-    if me == target_id {
-        return Err(AppError::bad_request("cannot follow yourself"));
-    }
-    repository::follow(&state.db, me, target_id).await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-async fn unfollow(
-    State(state): State<AppState>,
-    RequireUser(me): RequireUser,
-    Path(target_id): Path<UserId>,
-) -> AppResult<Json<serde_json::Value>> {
-    repository::unfollow(&state.db, me, target_id).await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-// â”€â”€ My profile mutations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── My profile mutations ──────────────────────────────────────────────────────
 
 async fn wallet(
     State(state): State<AppState>,
@@ -151,7 +85,7 @@ async fn stats(
     Ok(Json(repository::stats(&state.db, user_id).await?))
 }
 
-// â”€â”€ Notifications â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Notifications ─────────────────────────────────────────────────────────────
 
 async fn list_notifications(
     State(state): State<AppState>,
@@ -177,16 +111,7 @@ async fn read_all(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-// â”€â”€ Feed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-async fn feed(
-    State(state): State<AppState>,
-    RequireUser(user_id): RequireUser,
-) -> AppResult<Json<Vec<FeedItem>>> {
-    Ok(Json(repository::feed(&state.db, user_id).await?))
-}
-
-// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Validate an Ethereum address: 0x-prefixed, 42 chars total, 40 hex digits.
 fn is_valid_eth_address(addr: &str) -> bool {

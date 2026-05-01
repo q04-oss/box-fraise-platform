@@ -18,9 +18,6 @@ pub struct VarietyRow {
     pub variety_type:     Option<String>,
     pub social_tier:      Option<String>,
     pub time_credits_days: Option<i32>,
-    // Aggregated from order reviews — may be null if no ratings yet.
-    pub avg_rating:       Option<f64>,
-    pub rating_count:     Option<i64>,
 }
 
 // ── Locations ─────────────────────────────────────────────────────────────────
