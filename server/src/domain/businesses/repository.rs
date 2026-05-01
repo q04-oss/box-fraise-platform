@@ -30,27 +30,3 @@ pub async fn find(pool: &PgPool, id: i32) -> AppResult<Option<BusinessRow>> {
     .map_err(AppError::Db)
 }
 
-/// Return the push_token of the currently placed user at this business.
-pub async fn placed_user_push_token(
-    pool:        &PgPool,
-    business_id: i32,
-) -> AppResult<Option<(i32, Option<String>)>> {
-    #[derive(sqlx::FromRow)]
-    struct Row { id: i32, push_token: Option<String> }
-
-    let row: Option<Row> = sqlx::query_as(
-        "SELECT u.id, u.push_token
-         FROM employment_contracts ec
-         JOIN users u ON u.id = ec.user_id
-         WHERE ec.business_id = $1
-           AND ec.status = 'active'
-         ORDER BY ec.created_at DESC
-         LIMIT 1",
-    )
-    .bind(business_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(AppError::Db)?;
-
-    Ok(row.map(|r| (r.id, r.push_token)))
-}

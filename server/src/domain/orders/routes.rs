@@ -104,8 +104,6 @@ async fn device_collect(
     }
 
     // Verify the device is scoped to the same business as the order.
-    // business_id is a first-class column on both tables since migration 008 —
-    // no JOIN workaround through employment_contracts needed.
     let device_business = device.business_id.ok_or(AppError::Forbidden)?;
 
     let order = repository::collect_by_nfc(&state.db, &nfc_token, None)

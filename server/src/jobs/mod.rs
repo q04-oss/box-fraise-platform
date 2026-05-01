@@ -10,15 +10,6 @@ use crate::integrations::resend;
 pub async fn start(state: AppState) -> anyhow::Result<()> {
     let sched = JobScheduler::new().await?;
 
-    // 02:00 daily — expire completed employment contracts.
-    {
-        let db = state.db.clone();
-        sched.add(Job::new_async("0 0 2 * * *", move |_, _| {
-            let db = db.clone();
-            Box::pin(async move { expire_contracts(&db).await; })
-        })?).await?;
-    }
-
     // 09:00 daily — membership renewal reminders.
     {
         let s = state.clone();
@@ -38,28 +29,12 @@ pub async fn start(state: AppState) -> anyhow::Result<()> {
     }
 
     sched.start().await?;
-    info!("cron scheduler started (3 jobs)");
+    info!("cron scheduler started (2 jobs)");
     Ok(())
 }
 
 // ── Job implementations ───────────────────────────────────────────────────────
 
-async fn expire_contracts(pool: &PgPool) {
-    let result = sqlx::query(
-        "UPDATE employment_contracts
-         SET status = 'completed'
-         WHERE status = 'active'
-           AND end_date IS NOT NULL
-           AND end_date < NOW()",
-    )
-    .execute(pool)
-    .await;
-
-    match result {
-        Ok(r)  => info!(rows = r.rows_affected(), "expired employment contracts"),
-        Err(e) => tracing::error!(error = %e, "expire_contracts job failed"),
-    }
-}
 
 // ── Membership reminders ──────────────────────────────────────────────────────
 

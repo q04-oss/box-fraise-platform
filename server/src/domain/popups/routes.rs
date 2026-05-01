@@ -17,7 +17,6 @@ pub fn router() -> Router<AppState> {
         .route("/api/popups/{id}",                       get(find))
         .route("/api/popups/{id}/rsvp",                  post(rsvp).delete(cancel_rsvp))
         .route("/api/popups/{id}/rsvp-status",           get(rsvp_status))
-        .route("/api/popups/{id}/checkin",               post(checkin))
 }
 
 // ── List / find ───────────────────────────────────────────────────────────────
@@ -176,51 +175,3 @@ async fn rsvp_status(
     Ok(Json(serde_json::json!({ "status": status })))
 }
 
-// ── Check-in ──────────────────────────────────────────────────────────────────
-
-async fn checkin(
-    State(state): State<AppState>,
-    RequireUser(user_id): RequireUser,
-    Path(popup_id): Path<i32>,
-) -> AppResult<Json<serde_json::Value>> {
-    // Must have a confirmed RSVP.
-    let has_rsvp: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM popup_rsvps
-             WHERE user_id = $1 AND business_id = $2 AND status = 'confirmed'
-         )",
-    )
-    .bind(user_id)
-    .bind(popup_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(AppError::Db)?;
-
-    if !has_rsvp {
-        return Err(AppError::bad_request("no confirmed RSVP for this event"));
-    }
-
-    sqlx::query(
-        "INSERT INTO popup_checkins (user_id, business_id)
-         VALUES ($1, $2)
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(user_id)
-    .bind(popup_id)
-    .execute(&state.db)
-    .await
-    .map_err(AppError::Db)?;
-
-    // Add legitimacy event for attending.
-    let _ = sqlx::query(
-        "INSERT INTO legitimacy_events (user_id, event_type, weight)
-         VALUES ($1, 'popup_checkin', 2)
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(user_id)
-    .bind(popup_id)
-    .execute(&state.db)
-    .await;
-
-    Ok(Json(serde_json::json!({ "ok": true })))
-}

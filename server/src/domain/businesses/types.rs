@@ -1,5 +1,5 @@
 use chrono::NaiveDateTime;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct BusinessRow {
@@ -19,14 +19,3 @@ pub struct BusinessRow {
     pub created_at:    NaiveDateTime,
 }
 
-#[derive(Debug, Serialize)]
-pub struct TipResponse {
-    pub client_secret: String,
-    pub total_cents:   i32,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TipBody {
-    /// Amount in cents. Minimum 100 (CA$1.00).
-    pub amount_cents: i32,
-}
