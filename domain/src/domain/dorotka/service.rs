@@ -83,3 +83,56 @@ pub fn sanitise(raw: &str) -> anyhow::Result<String> {
 
     Ok(clean)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_system_prompt_fraise_context_mentions_platform() {
+        let p = get_system_prompt("fraise");
+        assert!(p.contains("Dorotka"), "fraise prompt must name Dorotka");
+        assert!(p.contains("box fraise"), "fraise prompt must mention the platform");
+    }
+
+    #[test]
+    fn get_system_prompt_whisked_context_mentions_whisked() {
+        let p = get_system_prompt("whisked");
+        assert!(p.contains("Dorotka"), "whisked prompt must name Dorotka");
+        assert!(p.contains("Whisked"), "whisked prompt must mention Whisked");
+    }
+
+    #[test]
+    fn get_system_prompt_unknown_context_falls_back_to_platform() {
+        assert_eq!(get_system_prompt("fraise"), get_system_prompt("unknown-xyz"));
+    }
+
+    #[test]
+    fn sanitise_strips_ask_prefix() {
+        assert_eq!(sanitise("/ask hello").unwrap(), "hello");
+        assert_eq!(sanitise("ask hello").unwrap(), "hello");
+        assert_eq!(sanitise("hello").unwrap(), "hello");
+    }
+
+    #[test]
+    fn sanitise_rejects_empty() {
+        assert!(sanitise("").is_err());
+        assert!(sanitise("/ask").is_err());
+        assert!(sanitise("   ").is_err());
+    }
+
+    #[test]
+    fn sanitise_rejects_over_500_chars() {
+        let long = "a".repeat(501);
+        assert!(sanitise(&long).is_err());
+        assert!(sanitise(&"a".repeat(500)).is_ok());
+    }
+
+    #[test]
+    fn sanitise_replaces_control_characters() {
+        let out = sanitise("hello\x01world").unwrap();
+        assert!(!out.contains('\x01'));
+        assert!(out.contains("hello"));
+        assert!(out.contains("world"));
+    }
+}

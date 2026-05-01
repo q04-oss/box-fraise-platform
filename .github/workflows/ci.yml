@@ -45,23 +45,27 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: server
+          workspaces: . -> target
 
       - name: cargo check
-        working-directory: server
-        run: cargo check
+        run: cargo check --workspace
         env:
           DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_test
 
       - name: cargo clippy
-        working-directory: server
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --workspace -- -D warnings
         env:
           DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_test
 
-      - name: cargo test
+      - name: cargo test (server)
         working-directory: server
         run: cargo test
         env:
           DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_test
           REDIS_URL: redis://localhost:6379
+
+      - name: cargo test (domain)
+        working-directory: domain
+        run: cargo test
+        env:
+          DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_test

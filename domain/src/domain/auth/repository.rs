@@ -2,7 +2,7 @@ use rand::Rng;
 use sqlx::PgPool;
 
 use crate::{error::{DomainError, AppResult}, types::UserId};
-use super::types::{UserRow, USER_COLS};
+use super::types::{DeviceRow, UserRow, USER_COLS};
 
 // ── Lookups ───────────────────────────────────────────────────────────────────
 
@@ -204,6 +204,26 @@ pub async fn consume_reset_token(pool: &PgPool, token: &str) -> AppResult<Option
     .await
     .map_err(DomainError::Db)?;
     Ok(row.map(|(id,)| id))
+}
+
+// ── Device auth ───────────────────────────────────────────────────────────────
+
+/// Look up a device by its Ethereum address (case-insensitive).
+/// Used by the RequireDevice HTTP extractor — the SQL lives here, not there.
+pub async fn get_device_by_address(
+    pool:    &PgPool,
+    address: &str,
+) -> AppResult<Option<DeviceRow>> {
+    sqlx::query_as(
+        "SELECT id, role, user_id, business_id \
+         FROM devices \
+         WHERE LOWER(device_address) = LOWER($1) \
+         LIMIT 1",
+    )
+    .bind(address)
+    .fetch_optional(pool)
+    .await
+    .map_err(DomainError::Db)
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

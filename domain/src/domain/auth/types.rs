@@ -34,6 +34,16 @@ pub const USER_COLS: &str =
      social_time_bank_seconds, identity_verified, \
      portrait_url, password_hash, created_at";
 
+// ── Device row ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct DeviceRow {
+    pub id:          i32,
+    pub role:        String,
+    pub user_id:     Option<crate::types::UserId>,
+    pub business_id: Option<i32>,
+}
+
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

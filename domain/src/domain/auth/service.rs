@@ -453,3 +453,178 @@ async fn issue_verification_token(
 
     Some(format!("{base_url}/api/auth/verify-email?token={token}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::error::DomainError;
+    use crate::event_bus::EventBus;
+    use secrecy::SecretString;
+    use sqlx::PgPool;
+
+    fn s(v: &str) -> SecretString { SecretString::from(v.to_owned()) }
+
+    fn test_cfg() -> Arc<Config> {
+        Arc::new(Config {
+            database_url:    s("postgres://localhost/test"),
+            jwt_secret:      s("test-jwt-secret-minimum-32-characters!!"),
+            jwt_secret_previous: None,
+            staff_jwt_secret: s("test-staff-secret-minimum-32-chars!!"),
+            staff_jwt_secret_previous: None,
+            stripe_secret_key:     s("sk_test_x"),
+            stripe_webhook_secret: s("whsec_x"),
+            admin_pin:       s("testpin11"),
+            chocolatier_pin: s("testpin22"),
+            supplier_pin:    s("testpin33"),
+            review_pin:      None,
+            port:            3001,
+            hmac_shared_key: None,
+            redis_url:       None,
+            apple_team_id:   None,
+            apple_key_id:    None,
+            apple_client_id: None,
+            apple_private_key:     None,
+            resend_api_key:        None,
+            anthropic_api_key:     None,
+            cloudinary_cloud_name: None,
+            cloudinary_api_key:    None,
+            cloudinary_api_secret: None,
+            square_app_id:                None,
+            square_app_secret:            None,
+            square_oauth_redirect_url:    None,
+            square_token_encryption_key:  None,
+            operator_email:               None,
+            api_base_url: "http://localhost:3001".to_owned(),
+            app_store_id: None,
+            platform_fee_bips: 500,
+            square_order_webhook_signing_key: None,
+            square_order_notification_url:    None,
+        })
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn register_user_creates_user_in_db(pool: PgPool) {
+        let cfg  = test_cfg();
+        let http = reqwest::Client::new();
+        let bus  = EventBus::new();
+
+        let resp = register_user(&pool, &cfg, &http, None, "new@test.com", "password123", None, &bus)
+            .await
+            .unwrap();
+
+        assert!(resp.is_new, "first registration must have is_new=true");
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = $1")
+            .bind("new@test.com")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn register_user_duplicate_email_is_conflict(pool: PgPool) {
+        let cfg  = test_cfg();
+        let http = reqwest::Client::new();
+        let bus  = EventBus::new();
+
+        register_user(&pool, &cfg, &http, None, "dup@test.com", "pass1", None, &bus)
+            .await
+            .unwrap();
+
+        let result = register_user(&pool, &cfg, &http, None, "dup@test.com", "pass2", None, &bus).await;
+        assert!(
+            matches!(result, Err(DomainError::Conflict(_))),
+            "duplicate email must return Conflict, got: {result:?}"
+        );
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn login_user_correct_password_succeeds(pool: PgPool) {
+        let cfg  = test_cfg();
+        let http = reqwest::Client::new();
+        let bus  = EventBus::new();
+
+        register_user(&pool, &cfg, &http, None, "login@test.com", "secret99", None, &bus)
+            .await
+            .unwrap();
+
+        let resp = login_user(&pool, &cfg, "login@test.com", "secret99", None)
+            .await
+            .unwrap();
+        assert!(!resp.token.is_empty());
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn login_user_wrong_password_is_unauthorized(pool: PgPool) {
+        let cfg  = test_cfg();
+        let http = reqwest::Client::new();
+        let bus  = EventBus::new();
+
+        register_user(&pool, &cfg, &http, None, "wrongpw@test.com", "correct99", None, &bus)
+            .await
+            .unwrap();
+
+        let result = login_user(&pool, &cfg, "wrongpw@test.com", "wrong999", None).await;
+        assert!(
+            matches!(result, Err(DomainError::Unauthorized)),
+            "wrong password must return Unauthorized, got: {result:?}"
+        );
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn login_user_banned_user_is_forbidden(pool: PgPool) {
+        let cfg  = test_cfg();
+        let http = reqwest::Client::new();
+        let bus  = EventBus::new();
+
+        let resp = register_user(&pool, &cfg, &http, None, "banned@test.com", "pass1234", None, &bus)
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE users SET banned = true WHERE id = $1")
+            .bind(i32::from(resp.user_id))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let result = login_user(&pool, &cfg, "banned@test.com", "pass1234", None).await;
+        assert!(
+            matches!(result, Err(DomainError::Forbidden)),
+            "banned user must return Forbidden, got: {result:?}"
+        );
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn request_password_reset_creates_token_in_db(pool: PgPool) {
+        let cfg  = test_cfg();
+        let http = reqwest::Client::new();
+        let bus  = EventBus::new();
+
+        register_user(&pool, &cfg, &http, None, "reset@test.com", "pass1234", None, &bus)
+            .await
+            .unwrap();
+
+        request_password_reset(&pool, &cfg, &http, None, "reset@test.com")
+            .await
+            .unwrap();
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM password_reset_tokens")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1, "one reset token must be created");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn request_password_reset_unknown_email_is_silent(pool: PgPool) {
+        let cfg  = test_cfg();
+        let http = reqwest::Client::new();
+        // Must succeed silently — never reveal whether email exists.
+        request_password_reset(&pool, &cfg, &http, None, "ghost@test.com")
+            .await
+            .unwrap();
+    }
+}

@@ -16,13 +16,14 @@ use axum_extra::{
     headers::{authorization::Bearer, Authorization},
     TypedHeader,
 };
-use sqlx::FromRow;
+
 
 use crate::{
     app::AppState,
     auth::device::{parse_auth_header, verify_signature},
     auth::staff::{self as staff_auth, StaffClaims},
     auth::{self, Claims},
+    domain::auth::repository as auth_repository,
     error::AppError,
     types::UserId,
 };
@@ -125,33 +126,17 @@ where
 
         let recovered = verify_signature(&header)?;
 
-        #[derive(FromRow)]
-        struct Row {
-            id: i32,
-            role: String,
-            user_id: Option<UserId>,
-            business_id: Option<i32>,
-        }
-
-        let row: Option<Row> = sqlx::query_as(
-            "SELECT id, role, user_id, business_id \
-             FROM devices \
-             WHERE LOWER(device_address) = LOWER($1) \
-             LIMIT 1",
-        )
-        .bind(&recovered)
-        .fetch_optional(&app.db)
-        .await
-        .map_err(AppError::Db)?;
-
-        let row = row.ok_or(AppError::Unauthorized)?;
+        let device = auth_repository::get_device_by_address(&app.db, &recovered)
+            .await
+            .map_err(AppError::from)?
+            .ok_or(AppError::Unauthorized)?;
 
         Ok(RequireDevice(DeviceInfo {
-            id: row.id,
-            address: recovered,
-            role: row.role,
-            user_id: row.user_id,
-            business_id: row.business_id,
+            id:          device.id,
+            address:     recovered,
+            role:        device.role,
+            user_id:     device.user_id,
+            business_id: device.business_id,
         }))
     }
 }

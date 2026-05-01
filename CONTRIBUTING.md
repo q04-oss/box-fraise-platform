@@ -83,6 +83,7 @@ They are never mixed.
 | Kind | Definition | Naming | Side effects |
 |---|---|---|---|
 | Command | Changes state (DB write, email, Redis mutation) | `verb_noun` — `send_message`, `register_user`, `update_display_name` | Allowed |
+| Claim command | Command with an intentional consume side-effect | `claim_noun` — `claim_key_bundle` (deletes an OTPK row) | Intentional consume |
 | Query | Reads state only | `get_noun` or `list_noun` — `get_active_user`, `list_notifications` | None |
 
 **Rules:**
@@ -107,19 +108,21 @@ update_display_name  resend_verification_email
 issue_challenge      register_keys        upload_otpks
 archive_conversation send_message
 mark_notification_read  mark_all_notifications_read
+claim_key_bundle     claim_key_bundle_by_code
 
-get_active_user      get_otpk_count       get_key_bundle
-get_key_bundle_by_code  get_public_profile  get_social_access
-get_system_prompt
+get_active_user      get_otpk_count       get_public_profile
+get_social_access    get_system_prompt
 list_conversations   list_notifications   search_users
 get_thread
 ```
 
-**Exception documented in code:**
+**`claim_` prefix convention:**
 
-`get_key_bundle` atomically claims one OTPK while returning the bundle.
-These cannot be separated: X3DH protocol requires exactly one fresh
-pre-key per session. The comment in `keys/service.rs` explains this.
+`claim_key_bundle` and `claim_key_bundle_by_code` are commands, not
+queries. They atomically delete a one-time pre-key row (OTPK) on every
+call. The `claim_` prefix signals this intentional consume side-effect.
+The separation cannot be avoided: X3DH protocol requires the initiating
+party receive exactly one fresh pre-key per session establishment.
 
 ---
 

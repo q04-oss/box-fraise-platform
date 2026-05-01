@@ -84,3 +84,91 @@ pub async fn send_message(
 
     Ok(message)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::UserId;
+    use sqlx::PgPool;
+
+    async fn verified_user(pool: &PgPool, email: &str) -> UserId {
+        let (id,): (i32,) = sqlx::query_as(
+            "INSERT INTO users (email, verified) VALUES ($1, true) RETURNING id",
+        )
+        .bind(email)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        UserId::from(id)
+    }
+
+    fn test_body(recipient_id: UserId, text: &str) -> SendMessageBody {
+        SendMessageBody {
+            recipient_id,
+            body: text.to_owned(),
+            encrypted: None,
+            ephemeral_key: None,
+            sender_identity_key: None,
+            one_time_pre_key_id: None,
+        }
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn send_message_persists_and_returns_row(pool: PgPool) {
+        let alice = verified_user(&pool, "alice@test.com").await;
+        let bob   = verified_user(&pool, "bob@test.com").await;
+        let http  = reqwest::Client::new();
+
+        let msg = send_message(&pool, &http, alice, test_body(bob, "hello bob")).await.unwrap();
+        assert_eq!(msg.sender_id, alice);
+        assert_eq!(msg.recipient_id, bob);
+        assert_eq!(msg.body, "hello bob");
+        assert!(!msg.encrypted);
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn send_message_forbidden_when_sender_unverified(pool: PgPool) {
+        let alice: UserId = {
+            let (id,): (i32,) =
+                sqlx::query_as("INSERT INTO users (email) VALUES ($1) RETURNING id")
+                    .bind("unverified@test.com")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            UserId::from(id)
+        };
+        let bob  = verified_user(&pool, "bob@test.com").await;
+        let http = reqwest::Client::new();
+
+        let result = send_message(&pool, &http, alice, test_body(bob, "hi")).await;
+        assert!(
+            matches!(result, Err(DomainError::Forbidden)),
+            "unverified sender must be Forbidden, got: {result:?}"
+        );
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn get_thread_returns_messages_newest_first(pool: PgPool) {
+        let alice = verified_user(&pool, "alice@test.com").await;
+        let bob   = verified_user(&pool, "bob@test.com").await;
+        let http  = reqwest::Client::new();
+
+        send_message(&pool, &http, alice, test_body(bob, "first")).await.unwrap();
+        send_message(&pool, &http, alice, test_body(bob, "second")).await.unwrap();
+        send_message(&pool, &http, alice, test_body(bob, "third")).await.unwrap();
+
+        let thread = get_thread(&pool, alice, bob, None, 50).await.unwrap();
+        assert_eq!(thread.len(), 3);
+        assert_eq!(thread[0].body, "third", "newest message must be first");
+        assert_eq!(thread[2].body, "first");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn get_thread_returns_empty_for_no_messages(pool: PgPool) {
+        let alice = verified_user(&pool, "alice@test.com").await;
+        let bob   = verified_user(&pool, "bob@test.com").await;
+
+        let thread = get_thread(&pool, alice, bob, None, 50).await.unwrap();
+        assert!(thread.is_empty());
+    }
+}
