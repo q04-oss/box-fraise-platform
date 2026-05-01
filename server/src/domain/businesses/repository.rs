@@ -16,17 +16,3 @@ pub async fn list(pool: &PgPool) -> AppResult<Vec<BusinessRow>> {
     .await
     .map_err(AppError::Db)
 }
-
-pub async fn find(pool: &PgPool, id: i32) -> AppResult<Option<BusinessRow>> {
-    sqlx::query_as::<_, BusinessRow>(
-        "SELECT id, name, business_type, address, description, hours,
-                instagram, latitude, longitude, active, walk_in,
-                capacity, entrance_fee_cents, created_at
-         FROM businesses WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(AppError::Db)
-}
-
