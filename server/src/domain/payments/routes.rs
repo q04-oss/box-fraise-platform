@@ -4,6 +4,10 @@
 /// before any database work begins. Each event type is dispatched to a handler
 /// that fails independently — one failing order must not block an unrelated
 /// membership payment in the same batch.
+///
+/// Anchoring principle: every handler resolves business data from a DB row
+/// keyed by stripe_payment_intent_id, not from Stripe metadata. Metadata is
+/// only used at PI creation time to route the event type in handle_pi_succeeded.
 use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, State},
@@ -14,11 +18,7 @@ use axum::{
 
 use secrecy::ExposeSecret;
 
-use crate::{
-    app::AppState,
-    integrations::resend,
-    types::OrderId,
-};
+use crate::{app::AppState, audit, integrations::resend, types::OrderId};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -26,22 +26,22 @@ pub fn router() -> Router<AppState> {
         .layer(DefaultBodyLimit::max(65_536))
 }
 
-async fn webhook(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> StatusCode {
+async fn webhook(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> StatusCode {
     // Signature verification must happen before any body parsing.
-    let sig = match headers.get("stripe-signature").and_then(|v| v.to_str().ok()) {
+    let sig = match headers
+        .get("stripe-signature")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(s) => s,
-        None    => return StatusCode::BAD_REQUEST,
+        None => return StatusCode::BAD_REQUEST,
     };
 
-    let event: serde_json::Value = match state
-        .stripe()
-        .verify_webhook(&body, sig, state.cfg.stripe_webhook_secret.expose_secret())
-    {
-        Ok(e)  => e,
+    let event: serde_json::Value = match state.stripe().verify_webhook(
+        &body,
+        sig,
+        state.cfg.stripe_webhook_secret.expose_secret(),
+    ) {
+        Ok(e) => e,
         Err(_) => return StatusCode::UNAUTHORIZED,
     };
 
@@ -67,22 +67,26 @@ async fn handle_pi_succeeded(state: &AppState, event: &serde_json::Value) {
     let pi_id = pi["id"].as_str().unwrap_or_default();
 
     // Route by payment type stored in metadata.
+    // Metadata is only used for routing — all business data is resolved from DB.
     let payment_type = pi["metadata"]["type"].as_str().unwrap_or("");
 
     match payment_type {
         "order" | "" => complete_order(state, pi_id).await,
-        "rsvp"             => complete_rsvp(state, pi_id).await,
-        "membership"       => complete_membership(state, pi, pi_id).await,
-        "tip"              => complete_tip(state, pi).await,
-        "portal_access"    => complete_portal_access(state, pi).await,
-        "tournament_entry" => complete_tournament_entry(state, pi).await,
-        "portrait_purchase"=> complete_portrait_purchase(state, pi).await,
+        "rsvp" => complete_rsvp(state, pi_id).await,
+        "membership" => complete_membership(state, pi_id).await,
+        "tip" => complete_tip(state, pi_id).await,
+        "portal_access" => complete_portal_access(state, pi_id).await,
+        "portrait_purchase" => complete_portrait_purchase(state, pi_id).await,
         // Venue drink orders: push to Square POS + credit loyalty steep.
-        "venue_order"      => {
+        "venue_order" => {
             crate::domain::venue_drinks::service::complete_venue_order(state, pi_id).await
         }
         _ => {
-            tracing::info!(pi_id, payment_type, "unhandled payment_intent.succeeded type");
+            tracing::info!(
+                pi_id,
+                payment_type,
+                "unhandled payment_intent.succeeded type"
+            );
         }
     }
 }
@@ -90,10 +94,10 @@ async fn handle_pi_succeeded(state: &AppState, event: &serde_json::Value) {
 async fn complete_order(state: &AppState, pi_id: &str) {
     #[derive(sqlx::FromRow)]
     struct OrderInfo {
-        id:           OrderId,
+        id: OrderId,
         variety_name: String,
-        total_cents:  i64,
-        email:        Option<String>,
+        total_cents: i64,
+        email: Option<String>,
     }
 
     let result: Result<Option<OrderInfo>, _> = sqlx::query_as(
@@ -103,7 +107,7 @@ async fn complete_order(state: &AppState, pi_id: &str) {
              orders.id,
              (SELECT name FROM catalog_varieties WHERE id = orders.variety_id) AS variety_name,
              orders.total_cents,
-             (SELECT email FROM users WHERE id = orders.user_id) AS email",
+             orders.customer_email AS email",
     )
     .bind(pi_id)
     .fetch_optional(&state.db)
@@ -112,33 +116,58 @@ async fn complete_order(state: &AppState, pi_id: &str) {
     match result {
         Ok(Some(info)) => {
             tracing::info!(pi_id, order_id = %info.id, "order marked paid via webhook");
-            if let (Some(email), Some(key)) = (info.email, state.cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned())) {
-                let http    = state.http.clone();
+            audit::write(
+                &state.db,
+                None,
+                None,
+                "payment.order_paid",
+                serde_json::json!({
+                    "pi_id":        pi_id,
+                    "order_id":     i32::from(info.id),
+                    "amount_cents": info.total_cents,
+                    "outcome":      "paid",
+                }),
+                None,
+            )
+            .await;
+            if let (Some(email), Some(key)) = (
+                info.email,
+                state
+                    .cfg
+                    .resend_api_key
+                    .as_ref()
+                    .map(|k| k.expose_secret().to_owned()),
+            ) {
+                let http = state.http.clone();
                 let variety = info.variety_name.clone();
-                let total   = info.total_cents as i32;
-                let oid     = info.id;
+                let total = info.total_cents as i32;
+                let oid = info.id;
                 tokio::spawn(async move {
-                    let _ = resend::send_order_confirmation(&http, &key, &email, oid, &variety, total).await;
+                    let _ =
+                        resend::send_order_confirmation(&http, &key, &email, oid, &variety, total)
+                            .await;
                 });
             }
         }
-        Ok(None)  => tracing::warn!(pi_id, "no order found for webhook pi"),
-        Err(e)    => tracing::error!(pi_id, error = %e, "complete_order failed"),
+        Ok(None) => tracing::warn!(pi_id, "no order found for webhook pi"),
+        Err(e) => tracing::error!(pi_id, error = %e, "complete_order failed"),
     }
 }
 
 async fn complete_rsvp(state: &AppState, pi_id: &str) {
     #[derive(sqlx::FromRow)]
     struct RsvpInfo {
+        user_id: i32,
         event_name: String,
-        email:      Option<String>,
+        email: Option<String>,
     }
 
     let result: Result<Option<RsvpInfo>, _> = sqlx::query_as(
         "UPDATE popup_rsvps SET status = 'confirmed'
          WHERE stripe_payment_intent_id = $1 AND status = 'pending'
          RETURNING
-             (SELECT name FROM popup_events WHERE id = popup_rsvps.event_id) AS event_name,
+             popup_rsvps.user_id,
+             (SELECT name FROM businesses WHERE id = popup_rsvps.business_id) AS event_name,
              (SELECT email FROM users WHERE id = popup_rsvps.user_id) AS email",
     )
     .bind(pi_id)
@@ -148,193 +177,299 @@ async fn complete_rsvp(state: &AppState, pi_id: &str) {
     match result {
         Ok(Some(info)) => {
             tracing::info!(pi_id, "RSVP confirmed via webhook");
-            if let (Some(email), Some(key)) = (info.email, state.cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned())) {
-                let http  = state.http.clone();
+            audit::write(
+                &state.db,
+                Some(info.user_id),
+                None,
+                "payment.rsvp_confirmed",
+                serde_json::json!({ "pi_id": pi_id, "outcome": "confirmed" }),
+                None,
+            )
+            .await;
+            if let (Some(email), Some(key)) = (
+                info.email,
+                state
+                    .cfg
+                    .resend_api_key
+                    .as_ref()
+                    .map(|k| k.expose_secret().to_owned()),
+            ) {
+                let http = state.http.clone();
                 let event = info.event_name.clone();
                 tokio::spawn(async move {
                     let _ = resend::send_rsvp_confirmed(&http, &key, &email, &event).await;
                 });
             }
         }
-        Ok(None)  => tracing::warn!(pi_id, "no RSVP found for webhook pi"),
-        Err(e)    => tracing::error!(pi_id, error = %e, "complete_rsvp failed"),
+        Ok(None) => tracing::warn!(pi_id, "no RSVP found for webhook pi"),
+        Err(e) => tracing::error!(pi_id, error = %e, "complete_rsvp failed"),
     }
 }
 
-async fn complete_membership(state: &AppState, pi: &serde_json::Value, pi_id: &str) {
-    let tier    = pi["metadata"]["tier"].as_str().unwrap_or("maison");
-    let user_id = pi["metadata"]["user_id"]
-        .as_str()
-        .and_then(|s| s.parse::<i32>().ok());
+async fn complete_membership(state: &AppState, pi_id: &str) {
+    #[derive(sqlx::FromRow)]
+    struct PendingMembership {
+        user_id: i32,
+        tier: String,
+        amount_cents: i32,
+    }
 
-    if let Some(uid) = user_id {
-        let renews_at = chrono::Utc::now()
-            .checked_add_signed(chrono::Duration::days(365))
-            .unwrap()
-            .naive_utc();
+    let renews_at = chrono::Utc::now()
+        .checked_add_signed(chrono::Duration::days(365))
+        .unwrap()
+        .naive_utc();
 
-        let result = sqlx::query(
-            "INSERT INTO memberships (user_id, tier, status, started_at, renews_at)
-             VALUES ($1, $2, 'active', NOW(), $3)
-             ON CONFLICT (user_id) DO UPDATE
-             SET tier = EXCLUDED.tier, status = 'active',
-                 started_at = NOW(), renews_at = EXCLUDED.renews_at,
-                 renewal_notified = false",
+    let result: Result<Option<PendingMembership>, _> = sqlx::query_as(
+        "UPDATE memberships
+         SET status = 'active', started_at = NOW(), renews_at = $2
+         WHERE stripe_payment_intent_id = $1 AND status = 'pending'
+         RETURNING user_id, tier, amount_cents",
+    )
+    .bind(pi_id)
+    .bind(renews_at)
+    .fetch_optional(&state.db)
+    .await;
+
+    match result {
+        Ok(Some(m)) => {
+            tracing::info!(pi_id, uid = m.user_id, tier = %m.tier, "membership activated");
+            audit::write(
+                &state.db,
+                Some(m.user_id),
+                None,
+                "payment.membership_activated",
+                serde_json::json!({
+                    "pi_id":        pi_id,
+                    "tier":         m.tier,
+                    "amount_cents": m.amount_cents,
+                    "outcome":      "activated",
+                }),
+                None,
+            )
+            .await;
+        }
+        Ok(None) => tracing::warn!(pi_id, "no pending membership found for webhook pi"),
+        Err(e) => tracing::error!(pi_id, error = %e, "complete_membership failed"),
+    }
+}
+
+async fn complete_tip(state: &AppState, pi_id: &str) {
+    #[derive(sqlx::FromRow)]
+    struct TipPayment {
+        id: i32,
+        business_id: i32,
+        amount_cents: i64,
+    }
+
+    // Resolve the tip from the DB — never from metadata.
+    let tip_result: Result<Option<TipPayment>, _> = sqlx::query_as(
+        "UPDATE tip_payments SET status = 'processing'
+         WHERE stripe_payment_intent_id = $1 AND status = 'pending'
+         RETURNING id, business_id, amount_cents",
+    )
+    .bind(pi_id)
+    .fetch_optional(&state.db)
+    .await;
+
+    let tip = match tip_result {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            tracing::warn!(pi_id, "no pending tip_payment found for webhook pi");
+            return;
+        }
+        Err(e) => {
+            tracing::error!(pi_id, error = %e, "complete_tip: tip_payments lookup failed");
+            return;
+        }
+    };
+
+    // Find the currently placed worker at this business.
+    let placed: Option<(i32,)> = sqlx::query_as(
+        "SELECT u.id FROM employment_contracts ec
+         JOIN users u ON u.id = ec.user_id
+         WHERE ec.business_id = $1 AND ec.status = 'active'
+         ORDER BY ec.created_at DESC LIMIT 1",
+    )
+    .bind(tip.business_id)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
+
+    let Some((worker_id,)) = placed else {
+        tracing::warn!(
+            pi_id,
+            business_id = tip.business_id,
+            "no active placed user to receive tip"
+        );
+        // Mark complete so we don't retry; audit the undelivered state.
+        let _ = sqlx::query(
+            "UPDATE tip_payments SET status = 'undeliverable'
+             WHERE stripe_payment_intent_id = $1",
         )
-        .bind(uid)
-        .bind(tier)
-        .bind(renews_at)
+        .bind(pi_id)
         .execute(&state.db)
         .await;
-
-        match result {
-            Ok(_)  => tracing::info!(pi_id, uid, tier, "membership activated"),
-            Err(e) => tracing::error!(pi_id, error = %e, "complete_membership failed"),
-        }
-    }
-}
-
-async fn complete_tip(state: &AppState, pi: &serde_json::Value) {
-    let business_id = pi["metadata"]["business_id"]
-        .as_str()
-        .and_then(|s| s.parse::<i32>().ok());
-
-    if let Some(biz_id) = business_id {
-        // Look up placed user to deliver the earnings.
-        let placed: Option<(i32,)> = sqlx::query_as(
-            "SELECT u.id FROM employment_contracts ec
-             JOIN users u ON u.id = ec.user_id
-             WHERE ec.business_id = $1 AND ec.status = 'active'
-             ORDER BY ec.created_at DESC LIMIT 1",
+        audit::write(
+            &state.db,
+            None,
+            Some(tip.business_id),
+            "payment.tip_undeliverable",
+            serde_json::json!({
+                "pi_id":        pi_id,
+                "amount_cents": tip.amount_cents,
+                "outcome":      "no_placed_user",
+            }),
+            None,
         )
-        .bind(biz_id)
-        .fetch_optional(&state.db)
-        .await
-        .unwrap_or(None);
+        .await;
+        return;
+    };
 
-        if let Some((worker_id,)) = placed {
-            let amount = pi["amount"].as_i64().unwrap_or(0) as i32;
-            let _ = sqlx::query(
-                "INSERT INTO earnings_ledger (user_id, amount_cents, type)
-                 VALUES ($1, $2, 'tip')",
-            )
-            .bind(worker_id)
-            .bind(amount)
-            .execute(&state.db)
-            .await;
+    let _ = sqlx::query(
+        "INSERT INTO earnings_ledger (user_id, amount_cents, type, stripe_payment_intent_id)
+         VALUES ($1, $2, 'tip', $3)",
+    )
+    .bind(worker_id)
+    .bind(tip.amount_cents)
+    .bind(pi_id)
+    .execute(&state.db)
+    .await;
 
-            tracing::info!(worker_id, amount, "tip credited via webhook");
+    let _ = sqlx::query(
+        "UPDATE tip_payments SET status = 'completed'
+         WHERE stripe_payment_intent_id = $1",
+    )
+    .bind(pi_id)
+    .execute(&state.db)
+    .await;
 
-            if let Some(key) = state.cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned()) {
-                let http = state.http.clone();
-                let db   = state.db.clone();
-                tokio::spawn(async move {
-                    let email: Option<String> = sqlx::query_scalar(
-                        "SELECT email FROM users WHERE id = $1",
-                    )
-                    .bind(worker_id)
-                    .fetch_optional(&db)
-                    .await
-                    .unwrap_or(None)
-                    .flatten();
+    tracing::info!(
+        pi_id,
+        worker_id,
+        amount = tip.amount_cents,
+        "tip credited via webhook"
+    );
+    audit::write(
+        &state.db,
+        Some(worker_id),
+        Some(tip.business_id),
+        "payment.tip_credited",
+        serde_json::json!({
+            "pi_id":        pi_id,
+            "amount_cents": tip.amount_cents,
+            "outcome":      "credited",
+        }),
+        None,
+    )
+    .await;
 
-                    if let Some(addr) = email {
-                        let _ = resend::send_tip_received(&http, &key, &addr, amount).await;
-                    }
-                });
+    if let Some(key) = state
+        .cfg
+        .resend_api_key
+        .as_ref()
+        .map(|k| k.expose_secret().to_owned())
+    {
+        let http = state.http.clone();
+        let db = state.db.clone();
+        let amt = tip.amount_cents as i32;
+        tokio::spawn(async move {
+            let email: Option<String> = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+                .bind(worker_id)
+                .fetch_optional(&db)
+                .await
+                .unwrap_or(None)
+                .flatten();
+
+            if let Some(addr) = email {
+                let _ = resend::send_tip_received(&http, &key, &addr, amt).await;
             }
-        }
+        });
     }
 }
 
 // ── portal_access ─────────────────────────────────────────────────────────────
 
-async fn complete_portal_access(state: &AppState, pi: &serde_json::Value) {
-    let buyer_id: Option<i32> = pi["metadata"]["buyer_id"]
-        .as_str()
-        .and_then(|s| s.parse().ok());
-    let owner_id: Option<i32> = pi["metadata"]["owner_id"]
-        .as_str()
-        .and_then(|s| s.parse().ok());
-
-    let (Some(buyer), Some(owner)) = (buyer_id, owner_id) else {
-        tracing::warn!("portal_access webhook missing buyer_id or owner_id");
-        return;
-    };
-
-    let result = sqlx::query(
-        "UPDATE portal_access SET status = 'active'
-         WHERE buyer_id = $1 AND owner_id = $2 AND status = 'pending'",
-    )
-    .bind(buyer)
-    .bind(owner)
-    .execute(&state.db)
-    .await;
-
-    match result {
-        Ok(r) if r.rows_affected() > 0 => {
-            tracing::info!(buyer, owner, "portal access activated via webhook");
-        }
-        Ok(_)  => tracing::warn!(buyer, owner, "no pending portal_access found"),
-        Err(e) => tracing::error!(error = %e, "complete_portal_access failed"),
+async fn complete_portal_access(state: &AppState, pi_id: &str) {
+    #[derive(sqlx::FromRow)]
+    struct PortalRow {
+        buyer_id: i32,
+        owner_id: i32,
+        amount_cents: i64,
     }
-}
 
-// ── tournament_entry ──────────────────────────────────────────────────────────
-
-async fn complete_tournament_entry(state: &AppState, pi: &serde_json::Value) {
-    let user_id: Option<i32> = pi["metadata"]["user_id"]
-        .as_str()
-        .and_then(|s| s.parse().ok());
-    let tournament_id: Option<i32> = pi["metadata"]["tournament_id"]
-        .as_str()
-        .and_then(|s| s.parse().ok());
-
-    let (Some(uid), Some(tid)) = (user_id, tournament_id) else {
-        tracing::warn!("tournament_entry webhook missing user_id or tournament_id");
-        return;
-    };
-
-    let result = sqlx::query(
-        "UPDATE tournament_entries SET status = 'registered'
-         WHERE tournament_id = $1 AND user_id = $2 AND status = 'pending'",
+    let result: Result<Option<PortalRow>, _> = sqlx::query_as(
+        "UPDATE portal_access SET status = 'active'
+         WHERE stripe_payment_intent_id = $1 AND status = 'pending'
+         RETURNING buyer_id, owner_id, amount_cents",
     )
-    .bind(tid)
-    .bind(uid)
-    .execute(&state.db)
+    .bind(pi_id)
+    .fetch_optional(&state.db)
     .await;
 
     match result {
-        Ok(r) if r.rows_affected() > 0 => {
-            tracing::info!(uid, tid, "tournament entry confirmed via webhook");
+        Ok(Some(row)) => {
+            tracing::info!(
+                pi_id,
+                buyer = row.buyer_id,
+                owner = row.owner_id,
+                "portal access activated via webhook"
+            );
+            audit::write(
+                &state.db,
+                Some(row.buyer_id),
+                None,
+                "payment.portal_access_activated",
+                serde_json::json!({
+                    "pi_id":        pi_id,
+                    "buyer_id":     row.buyer_id,
+                    "owner_id":     row.owner_id,
+                    "amount_cents": row.amount_cents,
+                    "outcome":      "activated",
+                }),
+                None,
+            )
+            .await;
         }
-        Ok(_)  => tracing::warn!(uid, tid, "no pending tournament entry found"),
-        Err(e) => tracing::error!(error = %e, "complete_tournament_entry failed"),
+        Ok(None) => tracing::warn!(pi_id, "no pending portal_access found for webhook pi"),
+        Err(e) => tracing::error!(pi_id, error = %e, "complete_portal_access failed"),
     }
 }
 
 // ── portrait_purchase ─────────────────────────────────────────────────────────
 
-async fn complete_portrait_purchase(state: &AppState, pi: &serde_json::Value) {
-    let buyer_id: Option<i32> = pi["metadata"]["buyer_id"]
-        .as_str()
-        .and_then(|s| s.parse().ok());
-    let seller_id: Option<i32> = pi["metadata"]["seller_id"]
-        .as_str()
-        .and_then(|s| s.parse().ok());
-    let creator_id: Option<i32> = pi["metadata"]["creator_id"]
-        .as_str()
-        .and_then(|s| s.parse().ok());
-    let token_id: Option<i32> = pi["metadata"]["token_id"]
-        .as_str()
-        .and_then(|s| s.parse().ok());
-    let amount = pi["amount"].as_i64().unwrap_or(0);
+async fn complete_portrait_purchase(state: &AppState, pi_id: &str) {
+    #[derive(sqlx::FromRow)]
+    struct PurchaseIntent {
+        token_id: i32,
+        buyer_user_id: i32,
+        seller_user_id: i32,
+        creator_user_id: i32,
+        amount_cents: i64,
+    }
 
-    let (Some(buyer), Some(seller), Some(creator), Some(token)) =
-        (buyer_id, seller_id, creator_id, token_id)
-    else {
-        tracing::warn!("portrait_purchase webhook missing required metadata");
-        return;
+    // Resolve all parties from the DB — never from metadata.
+    let intent_result: Result<Option<PurchaseIntent>, _> = sqlx::query_as(
+        "UPDATE portrait_purchase_intents SET status = 'processing'
+         WHERE stripe_payment_intent_id = $1 AND status = 'pending'
+         RETURNING token_id, buyer_user_id, seller_user_id, creator_user_id, amount_cents",
+    )
+    .bind(pi_id)
+    .fetch_optional(&state.db)
+    .await;
+
+    let intent = match intent_result {
+        Ok(Some(i)) => i,
+        Ok(None) => {
+            tracing::warn!(
+                pi_id,
+                "no pending portrait_purchase_intent found for webhook pi"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::error!(pi_id, error = %e, "complete_portrait_purchase: intent lookup failed");
+            return;
+        }
     };
 
     // Transfer ownership.
@@ -342,81 +477,159 @@ async fn complete_portrait_purchase(state: &AppState, pi: &serde_json::Value) {
         "UPDATE portrait_tokens SET owner_id = $1
          WHERE id = $2 AND owner_id = $3",
     )
-    .bind(buyer)
-    .bind(token)
-    .bind(seller)
+    .bind(intent.buyer_user_id)
+    .bind(intent.token_id)
+    .bind(intent.seller_user_id)
     .execute(&state.db)
     .await;
 
     match transfer {
         Ok(r) if r.rows_affected() == 0 => {
-            // Token already moved — idempotent, nothing to do.
-            tracing::warn!(buyer, token, "portrait token already transferred or seller mismatch");
+            // Token already moved — idempotent; mark intent complete and exit.
+            tracing::warn!(
+                pi_id,
+                token = intent.token_id,
+                "portrait token already transferred or seller mismatch"
+            );
+            let _ = sqlx::query(
+                "UPDATE portrait_purchase_intents SET status = 'completed'
+                 WHERE stripe_payment_intent_id = $1",
+            )
+            .bind(pi_id)
+            .execute(&state.db)
+            .await;
             return;
         }
         Err(e) => {
-            tracing::error!(error = %e, "portrait_purchase ownership transfer failed");
+            tracing::error!(pi_id, error = %e, "portrait_purchase ownership transfer failed");
             return;
         }
         Ok(_) => {}
     }
 
-    tracing::info!(buyer, token, "portrait token transferred via webhook");
+    tracing::info!(
+        pi_id,
+        buyer = intent.buyer_user_id,
+        token = intent.token_id,
+        "portrait token transferred via webhook"
+    );
 
     // Royalty: 15% to creator, 85% to seller (recorded; actual payout is manual / batched).
-    let creator_cut = (amount * 15) / 100;
-    let seller_cut  = amount - creator_cut;
+    let creator_cut = (intent.amount_cents * 15) / 100;
+    let seller_cut = intent.amount_cents - creator_cut;
 
     let _ = sqlx::query(
-        "INSERT INTO earnings_ledger (user_id, amount_cents, type)
-         VALUES ($1, $2, 'portrait_royalty'), ($3, $4, 'portrait_sale')",
+        "INSERT INTO earnings_ledger
+             (user_id, amount_cents, type, stripe_payment_intent_id)
+         VALUES ($1, $2, 'portrait_royalty', $5), ($3, $4, 'portrait_sale', $5)",
     )
-    .bind(creator)
+    .bind(intent.creator_user_id)
     .bind(creator_cut)
-    .bind(seller)
+    .bind(intent.seller_user_id)
     .bind(seller_cut)
+    .bind(pi_id)
     .execute(&state.db)
+    .await;
+
+    let _ = sqlx::query(
+        "UPDATE portrait_purchase_intents SET status = 'completed'
+         WHERE stripe_payment_intent_id = $1",
+    )
+    .bind(pi_id)
+    .execute(&state.db)
+    .await;
+
+    audit::write(
+        &state.db,
+        Some(intent.buyer_user_id),
+        None,
+        "payment.portrait_purchased",
+        serde_json::json!({
+            "pi_id":          pi_id,
+            "token_id":       intent.token_id,
+            "buyer_id":       intent.buyer_user_id,
+            "seller_id":      intent.seller_user_id,
+            "creator_id":     intent.creator_user_id,
+            "amount_cents":   intent.amount_cents,
+            "creator_cut":    creator_cut,
+            "seller_cut":     seller_cut,
+            "outcome":        "transferred",
+        }),
+        None,
+    )
     .await;
 }
 
 // ── identity.verification_session.verified ────────────────────────────────────
 
 async fn handle_identity_verified(state: &AppState, event: &serde_json::Value) {
-    let session  = &event["data"]["object"];
-    let user_id: Option<i32> = session["metadata"]["user_id"]
-        .as_str()
-        .and_then(|s| s.parse().ok());
+    let session = &event["data"]["object"];
+    let session_id = session["id"].as_str().unwrap_or_default();
 
     let verified_name = session["verified_outputs"]["name"].as_str();
-    let verified_dob  = session["verified_outputs"]["dob"]
+    let verified_dob = session["verified_outputs"]["dob"]
         .as_str()
         .or_else(|| session["verified_outputs"]["date_of_birth"].as_str());
 
-    if let Some(uid) = user_id {
-        let expires = chrono::Utc::now()
-            .checked_add_signed(chrono::Duration::days(730)) // 2 years
-            .unwrap()
-            .naive_utc();
+    // Resolve user_id from the stored session record — not from metadata.
+    // Sessions are stored in identity_verification_sessions at creation time
+    // by the verification initiation endpoint.
+    let user_id: Option<i32> = sqlx::query_scalar(
+        "UPDATE identity_verification_sessions
+         SET status = 'verified'
+         WHERE stripe_session_id = $1 AND status = 'pending'
+         RETURNING user_id",
+    )
+    .bind(session_id)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
 
-        let result = sqlx::query(
-            "UPDATE users
-             SET identity_verified = true,
-                 identity_verified_at = NOW(),
-                 identity_verified_expires_at = $2,
-                 id_verified_name = $3,
-                 id_verified_dob  = $4
-             WHERE id = $1",
-        )
-        .bind(uid)
-        .bind(expires)
-        .bind(verified_name)
-        .bind(verified_dob)
-        .execute(&state.db)
-        .await;
+    let Some(uid) = user_id else {
+        tracing::warn!(
+            session_id,
+            "no pending identity_verification_session found for webhook"
+        );
+        return;
+    };
 
-        match result {
-            Ok(_)  => tracing::info!(uid, "identity verified via webhook"),
-            Err(e) => tracing::error!(uid, error = %e, "handle_identity_verified failed"),
+    let expires = chrono::Utc::now()
+        .checked_add_signed(chrono::Duration::days(730)) // 2 years
+        .unwrap()
+        .naive_utc();
+
+    let result = sqlx::query(
+        "UPDATE users
+         SET identity_verified = true,
+             identity_verified_at = NOW(),
+             identity_verified_expires_at = $2,
+             id_verified_name = $3,
+             id_verified_dob  = $4
+         WHERE id = $1",
+    )
+    .bind(uid)
+    .bind(expires)
+    .bind(verified_name)
+    .bind(verified_dob)
+    .execute(&state.db)
+    .await;
+
+    match result {
+        Ok(_) => {
+            tracing::info!(uid, session_id, "identity verified via webhook");
+            audit::write(
+                &state.db,
+                Some(uid),
+                None,
+                "identity.verified",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "outcome":    "verified",
+                }),
+                None,
+            )
+            .await;
         }
+        Err(e) => tracing::error!(uid, session_id, error = %e, "handle_identity_verified failed"),
     }
 }

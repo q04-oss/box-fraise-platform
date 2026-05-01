@@ -1,4 +1,4 @@
-﻿/// Portal â€” creator monetization and identity verification.
+/// Portal â€” creator monetization and identity verification.
 ///
 /// Security model:
 ///   - Content is gated behind portal_access rows; a user can only read
@@ -24,10 +24,10 @@ use crate::{
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/portal/me",                get(portal_me))
-        .route("/api/portal/access/{user_id}",   post(subscribe))
-        .route("/api/portal/content/{user_id}",  get(content))
-        .route("/api/portal/verify/cost",       get(verify_cost))
+        .route("/api/portal/me", get(portal_me))
+        .route("/api/portal/access/{user_id}", post(subscribe))
+        .route("/api/portal/content/{user_id}", get(content))
+        .route("/api/portal/verify/cost", get(verify_cost))
 }
 
 // â”€â”€ Portal status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -38,7 +38,7 @@ async fn portal_me(
 ) -> AppResult<Json<serde_json::Value>> {
     #[derive(sqlx::FromRow)]
     struct Row {
-        portal_opted_in:  bool,
+        portal_opted_in: bool,
         identity_verified: bool,
         identity_verified_expires_at: Option<NaiveDateTime>,
     }
@@ -52,7 +52,9 @@ async fn portal_me(
     .await
     .map_err(AppError::Db)?;
 
-    let Some(row) = row else { return Err(AppError::NotFound); };
+    let Some(row) = row else {
+        return Err(AppError::NotFound);
+    };
 
     // Count active subscribers.
     let subscriber_count: i64 = sqlx::query_scalar(
@@ -92,17 +94,18 @@ async fn subscribe(
     }
 
     // Verify the owner is opted in to the portal.
-    let opted_in: bool = sqlx::query_scalar(
-        "SELECT COALESCE(portal_opted_in, false) FROM users WHERE id = $1",
-    )
-    .bind(owner_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(AppError::Db)?
-    .unwrap_or(false);
+    let opted_in: bool =
+        sqlx::query_scalar("SELECT COALESCE(portal_opted_in, false) FROM users WHERE id = $1")
+            .bind(owner_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(AppError::Db)?
+            .unwrap_or(false);
 
     if !opted_in {
-        return Err(AppError::bad_request("this creator has not enabled portal access"));
+        return Err(AppError::bad_request(
+            "this creator has not enabled portal access",
+        ));
     }
 
     let days = body.days.unwrap_or(30).max(1).min(365);
@@ -129,16 +132,21 @@ async fn subscribe(
         )
         .await?;
 
-    // Pre-create the access row (pending payment).
+    // Pre-create the access row (pending payment) with the pi_id so the
+    // webhook can anchor by stripe_payment_intent_id instead of trusting metadata.
     sqlx::query(
-        "INSERT INTO portal_access (buyer_id, owner_id, expires_at, status)
-         VALUES ($1, $2, $3, 'pending')
+        "INSERT INTO portal_access
+             (buyer_id, owner_id, expires_at, status, stripe_payment_intent_id)
+         VALUES ($1, $2, $3, 'pending', $4)
          ON CONFLICT (buyer_id, owner_id) DO UPDATE
-         SET expires_at = EXCLUDED.expires_at, status = 'pending'",
+         SET expires_at = EXCLUDED.expires_at,
+             status = 'pending',
+             stripe_payment_intent_id = EXCLUDED.stripe_payment_intent_id",
     )
     .bind(buyer_id)
     .bind(owner_id)
     .bind(expires_at)
+    .bind(&pi.id)
     .execute(&state.db)
     .await
     .map_err(AppError::Db)?;
@@ -154,10 +162,10 @@ async fn subscribe(
 
 #[derive(sqlx::FromRow, Serialize)]
 struct ContentRow {
-    id:        i32,
-    user_id:   UserId,
+    id: i32,
+    user_id: UserId,
     media_url: Option<String>,
-    caption:   Option<String>,
+    caption: Option<String>,
     content_type: Option<String>,
     created_at: NaiveDateTime,
 }

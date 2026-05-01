@@ -1,4 +1,4 @@
-﻿use axum::{
+use axum::{
     extract::{Path, State},
     routing::{get, post},
     Json, Router,
@@ -19,17 +19,26 @@ use super::types::{
 pub fn router() -> Router<AppState> {
     Router::new()
         // Evening tokens
-        .route("/api/tokens/evening",                   get(list_evening_tokens))
-        .route("/api/tokens/evening/confirm/{booking_id}", post(confirm_evening_token))
+        .route("/api/tokens/evening", get(list_evening_tokens))
+        .route(
+            "/api/tokens/evening/confirm/{booking_id}",
+            post(confirm_evening_token),
+        )
         // Content tokens
-        .route("/api/tokens/content",                   get(list_content_tokens))
-        .route("/api/tokens/content/trade",             post(create_trade_offer))
-        .route("/api/tokens/content/trade/{offer_id}/accept",  post(accept_trade))
-        .route("/api/tokens/content/trade/{offer_id}/decline", post(decline_trade))
+        .route("/api/tokens/content", get(list_content_tokens))
+        .route("/api/tokens/content/trade", post(create_trade_offer))
+        .route(
+            "/api/tokens/content/trade/{offer_id}/accept",
+            post(accept_trade),
+        )
+        .route(
+            "/api/tokens/content/trade/{offer_id}/decline",
+            post(decline_trade),
+        )
         // Portrait tokens
-        .route("/api/tokens/portrait",                  get(list_portrait_tokens))
-        .route("/api/tokens/portrait/mint",             post(mint_portrait))
-        .route("/api/tokens/portrait/{token_id}/buy",    post(buy_portrait))
+        .route("/api/tokens/portrait", get(list_portrait_tokens))
+        .route("/api/tokens/portrait/mint", post(mint_portrait))
+        .route("/api/tokens/portrait/{token_id}/buy", post(buy_portrait))
 }
 
 // â”€â”€ Evening tokens â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -124,7 +133,7 @@ async fn confirm_evening_token(
 struct BookingLock {
     user_id_1: UserId,
     user_id_2: UserId,
-    status:    String,
+    status: String,
 }
 
 // â”€â”€ Content tokens â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -297,10 +306,10 @@ async fn decline_trade(
 
 #[derive(sqlx::FromRow)]
 struct TradeOfferLock {
-    token_id:     i32,
+    token_id: i32,
     from_user_id: UserId,
-    to_user_id:   UserId,
-    status:       String,
+    to_user_id: UserId,
+    status: String,
 }
 
 // â”€â”€ Portrait tokens â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -388,6 +397,23 @@ async fn buy_portrait(
             ],
         )
         .await?;
+
+    // Anchor the purchase to the DB so the webhook resolves all parties by pi_id.
+    sqlx::query(
+        "INSERT INTO portrait_purchase_intents
+             (token_id, buyer_user_id, seller_user_id, creator_user_id,
+              amount_cents, stripe_payment_intent_id)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(token_id)
+    .bind(buyer_id)
+    .bind(token.owner_id)
+    .bind(token.creator_id)
+    .bind(price_cents)
+    .bind(&pi.id)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::Db)?;
 
     Ok(Json(serde_json::json!({
         "client_secret": pi.client_secret,

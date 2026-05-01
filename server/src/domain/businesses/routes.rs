@@ -1,21 +1,21 @@
-﻿use axum::{
+use axum::{
     extract::{Path, State},
     routing::{get, post},
     Json, Router,
 };
 
+use super::{repository, types::*};
 use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::{auth::RequireUser, json::AppJson},
 };
-use super::{repository, types::*};
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/businesses",          get(list))
-        .route("/api/businesses/{id}",      get(find))
-        .route("/api/businesses/{id}/tip",  post(tip))
+        .route("/api/businesses", get(list))
+        .route("/api/businesses/{id}", get(find))
+        .route("/api/businesses/{id}/tip", post(tip))
 }
 
 // â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -24,10 +24,7 @@ async fn list(State(state): State<AppState>) -> AppResult<Json<Vec<BusinessRow>>
     Ok(Json(repository::list(&state.db).await?))
 }
 
-async fn find(
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> AppResult<Json<BusinessRow>> {
+async fn find(State(state): State<AppState>, Path(id): Path<i32>) -> AppResult<Json<BusinessRow>> {
     repository::find(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)
@@ -65,8 +62,20 @@ async fn tip(
         )
         .await?;
 
+    // Anchor the tip to the DB so the webhook resolves business_id by pi_id.
+    sqlx::query(
+        "INSERT INTO tip_payments (business_id, amount_cents, stripe_payment_intent_id)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(business_id)
+    .bind(body.amount_cents as i64)
+    .bind(&pi.id)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::Db)?;
+
     Ok(Json(TipResponse {
         client_secret: pi.client_secret.unwrap_or_default(),
-        total_cents:   body.amount_cents,
+        total_cents: body.amount_cents,
     }))
 }

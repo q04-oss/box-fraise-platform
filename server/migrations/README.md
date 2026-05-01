@@ -51,3 +51,7 @@ sqlx migrate add --source migrations <descriptive_name>
 ```
 
 Name it as a single logical change: `add_referral_codes`, `add_table_bookings_to_users`, `create_waitlist_table`. One concern per file.
+
+## Governance rule
+
+**No direct schema changes in production. Every schema change requires a migration file.** This rule exists because the schema and code have drifted three times — `tournaments`/`earnings_ledger` (tables referenced in code but never in migrations), `popup_events`/`event_id` (webhook handler referencing non-existent table and column), and `popup_rsvps.popup_id` (column renamed in production but not reflected in migrations) — each time requiring a session to diagnose and fix.
