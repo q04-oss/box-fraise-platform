@@ -8,7 +8,6 @@ pub mod domain;
 pub mod error;
 pub mod http;
 pub mod integrations;
-pub mod jobs;
 pub mod types;
 
 use secrecy::ExposeSecret;
@@ -32,10 +31,6 @@ pub async fn run() -> anyhow::Result<()> {
 
     let state  = app::AppState::new(pool, cfg);
     let router = app::build(state.clone());
-
-    if let Err(e) = jobs::start(state).await {
-        tracing::warn!(error = %e, "cron scheduler failed to start");
-    }
 
     let addr = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
         std::net::Ipv4Addr::UNSPECIFIED,

@@ -13,7 +13,7 @@ const MSG_COLS: &str =
 ///
 /// Rules:
 ///   1. Shop accounts can always receive messages.
-///   2. Both must be verified AND have an NFC connection.
+///   2. Both users must be verified.
 pub async fn can_message(pool: &PgPool, from: UserId, to: UserId) -> AppResult<bool> {
     // Rule 1: shop account.
     let is_shop: bool = sqlx::query_scalar(
@@ -25,25 +25,11 @@ pub async fn can_message(pool: &PgPool, from: UserId, to: UserId) -> AppResult<b
     .map_err(AppError::Db)?;
     if is_shop { return Ok(true); }
 
-    // Rule 2: both verified + NFC connection.
-    let both_verified: bool = sqlx::query_scalar(
+    // Rule 2: both verified.
+    sqlx::query_scalar(
         "SELECT (
              (SELECT verified FROM users WHERE id = $1) = true AND
              (SELECT verified FROM users WHERE id = $2) = true
-         )",
-    )
-    .bind(from)
-    .bind(to)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Db)?;
-    if !both_verified { return Ok(false); }
-
-    sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM nfc_connections
-             WHERE (user_id = $1 AND connected_user_id = $2)
-                OR (user_id = $2 AND connected_user_id = $1)
          )",
     )
     .bind(from)

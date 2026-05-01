@@ -19,7 +19,6 @@ pub fn router() -> Router<AppState> {
         .route("/api/users/{id}/public-profile",      get(public_profile))
         // My profile
         .route("/api/users/me/social-access",        get(social_access))
-        .route("/api/users/me/stats",                get(stats))
         // Notifications
         .route("/api/notifications",                 get(list_notifications))
         .route("/api/notifications/read-all",        post(read_all))
@@ -62,13 +61,6 @@ async fn social_access(
         .await?
         .ok_or(AppError::NotFound)
         .map(Json)
-}
-
-async fn stats(
-    State(state): State<AppState>,
-    RequireUser(user_id): RequireUser,
-) -> AppResult<Json<UserStats>> {
-    Ok(Json(repository::stats(&state.db, user_id).await?))
 }
 
 // ── Notifications ─────────────────────────────────────────────────────────────

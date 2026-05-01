@@ -15,7 +15,7 @@ use testcontainers::ContainerAsync;
 use testcontainers_modules::redis::Redis;
 
 use box_fraise_server::{
-    app::{AppState, PinHashes},
+    app::AppState,
     auth::new_revoked_tokens,
     config::Config,
     http::middleware::{hmac::new_nonce_cache, rate_limit::RateLimiter},
@@ -62,14 +62,6 @@ pub fn test_config() -> Config {
     }
 }
 
-fn test_pin_hashes() -> Arc<PinHashes> {
-    Arc::new(PinHashes {
-        admin:       bcrypt::hash("testpin1", 4).unwrap(),
-        chocolatier: bcrypt::hash("testpin2", 4).unwrap(),
-        supplier:    bcrypt::hash("testpin3", 4).unwrap(),
-    })
-}
-
 pub fn build_state(db: PgPool, redis: Option<RedisPool>) -> AppState {
     AppState {
         db,
@@ -80,7 +72,6 @@ pub fn build_state(db: PgPool, redis: Option<RedisPool>) -> AppState {
         rate:         RateLimiter::new(120, 60),
         dorotka_rate: RateLimiter::new(20, 60),
         http:         reqwest::Client::new(),
-        pin_hashes:   test_pin_hashes(),
     }
 }
 
@@ -101,7 +92,6 @@ pub fn build_state_with_dorotka_rate(
         rate:         RateLimiter::new(120, 60),
         dorotka_rate: RateLimiter::new(max_requests, window_secs),
         http:         reqwest::Client::new(),
-        pin_hashes:   test_pin_hashes(),
     }
 }
 
@@ -128,7 +118,6 @@ pub async fn start_redis() -> (ContainerAsync<Redis>, RedisPool) {
 // ── DB fixtures ───────────────────────────────────────────────────────────────
 
 pub struct Usr { pub id: UserId }
-pub struct Biz { pub id: i32   }
 
 pub async fn create_user(pool: &PgPool, email: &str) -> Usr {
     let (id,): (i32,) = sqlx::query_as(
@@ -150,44 +139,6 @@ pub async fn create_verified_user(pool: &PgPool, email: &str) -> Usr {
         .await
         .unwrap_or_else(|e| panic!("verify_user: {e}"));
     u
-}
-
-pub async fn create_business(pool: &PgPool, name: &str) -> Biz {
-    let (id,): (i32,) = sqlx::query_as(
-        "INSERT INTO businesses (name, type, address, city, launched_at)
-         VALUES ($1, 'cafe', '1 Test St', 'Montreal', now())
-         RETURNING id"
-    )
-    .bind(name)
-    .fetch_one(pool)
-    .await
-    .unwrap_or_else(|e| panic!("create_business({name}): {e}"));
-    Biz { id }
-}
-
-pub async fn create_location(pool: &PgPool, business_id: i32, name: &str) -> i32 {
-    let (id,): (i32,) = sqlx::query_as(
-        "INSERT INTO locations (business_id, name, address) VALUES ($1, $2, '1 Test St') RETURNING id"
-    )
-    .bind(business_id)
-    .bind(name)
-    .fetch_one(pool)
-    .await
-    .unwrap_or_else(|e| panic!("create_location: {e}"));
-    id
-}
-
-pub async fn seed_loyalty_config(pool: &PgPool, business_id: i32, steeps_per_reward: i32) {
-    sqlx::query(
-        "INSERT INTO business_loyalty_config (business_id, steeps_per_reward)
-         VALUES ($1, $2)
-         ON CONFLICT (business_id) DO UPDATE SET steeps_per_reward = EXCLUDED.steeps_per_reward"
-    )
-    .bind(business_id)
-    .bind(steeps_per_reward)
-    .execute(pool)
-    .await
-    .unwrap_or_else(|e| panic!("seed_loyalty_config: {e}"));
 }
 
 // ── JWT helpers ───────────────────────────────────────────────────────────────
@@ -227,117 +178,3 @@ pub fn expired_token(user_id: i32) -> String {
     .unwrap()
 }
 
-// ── Stripe webhook helpers ─────────────────────────────────────────────────────
-
-/// The test webhook secret — must match the stripe_webhook_secret in test_config().
-pub const STRIPE_WEBHOOK_SECRET: &str = "whsec_test_secret_for_handler_tests";
-
-/// Compute a valid `Stripe-Signature` header for a given payload.
-/// Mirrors Stripe's HMAC-SHA256 algorithm: `t=<unix>,v1=<hex(HMAC(t.payload))>`.
-pub fn sign_stripe_webhook(payload: &[u8]) -> String {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let signed = format!("{}.{}", timestamp, String::from_utf8_lossy(payload));
-    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, STRIPE_WEBHOOK_SECRET.as_bytes());
-    let sig = ring::hmac::sign(&key, signed.as_bytes());
-    format!("t={},v1={}", timestamp, hex::encode(sig.as_ref()))
-}
-
-// ── Device auth helpers ───────────────────────────────────────────────────────
-
-/// Generate a fresh k256 signing key (Ethereum private key) for device auth tests.
-pub fn device_signing_key() -> k256::ecdsa::SigningKey {
-    k256::ecdsa::SigningKey::random(&mut rand::thread_rng())
-}
-
-/// Derive the Ethereum address (0x-prefixed lowercase hex) from a signing key.
-pub fn device_eth_address(signing_key: &k256::ecdsa::SigningKey) -> String {
-    use sha3::{Digest, Keccak256};
-    let verifying_key = signing_key.verifying_key();
-    let encoded = verifying_key.to_encoded_point(false);
-    let pubkey_bytes = &encoded.as_bytes()[1..]; // strip 0x04 uncompressed prefix
-    let hash: [u8; 32] = Keccak256::digest(pubkey_bytes).into();
-    format!("0x{}", hex::encode(&hash[12..]))
-}
-
-/// Build the `Authorization: Fraise <address>:<signature>` header value
-/// for the current minute — matches the server's ±1 minute tolerance window.
-pub fn device_auth_header(signing_key: &k256::ecdsa::SigningKey) -> String {
-    use k256::ecdsa::signature::hazmat::PrehashSigner;
-    use sha3::{Digest, Keccak256};
-
-    let minute = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() / 60;
-
-    let message = minute.to_string();
-    let prefixed = format!("\x19Ethereum Signed Message:\n{}{}", message.len(), message);
-    let hash: [u8; 32] = Keccak256::digest(prefixed.as_bytes()).into();
-
-    let (sig, rid): (k256::ecdsa::Signature, k256::ecdsa::RecoveryId) =
-        signing_key.sign_prehash(&hash).expect("sign_prehash");
-
-    let mut sig_bytes = [0u8; 65];
-    sig_bytes[..64].copy_from_slice(&sig.to_bytes());
-    sig_bytes[64] = u8::from(rid) + 27;
-
-    format!("Fraise {}:{}", device_eth_address(signing_key), hex::encode(&sig_bytes))
-}
-
-/// Insert a device record in the DB.
-/// Creates a throwaway user as the device owner (devices require a user_id).
-pub async fn create_device(
-    pool:        &PgPool,
-    eth_address: &str,
-    role:        &str,
-    business_id: Option<i32>,
-) -> i32 {
-    let owner_email = format!("device_owner_{}@test.com", uuid::Uuid::new_v4().simple());
-    let (owner_id,): (i32,) = sqlx::query_as(
-        "INSERT INTO users (email) VALUES ($1) RETURNING id"
-    )
-    .bind(&owner_email)
-    .fetch_one(pool)
-    .await
-    .unwrap_or_else(|e| panic!("create_device owner: {e}"));
-
-    let (id,): (i32,) = sqlx::query_as(
-        "INSERT INTO devices (device_address, user_id, role, business_id)
-         VALUES ($1, $2, $3, $4) RETURNING id"
-    )
-    .bind(eth_address)
-    .bind(owner_id)
-    .bind(role)
-    .bind(business_id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or_else(|e| panic!("create_device: {e}"));
-    id
-}
-
-/// Insert a minimal order in 'ready' status for device_collect tests.
-/// Returns the nfc_token used for routing.
-pub async fn create_ready_order(
-    pool:        &PgPool,
-    location_id: i32,
-    business_id: i32,
-) -> String {
-    let nfc_token = uuid::Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO orders
-             (location_id, business_id, chocolate, finish, quantity,
-              total_cents, customer_email, status, nfc_token)
-         VALUES ($1, $2, 'guanaja_70', 'plain', 1, 1000, 'customer@test.com',
-                 'ready', $3)"
-    )
-    .bind(location_id)
-    .bind(business_id)
-    .bind(&nfc_token)
-    .execute(pool)
-    .await
-    .unwrap_or_else(|e| panic!("create_ready_order: {e}"));
-    nfc_token
-}

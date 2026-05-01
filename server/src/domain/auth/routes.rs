@@ -24,8 +24,6 @@ use crate::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/auth/apple", post(apple))
-        .route("/api/auth/operator", post(operator))
-        .route("/api/auth/staff", post(staff_login))
         .route("/api/auth/demo", post(demo))
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
@@ -34,7 +32,6 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/display-name", patch(display_name))
         .route("/api/auth/forgot-password", post(forgot_password))
         .route("/api/auth/reset-password", post(reset_password))
-        .route("/api/auth/claim-booking", post(claim_booking))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/verify-email", get(verify_email))
         .route("/api/auth/resend-verification", post(resend_verification))
@@ -52,25 +49,6 @@ async fn apple(
     let resp =
         service::apple_sign_in(&state, &body.identity_token, body.display_name.as_deref()).await?;
     Ok(Json(resp))
-}
-
-async fn operator(
-    State(state): State<AppState>,
-    AppJson(body): AppJson<OperatorAuthBody>,
-) -> AppResult<Json<AuthResponse>> {
-    Ok(Json(
-        service::operator_login(&state, &body.code, body.location_id).await?,
-    ))
-}
-
-async fn staff_login(
-    State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    AppJson(body): AppJson<StaffLoginBody>,
-) -> AppResult<Json<StaffAuthResponse>> {
-    Ok(Json(
-        service::staff_login(&state, &body.pin, body.location_id, Some(addr.ip())).await?,
-    ))
 }
 
 async fn demo(
@@ -117,10 +95,7 @@ async fn me(
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<MeResponse>> {
     let user = service::require_active(&state, user_id).await?;
-    Ok(Json(MeResponse {
-        user,
-        table_bookings: vec![], // populated once the `table` domain is ported
-    }))
+    Ok(Json(MeResponse { user }))
 }
 
 async fn push_token(
@@ -164,37 +139,6 @@ async fn reset_password(
 ) -> AppResult<Json<serde_json::Value>> {
     service::reset_password(&state, &body.token, &body.password).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-async fn claim_booking(
-    State(state): State<AppState>,
-    RequireUser(user_id): RequireUser,
-    AppJson(body): AppJson<ClaimBookingBody>,
-) -> AppResult<Json<serde_json::Value>> {
-    // Verify the submitted email matches the user's own registered email.
-    // Without this, any authenticated user can claim table_verified status
-    // by supplying another user's booking email.
-    let registered: Option<String> = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(AppError::Db)?
-        .flatten();
-
-    let matches = registered
-        .as_deref()
-        .map(|e| e.eq_ignore_ascii_case(&body.email))
-        .unwrap_or(false);
-
-    if !matches {
-        tracing::warn!(user_id = %user_id, submitted_email = %body.email, "claim_booking email mismatch — possible probing");
-        return Err(AppError::bad_request("email does not match your account"));
-    }
-
-    let verified = repository::claim_booking_email(&state.db, user_id, &body.email).await?;
-    Ok(Json(
-        serde_json::json!({ "ok": true, "verified": verified }),
-    ))
 }
 
 async fn logout(

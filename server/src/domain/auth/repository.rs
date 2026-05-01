@@ -80,76 +80,6 @@ pub async fn find_or_create_apple(
     Ok((user, is_new))
 }
 
-/// Auto-verify `table_verified` if the user's email matches a confirmed table booking.
-/// Runs fire-and-forget; failures are logged, not propagated.
-pub async fn maybe_verify_from_booking(pool: &PgPool, user_id: UserId, email: &str) {
-    let result = sqlx::query(
-        "UPDATE users
-         SET table_verified = true
-         WHERE id = $1
-           AND table_verified = false
-           AND EXISTS (
-               SELECT 1 FROM table_bookings
-               WHERE LOWER(email) = LOWER($2)
-                 AND status = 'confirmed'
-           )",
-    )
-    .bind(user_id)
-    .bind(email)
-    .execute(pool)
-    .await;
-
-    if let Err(e) = result {
-        tracing::warn!(user_id = %user_id, error = %e, "maybe_verify_from_booking failed");
-    }
-}
-
-// ── Operator / staff login ────────────────────────────────────────────────────
-
-/// Returns the operator user for a location, used by the legacy operator flow.
-pub async fn find_operator(pool: &PgPool, code: &str, location_id: i32) -> AppResult<Option<UserRow>> {
-    sqlx::query_as(&format!(
-        "SELECT {USER_COLS}
-         FROM users
-         WHERE id = (
-             SELECT u.id
-             FROM locations l
-             JOIN users u ON u.business_id = l.business_id AND u.is_shop = true
-             WHERE l.staff_pin = $1 AND l.id = $2
-             LIMIT 1
-         )"
-    ))
-    .bind(code)
-    .bind(location_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(AppError::Db)
-}
-
-/// Returns `(user_id, business_id)` for the staff member whose PIN matches
-/// the given location. Used by `POST /api/auth/staff` to issue a `StaffClaims`
-/// JWT scoped to the correct business.
-pub async fn find_staff_with_business(
-    pool:        &PgPool,
-    pin:         &str,
-    location_id: i32,
-) -> AppResult<Option<(UserId, i32)>> {
-    let row: Option<(UserId, i32)> = sqlx::query_as(
-        "SELECT u.id, l.business_id
-         FROM locations l
-         JOIN users u ON u.business_id = l.business_id AND u.is_shop = true
-         WHERE l.staff_pin = $1 AND l.id = $2
-         LIMIT 1"
-    )
-    .bind(pin)
-    .bind(location_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(AppError::Db)?;
-
-    Ok(row)
-}
-
 // ── Email + password auth ─────────────────────────────────────────────────────
 
 pub async fn create_email_user(
@@ -274,31 +204,6 @@ pub async fn consume_reset_token(pool: &PgPool, token: &str) -> AppResult<Option
     .await
     .map_err(AppError::Db)?;
     Ok(row.map(|(id,)| id))
-}
-
-// ── Table booking claim ───────────────────────────────────────────────────────
-
-pub async fn claim_booking_email(pool: &PgPool, user_id: UserId, email: &str) -> AppResult<bool> {
-    let matched: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM table_bookings
-             WHERE LOWER(email) = LOWER($1) AND status = 'confirmed'
-         )",
-    )
-    .bind(email)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Db)?;
-
-    if matched {
-        sqlx::query("UPDATE users SET table_verified = true WHERE id = $1")
-            .bind(user_id)
-            .execute(pool)
-            .await
-            .map_err(AppError::Db)?;
-    }
-
-    Ok(matched)
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

@@ -32,12 +32,6 @@ pub struct SocialAccess {
     pub social_time_bank_seconds: i32,
 }
 
-#[derive(Debug, Serialize)]
-pub struct UserStats {
-    pub nfc_connection_count: i64,
-    pub membership_tier:      Option<String>,
-}
-
 // ── Notifications ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]

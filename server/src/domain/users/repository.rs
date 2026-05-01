@@ -69,34 +69,6 @@ pub async fn social_access(pool: &PgPool, user_id: UserId) -> AppResult<Option<S
     .map_err(AppError::Db)
 }
 
-// ── Stats ─────────────────────────────────────────────────────────────────────
-
-pub async fn stats(pool: &PgPool, user_id: UserId) -> AppResult<UserStats> {
-    let nfc: i64 = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM nfc_connections
-         WHERE user_id = $1 OR connected_user_id = $1",
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Db)?;
-
-    let tier: Option<String> = sqlx::query_scalar::<_, String>(
-        "SELECT tier FROM memberships
-         WHERE user_id = $1 AND status = 'active'
-         LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(AppError::Db)?;
-
-    Ok(UserStats {
-        nfc_connection_count: nfc,
-        membership_tier:      tier,
-    })
-}
-
 // ── Notifications ─────────────────────────────────────────────────────────────
 
 pub async fn list_notifications(

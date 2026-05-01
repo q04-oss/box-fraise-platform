@@ -3,18 +3,7 @@ use std::sync::Arc;
 use axum::http::{header, HeaderName, HeaderValue};
 use axum::{middleware, Router};
 use deadpool_redis::Pool as RedisPool;
-use secrecy::ExposeSecret;
 use sqlx::PgPool;
-
-/// bcrypt hashes of the three operator PINs, computed once at startup.
-/// Storing hashes means the raw PIN values from `Config` are never read
-/// after `AppState::new()` returns — only the hashes travel with the state.
-pub struct PinHashes {
-    pub admin: String,
-    pub chocolatier: String,
-    pub supplier: String,
-}
-use tower_cookies::CookieManagerLayer;
 use tower_http::{
     compression::CompressionLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -55,22 +44,12 @@ pub struct AppState {
     pub dorotka_rate: SharedRateLimiter,
     /// Shared HTTP client — reuses the connection pool across all integration calls.
     pub http: reqwest::Client,
-    /// bcrypt hashes of operator PINs. Raw PIN values are not kept in AppState.
-    pub pin_hashes: Arc<PinHashes>,
 }
 
 impl AppState {
-    /// Borrow a Stripe client scoped to this request. Cheap — shares the
-    /// underlying reqwest connection pool.
-    pub fn stripe(&self) -> crate::integrations::stripe::StripeClient<'_> {
-        crate::integrations::stripe::StripeClient::new(
-            self.cfg.stripe_secret_key.expose_secret(),
-            &self.http,
-        )
-    }
-
     pub fn new(db: PgPool, cfg: Config) -> Self {
         let redis = cfg.redis_url.as_ref().and_then(|url| {
+            use secrecy::ExposeSecret;
             let url_str = url.expose_secret().to_owned();
             match deadpool_redis::Config::from_url(url_str)
                 .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -93,20 +72,6 @@ impl AppState {
             );
         }
 
-        // Hash PINs at startup (bcrypt cost 10, ~100 ms each).
-        // After this point the raw PIN strings in `cfg` are never read again.
-        let pin_hashes = {
-            let h = |secret: &secrecy::SecretString| -> String {
-                bcrypt::hash(secret.expose_secret(), 10)
-                    .expect("bcrypt hash of operator PIN failed — check PIN entropy")
-            };
-            Arc::new(PinHashes {
-                admin: h(&cfg.admin_pin),
-                chocolatier: h(&cfg.chocolatier_pin),
-                supplier: h(&cfg.supplier_pin),
-            })
-        };
-
         Self {
             db,
             cfg: Arc::new(cfg),
@@ -119,7 +84,6 @@ impl AppState {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("reqwest client is infallible"),
-            pin_hashes,
         }
     }
 }
@@ -133,20 +97,8 @@ pub fn build(state: AppState) -> Router {
         // ── Domain routes ─────────────────────────────────────────────────
         .merge(crate::domain::auth::routes::router())
         .merge(crate::domain::keys::routes::router())
-        .merge(crate::domain::devices::routes::router())
-        .merge(crate::domain::catalog::routes::router())
-        .merge(crate::domain::orders::routes::router())
         .merge(crate::domain::messages::routes::router())
         .merge(crate::domain::users::routes::router())
-        .merge(crate::domain::businesses::routes::router())
-        .merge(crate::domain::memberships::routes::router())
-        .merge(crate::domain::search::routes::router())
-        .merge(crate::domain::nfc::routes::router())
-        .merge(crate::domain::gifts::routes::router())
-        .merge(crate::domain::payments::routes::router())
-        .merge(crate::domain::popups::routes::router())
-        .merge(crate::domain::loyalty::routes::router())
-        .merge(crate::domain::staff_web::routes::router())
         .merge(crate::domain::dorotka::routes::router())
         // ── Security middleware (innermost — applied last, runs first) ─────
         .layer(middleware::from_fn_with_state(
@@ -173,7 +125,6 @@ pub fn build(state: AppState) -> Router {
         // ── Transport ─────────────────────────────────────────────────────
         .layer(CompressionLayer::new())
         // ── Security headers ──────────────────────────────────────────────
-        // Applied at the outermost layer so every response carries them.
         .layer(SetResponseHeaderLayer::overriding(
             header::STRICT_TRANSPORT_SECURITY,
             HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
@@ -196,30 +147,19 @@ pub fn build(state: AppState) -> Router {
         ))
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("permissions-policy"),
-            // camera=* allows the /staff/scan page to access the rear camera.
-            // All other sensitive APIs remain denied.
             HeaderValue::from_static("geolocation=(), microphone=()"),
         ))
-        // if_not_present so the scan page can set its own nonce-based CSP.
-        // All other HTML responses (login, error pages) get this base policy.
-        // unsafe-inline is intentionally absent — the scan page uses a per-request
-        // nonce instead; other pages have no inline scripts.
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static(
                 "default-src 'self'; \
-                 script-src 'self' https://cdn.jsdelivr.net; \
+                 script-src 'self'; \
                  style-src 'self' 'unsafe-inline'; \
                  img-src 'self' data: blob:; \
                  connect-src 'self'; \
-                 media-src 'self' blob:; \
                  frame-ancestors 'none'",
             ),
         ))
-        // ── Cookies ───────────────────────────────────────────────────────
-        // Must wrap the full router so Cookies extractor is available in
-        // all handlers, including the staff web app.
-        .layer(CookieManagerLayer::new())
         // ── State ─────────────────────────────────────────────────────────
         .with_state(state)
 }

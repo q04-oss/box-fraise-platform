@@ -1,17 +1,5 @@
 pub mod auth;
 pub mod dorotka;
-pub mod businesses;
-pub mod catalog;
-pub mod devices;
-pub mod gifts;
 pub mod keys;
-pub mod loyalty;
-pub mod memberships;
 pub mod messages;
-pub mod nfc;
-pub mod orders;
-pub mod payments;
-pub mod popups;
-pub mod search;
-pub mod staff_web;
 pub mod users;
