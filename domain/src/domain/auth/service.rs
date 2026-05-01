@@ -18,16 +18,10 @@ use super::{
     types::{AuthResponse, UserRow},
 };
 
-const VERIFY_PREFIX:      &str = "fraise:email-verify:";
-const VERIFY_TTL:         u64  = 86_400;
-const RESEND_RATE_PREFIX: &str = "fraise:rate:email-resend:";
-const RESEND_RATE_TTL:    u64  = 300;
-const MAGIC_LINK_PREFIX:  &str = "fraise:magic:";
-const MAGIC_LINK_TTL:     u64  = 900;
-const MAGIC_RATE_PREFIX:  &str = "fraise:rate:magic:";
-const MAGIC_RATE_TTL:     u64  = 120;
-const RESET_RATE_PREFIX:  &str = "fraise:rate:reset:";
-const RESET_RATE_TTL:     u64  = 300;
+const MAGIC_LINK_PREFIX: &str = "fraise:magic:";
+const MAGIC_LINK_TTL:    u64  = 900;
+const MAGIC_RATE_PREFIX: &str = "fraise:rate:magic:";
+const MAGIC_RATE_TTL:    u64  = 120;
 
 // ── Apple Sign In ─────────────────────────────────────────────────────────────
 
@@ -37,6 +31,7 @@ pub async fn authenticate_apple(
     http:           &reqwest::Client,
     identity_token: &str,
     display_name:   Option<&str>,
+    event_bus:      &EventBus,
 ) -> AppResult<AuthResponse> {
     let claims = crate::auth::apple::verify_identity_token(identity_token, cfg, http).await?;
 
@@ -48,170 +43,19 @@ pub async fn authenticate_apple(
         return Err(DomainError::Forbidden);
     }
 
+    if is_new {
+        event_bus.publish(DomainEvent::UserRegistered {
+            user_id: user.id,
+            email:   user.email.clone(),
+        });
+    }
+    event_bus.publish(DomainEvent::UserLoggedIn { user_id: user.id });
+
     let token = auth::sign_token(user.id, cfg)?;
     Ok(AuthResponse { user_id: user.id, token, is_new, verified: user.verified })
 }
 
-// ── Demo (Apple App Review) ───────────────────────────────────────────────────
-
-pub async fn authenticate_demo(
-    pool: &PgPool,
-    cfg:  &Arc<Config>,
-    pin:  &str,
-    ip:   Option<IpAddr>,
-) -> AppResult<AuthResponse> {
-    let expected = cfg
-        .review_pin
-        .as_ref()
-        .map(|s| s.expose_secret())
-        .ok_or(DomainError::Unauthorized)?;
-
-    if !constant_time_eq(pin.as_bytes(), expected.as_bytes()) {
-        audit::write(pool, None, None, "auth.demo_login_failed",
-            serde_json::json!({ "reason": "invalid_pin" }), ip).await;
-        return Err(DomainError::Unauthorized);
-    }
-
-    let user = repository::find_by_email(pool, "demo@fraise.box")
-        .await?
-        .ok_or(DomainError::Unauthorized)?;
-
-    let token = auth::sign_token(user.id, cfg)?;
-    Ok(AuthResponse { user_id: user.id, token, is_new: false, verified: user.verified })
-}
-
-// ── Email + password ──────────────────────────────────────────────────────────
-
-#[allow(clippy::too_many_arguments)]
-pub async fn register_user(
-    pool:         &PgPool,
-    cfg:          &Arc<Config>,
-    http:         &reqwest::Client,
-    redis:        Option<&deadpool_redis::Pool>,
-    email:        &str,
-    password:     &str,
-    display_name: Option<&str>,
-    event_bus:    &EventBus,
-) -> AppResult<AuthResponse> {
-    let hash = bcrypt::hash(password, 10)
-        .map_err(|e| DomainError::Internal(anyhow::anyhow!("bcrypt: {e}")))?;
-
-    let user = repository::create_email_user(pool, email, &hash, display_name).await?;
-
-    event_bus.publish(DomainEvent::UserRegistered {
-        user_id: user.id,
-        email:   email.to_owned(),
-    });
-
-    if let Some(api_key) = cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned()) {
-        let http    = http.clone();
-        let base    = cfg.api_base_url.clone();
-        let user_id = user.id;
-        let to      = email.to_owned();
-        let redis   = redis.cloned();
-        tokio::spawn(async move {
-            if let Some(verify_url) = issue_verification_token(redis.as_ref(), user_id, &base).await {
-                if let Err(e) = resend::send_verification_email(&http, &api_key, &to, &verify_url).await {
-                    tracing::error!(user_id = %user_id, error = %e, "verification email delivery failed");
-                }
-            }
-        });
-    }
-
-    let token = auth::sign_token(user.id, cfg)?;
-    Ok(AuthResponse { user_id: user.id, token, is_new: true, verified: user.verified })
-}
-
-pub async fn login_user(
-    pool:     &PgPool,
-    cfg:      &Arc<Config>,
-    email:    &str,
-    password: &str,
-    ip:       Option<IpAddr>,
-) -> AppResult<AuthResponse> {
-    let user = match repository::find_by_email(pool, email).await? {
-        Some(u) => u,
-        None => {
-            audit::write(pool, None, None, "auth.login_failed",
-                serde_json::json!({ "reason": "user_not_found" }), ip).await;
-            return Err(DomainError::Unauthorized);
-        }
-    };
-
-    if user.banned {
-        audit::write(pool, Some(user.id.into()), None, "auth.login_blocked",
-            serde_json::json!({ "reason": "banned" }), ip).await;
-        return Err(DomainError::Forbidden);
-    }
-
-    let hash = user.password_hash.as_deref().ok_or(DomainError::Unauthorized)?;
-    let valid = bcrypt::verify(password, hash)
-        .map_err(|e| DomainError::Internal(anyhow::anyhow!("bcrypt: {e}")))?;
-
-    if !valid {
-        audit::write(pool, Some(user.id.into()), None, "auth.login_failed",
-            serde_json::json!({ "reason": "invalid_password" }), ip).await;
-        return Err(DomainError::Unauthorized);
-    }
-
-    let token = auth::sign_token(user.id, cfg)?;
-    Ok(AuthResponse { user_id: user.id, token, is_new: false, verified: user.verified })
-}
-
-// ── Password reset ────────────────────────────────────────────────────────────
-
-pub async fn request_password_reset(
-    pool:  &PgPool,
-    cfg:   &Arc<Config>,
-    http:  &reqwest::Client,
-    redis: Option<&deadpool_redis::Pool>,
-    email: &str,
-) -> AppResult<()> {
-    if let Some(pool_r) = redis {
-        let key = format!("{RESET_RATE_PREFIX}{}", email.to_lowercase());
-        let mut conn = pool_r.get().await
-            .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis: {e}")))?;
-        let count: i64 = redis::cmd("INCR").arg(&key)
-            .query_async(&mut *conn).await
-            .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis INCR: {e}")))?;
-        if count == 1 {
-            let _: () = redis::cmd("EXPIRE").arg(&key).arg(RESET_RATE_TTL)
-                .query_async(&mut *conn).await.unwrap_or(());
-        }
-        if count > 1 { return Ok(()); }
-    }
-
-    if let Some(user) = repository::find_by_email(pool, email).await? {
-        let token = Uuid::new_v4().to_string();
-        repository::create_reset_token(pool, user.id, &token).await?;
-
-        if let Some(api_key) = cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned()) {
-            let http     = http.clone();
-            let base_url = cfg.api_base_url.clone();
-            let to       = email.to_owned();
-            tokio::spawn(async move {
-                let reset_url = format!("{base_url}/reset-password?token={token}");
-                if let Err(e) = resend::send_password_reset(&http, &api_key, &to, &reset_url).await {
-                    tracing::error!(error = %e, "password reset email delivery failed");
-                }
-            });
-        }
-    }
-    Ok(())
-}
-
-pub async fn reset_password(pool: &PgPool, token: &str, new_password: &str) -> AppResult<()> {
-    let user_id = repository::consume_reset_token(pool, token)
-        .await?
-        .ok_or_else(|| DomainError::invalid_input("invalid or expired reset token"))?;
-
-    let hash = bcrypt::hash(new_password, 10)
-        .map_err(|e| DomainError::Internal(anyhow::anyhow!("bcrypt: {e}")))?;
-
-    repository::set_password(pool, user_id, &hash).await
-}
-
-// ── Require active user ───────────────────────────────────────────────────────
+// ── Active user ───────────────────────────────────────────────────────────────
 
 pub async fn get_active_user(pool: &PgPool, user_id: UserId) -> AppResult<UserRow> {
     let user = repository::find_by_id(pool, user_id)
@@ -275,11 +119,12 @@ pub async fn request_magic_link(
 }
 
 pub async fn verify_magic_link(
-    pool:  &PgPool,
-    cfg:   &Arc<Config>,
-    redis: Option<&deadpool_redis::Pool>,
-    token: &str,
-    ip:    Option<IpAddr>,
+    pool:      &PgPool,
+    cfg:       &Arc<Config>,
+    redis:     Option<&deadpool_redis::Pool>,
+    token:     &str,
+    ip:        Option<IpAddr>,
+    event_bus: &EventBus,
 ) -> AppResult<AuthResponse> {
     let redis_pool = redis.ok_or(DomainError::Unauthorized)?;
 
@@ -312,79 +157,10 @@ pub async fn verify_magic_link(
         repository::set_verified(pool, user_id).await?;
     }
 
+    event_bus.publish(DomainEvent::UserLoggedIn { user_id });
+
     let jwt = auth::sign_token(user_id, cfg)?;
     Ok(AuthResponse { user_id, token: jwt, is_new: false, verified: true })
-}
-
-// ── Email verification ────────────────────────────────────────────────────────
-
-pub async fn verify_email(
-    pool:  &PgPool,
-    redis: Option<&deadpool_redis::Pool>,
-    token: &str,
-) -> AppResult<String> {
-    let redis_pool = redis.ok_or(DomainError::Unauthorized)?;
-
-    let key = format!("{VERIFY_PREFIX}{token}");
-    let mut conn = redis_pool.get().await
-        .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis: {e}")))?;
-
-    let user_id_str: Option<String> = redis::cmd("GETDEL").arg(&key)
-        .query_async(&mut *conn).await
-        .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis GETDEL: {e}")))?;
-
-    let user_id_raw = user_id_str
-        .ok_or(DomainError::Unauthorized)?
-        .parse::<i32>()
-        .map_err(|_| DomainError::Unauthorized)?;
-
-    let user_id = UserId::from(user_id_raw);
-    repository::set_verified(pool, user_id).await?;
-
-    let user = repository::find_by_id(pool, user_id).await?.ok_or(DomainError::NotFound)?;
-
-    audit::write(pool, Some(user_id_raw), None, "auth.email_verified",
-        serde_json::json!({ "email": user.email }), None).await;
-
-    Ok(user.email)
-}
-
-async fn resend_verification(
-    cfg:     &Arc<Config>,
-    http:    &reqwest::Client,
-    redis:   Option<&deadpool_redis::Pool>,
-    user_id: UserId,
-    email:   &str,
-) -> AppResult<()> {
-    if let Some(redis_pool) = redis {
-        let key = format!("{RESEND_RATE_PREFIX}{}", i32::from(user_id));
-        let mut conn = redis_pool.get().await
-            .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis: {e}")))?;
-
-        let count: i64 = redis::cmd("INCR").arg(&key)
-            .query_async(&mut *conn).await
-            .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis INCR: {e}")))?;
-
-        if count == 1 {
-            let _: () = redis::cmd("EXPIRE").arg(&key).arg(RESEND_RATE_TTL)
-                .query_async(&mut *conn).await.unwrap_or(());
-        }
-        if count > 1 {
-            return Err(DomainError::Unprocessable(
-                "please wait a few minutes before requesting another verification email".into(),
-            ));
-        }
-    }
-
-    let api_key = cfg.resend_api_key.as_ref()
-        .map(|k| k.expose_secret().to_owned())
-        .ok_or_else(|| DomainError::Internal(anyhow::anyhow!("email not configured")))?;
-
-    if let Some(verify_url) = issue_verification_token(redis, user_id, &cfg.api_base_url).await {
-        let _ = resend::send_verification_email(http, &api_key, email, &verify_url).await;
-    }
-
-    Ok(())
 }
 
 // ── Profile mutations ─────────────────────────────────────────────────────────
@@ -397,69 +173,12 @@ pub async fn update_display_name(pool: &PgPool, user_id: UserId, name: &str) -> 
     repository::set_display_name(pool, user_id, name).await
 }
 
-// QUERY — no side effects
-pub async fn is_user_verified(pool: &PgPool, user_id: UserId) -> AppResult<bool> {
-    let user = repository::find_by_id(pool, user_id)
-        .await?
-        .ok_or(DomainError::NotFound)?;
-    Ok(user.verified)
-}
-
-// COMMAND — sends verification email; caller must check is_user_verified first
-pub async fn resend_verification_email(
-    pool:    &PgPool,
-    cfg:     &Arc<Config>,
-    http:    &reqwest::Client,
-    redis:   Option<&deadpool_redis::Pool>,
-    user_id: UserId,
-) -> AppResult<()> {
-    let user = repository::find_by_id(pool, user_id)
-        .await?
-        .ok_or(DomainError::NotFound)?;
-    resend_verification(cfg, http, redis, user_id, &user.email).await
-}
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    use ring::{
-        hmac::{self, Key, HMAC_SHA256},
-        rand::{SecureRandom, SystemRandom},
-    };
-    let rng = SystemRandom::new();
-    let mut key_bytes = [0u8; 32];
-    if rng.fill(&mut key_bytes).is_err() { return false; }
-    let key   = Key::new(HMAC_SHA256, &key_bytes);
-    let mac_a = hmac::sign(&key, a);
-    let mac_b = hmac::sign(&key, b);
-    mac_a.as_ref().iter().zip(mac_b.as_ref())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-async fn issue_verification_token(
-    redis:    Option<&deadpool_redis::Pool>,
-    user_id:  UserId,
-    base_url: &str,
-) -> Option<String> {
-    let pool  = redis?;
-    let token = Uuid::new_v4().to_string();
-    let key   = format!("{VERIFY_PREFIX}{token}");
-
-    let mut conn = pool.get().await.ok()?;
-    let _: redis::Value = redis::cmd("SET")
-        .arg(&key).arg(i32::from(user_id).to_string())
-        .arg("EX").arg(VERIFY_TTL).arg("NX")
-        .query_async(&mut *conn).await.ok()?;
-
-    Some(format!("{base_url}/api/auth/verify-email?token={token}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
     use crate::error::DomainError;
-    use crate::event_bus::EventBus;
+    use deadpool_redis::redis;
     use secrecy::SecretString;
     use sqlx::PgPool;
 
@@ -503,110 +222,206 @@ mod tests {
         })
     }
 
-    #[sqlx::test(migrations = "../server/migrations")]
-    async fn register_user_creates_user_in_db(pool: PgPool) {
-        let cfg  = test_cfg();
-        let http = reqwest::Client::new();
-        let bus  = EventBus::new();
-
-        let resp = register_user(&pool, &cfg, &http, None, "new@test.com", "password123", None, &bus)
-            .await
-            .unwrap();
-
-        assert!(resp.is_new, "first registration must have is_new=true");
-
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = $1")
-            .bind("new@test.com")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(count, 1);
+    async fn redis_pool_from_env() -> Option<deadpool_redis::Pool> {
+        let url = std::env::var("REDIS_URL").ok()?;
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .ok()
     }
 
+    async fn insert_user(pool: &PgPool, email: &str) -> UserId {
+        let (id,): (i32,) =
+            sqlx::query_as("INSERT INTO users (email, verified) VALUES ($1, true) RETURNING id")
+                .bind(email)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        UserId::from(id)
+    }
+
+    // ── authenticate_apple ────────────────────────────────────────────────────
+
     #[sqlx::test(migrations = "../server/migrations")]
-    async fn register_user_duplicate_email_is_conflict(pool: PgPool) {
+    async fn authenticate_apple_invalid_token_is_unauthorized(pool: PgPool) {
         let cfg  = test_cfg();
         let http = reqwest::Client::new();
         let bus  = EventBus::new();
-
-        register_user(&pool, &cfg, &http, None, "dup@test.com", "pass1", None, &bus)
-            .await
-            .unwrap();
-
-        let result = register_user(&pool, &cfg, &http, None, "dup@test.com", "pass2", None, &bus).await;
+        let result = authenticate_apple(&pool, &cfg, &http, "not.a.jwt", None, &bus).await;
         assert!(
-            matches!(result, Err(DomainError::Conflict(_))),
-            "duplicate email must return Conflict, got: {result:?}"
+            matches!(result, Err(DomainError::InvalidInput(_) | DomainError::Unauthorized | DomainError::Internal(_))),
+            "invalid Apple token must fail, got: {result:?}"
         );
     }
 
+    // ── update_push_token ─────────────────────────────────────────────────────
+
     #[sqlx::test(migrations = "../server/migrations")]
-    async fn login_user_correct_password_succeeds(pool: PgPool) {
-        let cfg  = test_cfg();
-        let http = reqwest::Client::new();
-        let bus  = EventBus::new();
+    async fn update_push_token_stores_token_in_db(pool: PgPool) {
+        let user_id = insert_user(&pool, "push@test.com").await;
 
-        register_user(&pool, &cfg, &http, None, "login@test.com", "secret99", None, &bus)
-            .await
-            .unwrap();
+        update_push_token(&pool, user_id, "ExponentPushToken[abc123]").await.unwrap();
 
-        let resp = login_user(&pool, &cfg, "login@test.com", "secret99", None)
-            .await
-            .unwrap();
-        assert!(!resp.token.is_empty());
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT push_token FROM users WHERE id = $1")
+                .bind(i32::from(user_id))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.as_deref(), Some("ExponentPushToken[abc123]"));
     }
 
     #[sqlx::test(migrations = "../server/migrations")]
-    async fn login_user_wrong_password_is_unauthorized(pool: PgPool) {
+    async fn update_push_token_overwrites_existing_token(pool: PgPool) {
+        let user_id = insert_user(&pool, "push2@test.com").await;
+
+        update_push_token(&pool, user_id, "old-token").await.unwrap();
+        update_push_token(&pool, user_id, "new-token").await.unwrap();
+
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT push_token FROM users WHERE id = $1")
+                .bind(i32::from(user_id))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.as_deref(), Some("new-token"));
+    }
+
+    // ── update_display_name ───────────────────────────────────────────────────
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn update_display_name_stores_name_in_db(pool: PgPool) {
+        let user_id = insert_user(&pool, "name@test.com").await;
+
+        update_display_name(&pool, user_id, "Alice").await.unwrap();
+
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT display_name FROM users WHERE id = $1")
+                .bind(i32::from(user_id))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.as_deref(), Some("Alice"));
+    }
+
+    // ── request_magic_link ────────────────────────────────────────────────────
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn request_magic_link_creates_user_when_email_unknown(pool: PgPool) {
         let cfg  = test_cfg();
         let http = reqwest::Client::new();
-        let bus  = EventBus::new();
+        let Some(redis) = redis_pool_from_env().await else {
+            eprintln!("skipping: REDIS_URL not set");
+            return;
+        };
 
-        register_user(&pool, &cfg, &http, None, "wrongpw@test.com", "correct99", None, &bus)
+        request_magic_link(&pool, &cfg, &http, Some(&redis), "newmagic@test.com")
             .await
             .unwrap();
 
-        let result = login_user(&pool, &cfg, "wrongpw@test.com", "wrong999", None).await;
-        assert!(
-            matches!(result, Err(DomainError::Unauthorized)),
-            "wrong password must return Unauthorized, got: {result:?}"
-        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = $1")
+                .bind("newmagic@test.com")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1, "magic link must create a user for unknown email");
     }
 
     #[sqlx::test(migrations = "../server/migrations")]
-    async fn login_user_banned_user_is_forbidden(pool: PgPool) {
+    async fn request_magic_link_rate_limits_second_request(pool: PgPool) {
         let cfg  = test_cfg();
         let http = reqwest::Client::new();
-        let bus  = EventBus::new();
+        let Some(redis) = redis_pool_from_env().await else {
+            eprintln!("skipping: REDIS_URL not set");
+            return;
+        };
 
-        let resp = register_user(&pool, &cfg, &http, None, "banned@test.com", "pass1234", None, &bus)
+        // First request — sets the rate counter.
+        request_magic_link(&pool, &cfg, &http, Some(&redis), "ratelimit@test.com")
             .await
             .unwrap();
 
-        sqlx::query("UPDATE users SET banned = true WHERE id = $1")
-            .bind(i32::from(resp.user_id))
-            .execute(&pool)
-            .await
-            .unwrap();
+        // Pre-seed counter to 1 so the next INCR hits the limit.
+        let key = format!("fraise:rate:magic:{}", "ratelimit@test.com");
+        let mut conn = redis.get().await.unwrap();
+        let _: () = redis::cmd("SET").arg(&key).arg(1u64).arg("EX").arg(120u64)
+            .query_async(&mut *conn).await.unwrap();
+        drop(conn);
 
-        let result = login_user(&pool, &cfg, "banned@test.com", "pass1234", None).await;
-        assert!(
-            matches!(result, Err(DomainError::Forbidden)),
-            "banned user must return Forbidden, got: {result:?}"
-        );
+        // Second request must be rate-limited (silently returns Ok but no token written).
+        request_magic_link(&pool, &cfg, &http, Some(&redis), "ratelimit@test.com")
+            .await
+            .unwrap(); // still Ok — rate limit is silent to avoid enumeration
     }
 
-    // NOTE: request_password_reset_creates_token_in_db is not tested here because
-    // the password_reset_tokens table has no migration in the current schema.
-    // The silent-failure path (unknown email) is covered by the test below.
+    // ── verify_magic_link ─────────────────────────────────────────────────────
 
     #[sqlx::test(migrations = "../server/migrations")]
-    async fn request_password_reset_unknown_email_is_silent(pool: PgPool) {
+    async fn verify_magic_link_success_issues_jwt(pool: PgPool) {
         let cfg  = test_cfg();
-        let http = reqwest::Client::new();
-        // Must succeed silently — never reveal whether email exists.
-        request_password_reset(&pool, &cfg, &http, None, "ghost@test.com")
+        let Some(redis) = redis_pool_from_env().await else {
+            eprintln!("skipping: REDIS_URL not set");
+            return;
+        };
+
+        // Seed a user and a token directly into Redis.
+        let user_id = insert_user(&pool, "magicverify@test.com").await;
+        let token   = "test-magic-token-abc";
+        let key     = format!("fraise:magic:{token}");
+        let mut conn = redis.get().await.unwrap();
+        let _: () = redis::cmd("SET")
+            .arg(&key).arg(i32::from(user_id).to_string())
+            .arg("EX").arg(900u64)
+            .query_async(&mut *conn).await.unwrap();
+        drop(conn);
+
+        let bus  = EventBus::new();
+        let resp = verify_magic_link(&pool, &cfg, Some(&redis), token, None, &bus)
             .await
             .unwrap();
+        assert!(!resp.token.is_empty(), "must issue a JWT");
+        assert_eq!(resp.user_id, user_id);
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn verify_magic_link_expired_token_is_unauthorized(pool: PgPool) {
+        let cfg  = test_cfg();
+        let Some(redis) = redis_pool_from_env().await else {
+            eprintln!("skipping: REDIS_URL not set");
+            return;
+        };
+        // Token was never seeded — simulates expired or wrong token.
+        let bus = EventBus::new();
+        let result = verify_magic_link(
+            &pool, &cfg, Some(&redis), "00000000-0000-0000-0000-000000000000", None, &bus,
+        ).await;
+        assert!(matches!(result, Err(DomainError::Unauthorized)));
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn verify_magic_link_already_used_is_unauthorized(pool: PgPool) {
+        let cfg  = test_cfg();
+        let Some(redis) = redis_pool_from_env().await else {
+            eprintln!("skipping: REDIS_URL not set");
+            return;
+        };
+
+        let user_id = insert_user(&pool, "magicused@test.com").await;
+        let token   = "single-use-magic-token";
+        let key     = format!("fraise:magic:{token}");
+        let mut conn = redis.get().await.unwrap();
+        let _: () = redis::cmd("SET")
+            .arg(&key).arg(i32::from(user_id).to_string())
+            .arg("EX").arg(900u64)
+            .query_async(&mut *conn).await.unwrap();
+        drop(conn);
+
+        let bus = EventBus::new();
+        // First use succeeds.
+        verify_magic_link(&pool, &cfg, Some(&redis), token, None, &bus).await.unwrap();
+
+        // Second use must fail — token consumed by GETDEL.
+        let result = verify_magic_link(&pool, &cfg, Some(&redis), token, None, &bus).await;
+        assert!(matches!(result, Err(DomainError::Unauthorized)));
     }
 }

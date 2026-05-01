@@ -2,7 +2,7 @@ use rand::Rng;
 use sqlx::PgPool;
 
 use crate::{error::{DomainError, AppResult}, types::UserId};
-use super::types::{DeviceRow, UserRow, USER_COLS};
+use super::types::{UserRow, USER_COLS};
 
 // ── Lookups ───────────────────────────────────────────────────────────────────
 
@@ -80,36 +80,6 @@ pub async fn find_or_create_apple(
     Ok((user, is_new))
 }
 
-// ── Email + password auth ─────────────────────────────────────────────────────
-
-pub async fn create_email_user(
-    pool:          &PgPool,
-    email:         &str,
-    password_hash: &str,
-    display_name:  Option<&str>,
-) -> AppResult<UserRow> {
-    let user_code = generate_unique_code(pool).await?;
-
-    // INSERT ... ON CONFLICT DO NOTHING followed by a SELECT handles the rare
-    // race where two requests create the same email simultaneously.
-    let row: Option<UserRow> = sqlx::query_as(&format!(
-        "INSERT INTO users (email, password_hash, display_name, user_code)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (email) DO NOTHING
-         RETURNING {USER_COLS}"
-    ))
-    .bind(email)
-    .bind(password_hash)
-    .bind(display_name)
-    .bind(&user_code)
-    .fetch_optional(pool)
-    .await
-    .map_err(DomainError::Db)?;
-
-    // If ON CONFLICT fired, the email already exists — return Conflict.
-    row.ok_or_else(|| DomainError::conflict("email already in use"))
-}
-
 pub async fn find_or_create_magic_link_user(
     pool:  &PgPool,
     email: &str,
@@ -142,16 +112,6 @@ pub async fn find_or_create_magic_link_user(
     }
 }
 
-pub async fn set_password(pool: &PgPool, user_id: UserId, password_hash: &str) -> AppResult<()> {
-    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
-        .bind(password_hash)
-        .bind(user_id)
-        .execute(pool)
-        .await
-        .map_err(DomainError::Db)?;
-    Ok(())
-}
-
 // ── Profile mutations ─────────────────────────────────────────────────────────
 
 pub async fn set_push_token(pool: &PgPool, user_id: UserId, token: &str) -> AppResult<()> {
@@ -172,58 +132,6 @@ pub async fn set_display_name(pool: &PgPool, user_id: UserId, name: &str) -> App
         .await
         .map_err(DomainError::Db)?;
     Ok(())
-}
-
-// ── Password reset tokens ─────────────────────────────────────────────────────
-
-pub async fn create_reset_token(pool: &PgPool, user_id: UserId, token: &str) -> AppResult<()> {
-    let expires_at = chrono::Utc::now().naive_utc() + chrono::Duration::hours(1);
-    sqlx::query(
-        "INSERT INTO password_reset_tokens (user_id, token, expires_at)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (user_id) DO UPDATE
-         SET token = EXCLUDED.token, expires_at = EXCLUDED.expires_at",
-    )
-    .bind(user_id)
-    .bind(token)
-    .bind(expires_at)
-    .execute(pool)
-    .await
-    .map_err(DomainError::Db)?;
-    Ok(())
-}
-
-pub async fn consume_reset_token(pool: &PgPool, token: &str) -> AppResult<Option<UserId>> {
-    let row: Option<(UserId,)> = sqlx::query_as(
-        "DELETE FROM password_reset_tokens
-         WHERE token = $1 AND expires_at > NOW()
-         RETURNING user_id",
-    )
-    .bind(token)
-    .fetch_optional(pool)
-    .await
-    .map_err(DomainError::Db)?;
-    Ok(row.map(|(id,)| id))
-}
-
-// ── Device auth ───────────────────────────────────────────────────────────────
-
-/// Look up a device by its Ethereum address (case-insensitive).
-/// Used by the RequireDevice HTTP extractor — the SQL lives here, not there.
-pub async fn get_device_by_address(
-    pool:    &PgPool,
-    address: &str,
-) -> AppResult<Option<DeviceRow>> {
-    sqlx::query_as(
-        "SELECT id, role, user_id, business_id \
-         FROM devices \
-         WHERE LOWER(device_address) = LOWER($1) \
-         LIMIT 1",
-    )
-    .bind(address)
-    .fetch_optional(pool)
-    .await
-    .map_err(DomainError::Db)
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -275,15 +183,6 @@ pub async fn set_verified(pool: &PgPool, user_id: UserId) -> AppResult<()> {
         .await
         .map_err(DomainError::Db)?;
     Ok(())
-}
-
-pub async fn get_verified(pool: &PgPool, user_id: UserId) -> AppResult<bool> {
-    let (verified,): (bool,) = sqlx::query_as("SELECT verified FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_one(pool)
-        .await
-        .map_err(DomainError::Db)?;
-    Ok(verified)
 }
 
 /// Excludes visually ambiguous characters (0/O, 1/I/L).

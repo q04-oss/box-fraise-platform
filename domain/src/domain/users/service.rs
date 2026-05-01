@@ -6,7 +6,7 @@ use crate::{
 };
 use super::{
     repository,
-    types::{NotificationRow, PublicProfile, SocialAccess, UserSearchResult},
+    types::{PublicProfile, UserSearchResult},
 };
 
 pub async fn search_users(pool: &PgPool, query: &str) -> AppResult<Vec<UserSearchResult>> {
@@ -17,31 +17,6 @@ pub async fn get_public_profile(pool: &PgPool, user_id: UserId) -> AppResult<Pub
     repository::public_profile(pool, user_id)
         .await?
         .ok_or(DomainError::NotFound)
-}
-
-pub async fn get_social_access(pool: &PgPool, user_id: UserId) -> AppResult<SocialAccess> {
-    repository::social_access(pool, user_id)
-        .await?
-        .ok_or(DomainError::NotFound)
-}
-
-pub async fn list_notifications(
-    pool:    &PgPool,
-    user_id: UserId,
-) -> AppResult<Vec<NotificationRow>> {
-    repository::list_notifications(pool, user_id).await
-}
-
-pub async fn mark_notification_read(
-    pool:     &PgPool,
-    user_id:  UserId,
-    notif_id: i32,
-) -> AppResult<()> {
-    repository::mark_read(pool, user_id, notif_id).await
-}
-
-pub async fn mark_all_notifications_read(pool: &PgPool, user_id: UserId) -> AppResult<()> {
-    repository::mark_all_read(pool, user_id).await
 }
 
 #[cfg(test)]
@@ -76,10 +51,7 @@ mod tests {
     #[sqlx::test(migrations = "../server/migrations")]
     async fn get_public_profile_returns_not_found_for_unknown_user(pool: PgPool) {
         let result = get_public_profile(&pool, UserId::from(99999)).await;
-        assert!(
-            matches!(result, Err(DomainError::NotFound)),
-            "unknown user must return NotFound, got: {result:?}"
-        );
+        assert!(matches!(result, Err(DomainError::NotFound)));
     }
 
     #[sqlx::test(migrations = "../server/migrations")]
@@ -90,15 +62,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-
         let result = get_public_profile(&pool, user_id).await;
-        assert!(
-            matches!(result, Err(DomainError::NotFound)),
-            "banned user must not appear in public profile, got: {result:?}"
-        );
+        assert!(matches!(result, Err(DomainError::NotFound)));
     }
-
-    // NOTE: list_notifications is not tested here because the notifications
-    // table was dropped in migration 029. The route and repository remain
-    // for API compatibility but back a dropped table.
 }

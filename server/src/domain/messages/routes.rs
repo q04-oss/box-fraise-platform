@@ -53,5 +53,5 @@ async fn send(
     RequireUser(user_id): RequireUser,
     AppJson(body): AppJson<SendMessageBody>,
 ) -> AppResult<Json<MessageRow>> {
-    Ok(Json(service::send_message(&state.db, &state.http, user_id, body).await?))
+    Ok(Json(service::send_message(&state.db, &state.http, user_id, body, &state.event_bus).await?))
 }

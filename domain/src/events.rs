@@ -5,8 +5,6 @@ pub enum DomainEvent {
     // ── Auth ──────────────────────────────────────────────────────────────────
     UserRegistered { user_id: UserId, email: String },
     UserLoggedIn   { user_id: UserId },
-    EmailVerified  { user_id: UserId },
-    PasswordReset  { user_id: UserId },
 
     // ── Messages ──────────────────────────────────────────────────────────────
     MessageSent {

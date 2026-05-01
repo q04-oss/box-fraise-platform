@@ -1,11 +1,8 @@
-use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
 use crate::types::UserId;
 
 // ── Public-safe user projection ───────────────────────────────────────────────
-// Never include: password_hash, push_token, stripe_*, ban_reason, or any
-// internal flag not meant for external consumption.
 
 #[derive(Debug, Serialize)]
 pub struct PublicProfile {
@@ -26,38 +23,9 @@ pub struct UserSearchResult {
     pub user_code:    Option<String>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
-pub struct SocialAccess {
-    pub social_tier:           Option<String>,
-    pub social_time_bank_seconds: i32,
-}
-
-// ── Notifications ─────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
-pub struct NotificationRow {
-    pub id:         i32,
-    pub user_id:    UserId,
-    #[sqlx(rename = "type")]
-    pub notif_type: String,
-    pub title:      Option<String>,
-    pub body:       String,
-    pub read:       bool,
-    pub data:       Option<serde_json::Value>,
-    pub created_at: NaiveDateTime,
-}
-
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
     pub q: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct NotificationPrefsBody {
-    pub order_updates: Option<bool>,
-    pub social:        Option<bool>,
-    pub popup_updates: Option<bool>,
-    pub marketing:     Option<bool>,
 }

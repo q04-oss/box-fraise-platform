@@ -34,51 +34,12 @@ pub const USER_COLS: &str =
      social_time_bank_seconds, identity_verified, \
      portrait_url, password_hash, created_at";
 
-// ── Device row ────────────────────────────────────────────────────────────────
-
-#[derive(Debug, sqlx::FromRow)]
-pub struct DeviceRow {
-    pub id:          i32,
-    pub role:        String,
-    pub user_id:     Option<crate::types::UserId>,
-    pub business_id: Option<i32>,
-}
-
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct AppleAuthBody {
     pub identity_token: String,
     pub display_name:   Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DemoAuthBody {
-    pub pin: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RegisterBody {
-    pub email:        String,
-    pub password:     String,
-    pub display_name: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct LoginBody {
-    pub email:    String,
-    pub password: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ForgotPasswordBody {
-    pub email: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ResetPasswordBody {
-    pub token:    String,
-    pub password: String,
 }
 
 #[derive(Debug, Deserialize)]

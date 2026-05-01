@@ -1,6 +1,7 @@
 pub mod app;
 pub mod domain;
 pub mod error;
+pub mod events;
 pub mod http;
 
 // Re-export shared infrastructure from the domain crate so that:
@@ -46,14 +47,16 @@ pub async fn run() -> anyhow::Result<()> {
     let state  = app::AppState::new(pool, cfg);
 
     // Subscribe before building the router so no early events are missed.
-    // This consumer logs every event at DEBUG — it proves the bus end-to-end
-    // without requiring a real cross-domain consumer yet.
     let mut event_rx = state.event_bus.subscribe();
+    let event_pool   = state.db.clone();
+    let event_http   = state.http.clone();
     tokio::spawn(async move {
         use tokio::sync::broadcast::error::RecvError;
         loop {
             match event_rx.recv().await {
-                Ok(event) => tracing::debug!(?event, "domain event"),
+                Ok(event) => {
+                    events::handle(&event_pool, &event_http, event).await;
+                }
                 Err(RecvError::Lagged(n)) => {
                     tracing::warn!(dropped = n, "event bus consumer lagged — events dropped");
                 }

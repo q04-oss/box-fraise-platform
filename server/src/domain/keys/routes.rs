@@ -37,7 +37,7 @@ async fn register(
     RequireUser(user_id): RequireUser,
     AppJson(body): AppJson<RegisterKeysBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    service::register_keys(&state.db, user_id, body).await?;
+    service::register_keys(&state.db, user_id, body, &state.event_bus).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -68,7 +68,7 @@ async fn bundle_by_id(
     RequireUser(_): RequireUser,
     Path(target_id): Path<UserId>,
 ) -> AppResult<Json<KeyBundleResponse>> {
-    Ok(Json(service::claim_key_bundle(&state.db, target_id).await?))
+    Ok(Json(service::claim_key_bundle(&state.db, target_id, &state.event_bus).await?))
 }
 
 async fn bundle_by_code(
@@ -76,5 +76,5 @@ async fn bundle_by_code(
     RequireUser(_): RequireUser,
     Path(code): Path<String>,
 ) -> AppResult<Json<KeyBundleResponse>> {
-    Ok(Json(service::claim_key_bundle_by_code(&state.db, &code).await?))
+    Ok(Json(service::claim_key_bundle_by_code(&state.db, &code, &state.event_bus).await?))
 }

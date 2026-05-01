@@ -1,7 +1,7 @@
 use axum::{
     extract::{ConnectInfo, Query, State},
     http::HeaderMap,
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{get, patch, post},
     Json, Router,
 };
@@ -23,21 +23,14 @@ use crate::{
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/auth/apple",               post(apple))
-        .route("/api/auth/demo",                post(demo))
-        .route("/api/auth/register",            post(register))
-        .route("/api/auth/login",               post(login))
-        .route("/api/auth/me",                  get(me))
-        .route("/api/auth/push-token",          patch(push_token))
-        .route("/api/auth/display-name",        patch(display_name))
-        .route("/api/auth/forgot-password",     post(forgot_password))
-        .route("/api/auth/reset-password",      post(reset_password))
-        .route("/api/auth/logout",              post(logout))
-        .route("/api/auth/verify-email",        get(verify_email))
-        .route("/api/auth/resend-verification", post(resend_verification))
-        .route("/api/auth/magic-link",          post(magic_link_request))
-        .route("/api/auth/magic-link/open",     get(magic_link_open))
-        .route("/api/auth/magic-link/verify",   post(magic_link_verify))
+        .route("/api/auth/apple",             post(apple))
+        .route("/api/auth/me",                get(me))
+        .route("/api/auth/push-token",        patch(push_token))
+        .route("/api/auth/display-name",      patch(display_name))
+        .route("/api/auth/logout",            post(logout))
+        .route("/api/auth/magic-link",        post(magic_link_request))
+        .route("/api/auth/magic-link/open",   get(magic_link_open))
+        .route("/api/auth/magic-link/verify", post(magic_link_verify))
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -49,39 +42,9 @@ async fn apple(
     let resp = service::authenticate_apple(
         &state.db, &state.cfg, &state.http,
         &body.identity_token, body.display_name.as_deref(),
+        &state.event_bus,
     ).await?;
     Ok(Json(resp))
-}
-
-async fn demo(
-    State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    AppJson(body): AppJson<DemoAuthBody>,
-) -> AppResult<Json<AuthResponse>> {
-    let ip = client_ip(&headers, Some(&ConnectInfo(addr)));
-    Ok(Json(service::authenticate_demo(&state.db, &state.cfg, &body.pin, Some(ip)).await?))
-}
-
-async fn register(
-    State(state): State<AppState>,
-    AppJson(body): AppJson<RegisterBody>,
-) -> AppResult<Json<AuthResponse>> {
-    Ok(Json(service::register_user(
-        &state.db, &state.cfg, &state.http, state.redis.as_ref(),
-        &body.email, &body.password, body.display_name.as_deref(),
-        &state.event_bus,
-    ).await?))
-}
-
-async fn login(
-    State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    AppJson(body): AppJson<LoginBody>,
-) -> AppResult<Json<AuthResponse>> {
-    let ip = client_ip(&headers, Some(&ConnectInfo(addr)));
-    Ok(Json(service::login_user(&state.db, &state.cfg, &body.email, &body.password, Some(ip)).await?))
 }
 
 async fn me(
@@ -106,28 +69,12 @@ async fn display_name(
     RequireUser(user_id): RequireUser,
     AppJson(body): AppJson<DisplayNameBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let trimmed     = body.display_name.trim();
-    let char_count  = trimmed.chars().count();
+    let trimmed    = body.display_name.trim();
+    let char_count = trimmed.chars().count();
     if char_count == 0 || char_count > 50 {
         return Err(AppError::bad_request("display_name must be 1–50 characters"));
     }
     service::update_display_name(&state.db, user_id, trimmed).await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-async fn forgot_password(
-    State(state): State<AppState>,
-    AppJson(body): AppJson<ForgotPasswordBody>,
-) -> AppResult<Json<serde_json::Value>> {
-    service::request_password_reset(&state.db, &state.cfg, &state.http, state.redis.as_ref(), &body.email).await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-async fn reset_password(
-    State(state): State<AppState>,
-    AppJson(body): AppJson<ResetPasswordBody>,
-) -> AppResult<Json<serde_json::Value>> {
-    service::reset_password(&state.db, &body.token, &body.password).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -139,37 +86,13 @@ async fn logout(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-#[derive(Deserialize)]
-struct VerifyEmailParams { token: String }
-
-async fn verify_email(
-    State(state): State<AppState>,
-    Query(params): Query<VerifyEmailParams>,
-) -> Response {
-    match service::verify_email(&state.db, state.redis.as_ref(), &params.token).await {
-        Ok(email) => Html(verify_page(true, &email, "")).into_response(),
-        Err(_)    => Html(verify_page(false, "", "this link has expired or already been used")).into_response(),
-    }
-}
-
-async fn resend_verification(
-    State(state): State<AppState>,
-    RequireUser(uid): RequireUser,
-) -> AppResult<Json<serde_json::Value>> {
-    let already_verified = service::is_user_verified(&state.db, uid).await?;
-    if !already_verified {
-        service::resend_verification_email(
-            &state.db, &state.cfg, &state.http, state.redis.as_ref(), uid,
-        ).await?;
-    }
-    Ok(Json(serde_json::json!({ "ok": true, "already_verified": already_verified })))
-}
-
 async fn magic_link_request(
     State(state): State<AppState>,
     AppJson(body): AppJson<MagicLinkBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    service::request_magic_link(&state.db, &state.cfg, &state.http, state.redis.as_ref(), &body.email).await?;
+    service::request_magic_link(
+        &state.db, &state.cfg, &state.http, state.redis.as_ref(), &body.email,
+    ).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -187,44 +110,10 @@ async fn magic_link_verify(
     AppJson(body): AppJson<MagicLinkVerifyBody>,
 ) -> AppResult<Json<AuthResponse>> {
     let ip = client_ip(&headers, Some(&ConnectInfo(addr)));
-    Ok(Json(service::verify_magic_link(&state.db, &state.cfg, state.redis.as_ref(), &body.token, Some(ip)).await?))
-}
-
-fn verify_page(ok: bool, email: &str, error: &str) -> String {
-    let (icon, heading, detail) = if ok {
-        ("✓", "email verified",
-         format!("<p>{email}</p><p>you can now earn loyalty steeps.</p>"))
-    } else {
-        ("✗", "verification failed",
-         format!("<p>{error}</p><p>open the app to request a new link.</p>"))
-    };
-    format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>box fraise · {heading}</title>
-<style>
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-     background:#F7F5F2;display:flex;align-items:center;justify-content:center;
-     min-height:100vh}}
-.card{{background:#fff;border-radius:20px;padding:48px 32px;max-width:360px;
-      width:90%;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.07)}}
-.icon{{font-size:3rem;margin-bottom:12px;color:{icon_color}}}
-h1{{font-size:1.3rem;font-weight:600;color:#1C1C1E;margin-bottom:16px}}
-p{{font-size:.875rem;color:#8E8E93;line-height:1.5;margin-bottom:8px}}
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="icon">{icon}</div>
-  <h1>{heading}</h1>
-  {detail}
-</div>
-</body>
-</html>"#,
-        icon_color = if ok { "#4CAF50" } else { "#C0392B" }
-    )
+    Ok(Json(
+        service::verify_magic_link(
+            &state.db, &state.cfg, state.redis.as_ref(), &body.token, Some(ip),
+            &state.event_bus,
+        ).await?
+    ))
 }

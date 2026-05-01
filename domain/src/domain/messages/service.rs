@@ -2,6 +2,8 @@ use sqlx::PgPool;
 
 use crate::{
     error::{DomainError, AppResult},
+    event_bus::EventBus,
+    events::DomainEvent,
     types::{MessageId, UserId},
 };
 use super::{
@@ -38,10 +40,11 @@ pub async fn get_thread(
 /// notification to the recipient. The push is best-effort — failure is
 /// logged but never blocks the response.
 pub async fn send_message(
-    pool:    &PgPool,
-    http:    &reqwest::Client,
-    user_id: UserId,
-    body:    SendMessageBody,
+    pool:      &PgPool,
+    http:      &reqwest::Client,
+    user_id:   UserId,
+    body:      SendMessageBody,
+    event_bus: &EventBus,
 ) -> AppResult<MessageRow> {
     if !repository::can_message(pool, user_id, body.recipient_id).await? {
         return Err(DomainError::Forbidden);
@@ -58,6 +61,12 @@ pub async fn send_message(
         body.one_time_pre_key_id,
     )
     .await?;
+
+    event_bus.publish(DomainEvent::MessageSent {
+        message_id:   message.id,
+        sender_id:    user_id,
+        recipient_id: body.recipient_id,
+    });
 
     // Fire-and-forget — push failure must never fail the message send.
     let db   = pool.clone();
@@ -88,7 +97,7 @@ pub async fn send_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::UserId;
+    use crate::{event_bus::EventBus, types::UserId};
     use sqlx::PgPool;
 
     async fn verified_user(pool: &PgPool, email: &str) -> UserId {
@@ -118,8 +127,9 @@ mod tests {
         let alice = verified_user(&pool, "alice@test.com").await;
         let bob   = verified_user(&pool, "bob@test.com").await;
         let http  = reqwest::Client::new();
+        let bus   = EventBus::new();
 
-        let msg = send_message(&pool, &http, alice, test_body(bob, "hello bob")).await.unwrap();
+        let msg = send_message(&pool, &http, alice, test_body(bob, "hello bob"), &bus).await.unwrap();
         assert_eq!(msg.sender_id, alice);
         assert_eq!(msg.recipient_id, bob);
         assert_eq!(msg.body, "hello bob");
@@ -139,8 +149,9 @@ mod tests {
         };
         let bob  = verified_user(&pool, "bob@test.com").await;
         let http = reqwest::Client::new();
+        let bus  = EventBus::new();
 
-        let result = send_message(&pool, &http, alice, test_body(bob, "hi")).await;
+        let result = send_message(&pool, &http, alice, test_body(bob, "hi"), &bus).await;
         assert!(
             matches!(result, Err(DomainError::Forbidden)),
             "unverified sender must be Forbidden, got: {result:?}"
@@ -152,10 +163,11 @@ mod tests {
         let alice = verified_user(&pool, "alice@test.com").await;
         let bob   = verified_user(&pool, "bob@test.com").await;
         let http  = reqwest::Client::new();
+        let bus   = EventBus::new();
 
-        send_message(&pool, &http, alice, test_body(bob, "first")).await.unwrap();
-        send_message(&pool, &http, alice, test_body(bob, "second")).await.unwrap();
-        send_message(&pool, &http, alice, test_body(bob, "third")).await.unwrap();
+        send_message(&pool, &http, alice, test_body(bob, "first"),  &bus).await.unwrap();
+        send_message(&pool, &http, alice, test_body(bob, "second"), &bus).await.unwrap();
+        send_message(&pool, &http, alice, test_body(bob, "third"),  &bus).await.unwrap();
 
         let thread = get_thread(&pool, alice, bob, None, 50).await.unwrap();
         assert_eq!(thread.len(), 3);
@@ -170,5 +182,49 @@ mod tests {
 
         let thread = get_thread(&pool, alice, bob, None, 50).await.unwrap();
         assert!(thread.is_empty());
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn get_thread_pagination_with_before_id(pool: PgPool) {
+        let alice = verified_user(&pool, "alice@test.com").await;
+        let bob   = verified_user(&pool, "bob@test.com").await;
+        let http  = reqwest::Client::new();
+        let bus   = EventBus::new();
+
+        let m1  = send_message(&pool, &http, alice, test_body(bob, "one"),   &bus).await.unwrap();
+        let m2  = send_message(&pool, &http, alice, test_body(bob, "two"),   &bus).await.unwrap();
+        let _m3 = send_message(&pool, &http, alice, test_body(bob, "three"), &bus).await.unwrap();
+
+        // before_id = m2 should only return m1
+        let page = get_thread(&pool, alice, bob, Some(m2.id), 50).await.unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].id, m1.id);
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn archive_conversation_hides_from_list(pool: PgPool) {
+        let alice = verified_user(&pool, "alice@test.com").await;
+        let bob   = verified_user(&pool, "bob@test.com").await;
+        let http  = reqwest::Client::new();
+        let bus   = EventBus::new();
+
+        send_message(&pool, &http, alice, test_body(bob, "hi"), &bus).await.unwrap();
+
+        // Before archive: alice sees the conversation.
+        let before = list_conversations(&pool, alice).await.unwrap();
+        assert_eq!(before.len(), 1);
+
+        archive_conversation(&pool, alice, bob).await.unwrap();
+
+        // After archive: conversation no longer appears for alice.
+        let after = list_conversations(&pool, alice).await.unwrap();
+        assert!(after.is_empty(), "archived conversation must not appear in list");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn list_conversations_returns_empty_for_new_user(pool: PgPool) {
+        let alice = verified_user(&pool, "alice@test.com").await;
+        let convs = list_conversations(&pool, alice).await.unwrap();
+        assert!(convs.is_empty());
     }
 }

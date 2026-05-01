@@ -1,12 +1,11 @@
-/// Axum request extractors for authenticated callers.
-///
-/// `RequireUser`   — any valid, non-revoked user JWT. Yields the user's ID.
-/// `RequireClaims` — same, but yields the full Claims (needed for logout).
-/// `OptionalAuth`  — yields Some(user_id) if a valid token is present, None otherwise.
-/// `RequireStaff`  — valid StaffClaims JWT signed with STAFF_JWT_SECRET. Yields
-///                   (user_id, business_id). A regular user JWT is rejected at the
-///                   cryptographic level before any claim check runs.
-/// `RequireDevice` — Cardputer EIP-191 device auth. Yields DeviceInfo.
+//! Axum request extractors for authenticated callers.
+//!
+//! `RequireUser`   — any valid, non-revoked user JWT. Yields the user's ID.
+//! `RequireClaims` — same, but yields the full Claims (needed for logout).
+//! `OptionalAuth`  — yields Some(user_id) if a valid token is present, None otherwise.
+//! `RequireStaff`  — valid StaffClaims JWT signed with STAFF_JWT_SECRET. Yields
+//!                   (user_id, business_id). A regular user JWT is rejected at the
+//!                   cryptographic level before any claim check runs.
 use axum::{
     extract::{FromRef, FromRequestParts},
     http::request::Parts,
@@ -17,13 +16,10 @@ use axum_extra::{
     TypedHeader,
 };
 
-
 use crate::{
     app::AppState,
-    auth::device::{parse_auth_header, verify_signature},
     auth::staff::{self as staff_auth, StaffClaims},
     auth::{self, Claims},
-    domain::auth::repository as auth_repository,
     error::AppError,
     types::UserId,
 };
@@ -93,61 +89,9 @@ where
     }
 }
 
-// ── RequireDevice ─────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct DeviceInfo {
-    pub id: i32,
-    pub address: String,
-    pub role: String,
-    pub user_id: Option<UserId>,
-    pub business_id: Option<i32>,
-}
-
-pub struct RequireDevice(pub DeviceInfo);
-
-impl<S> FromRequestParts<S> for RequireDevice
-where
-    AppState: FromRef<S>,
-    S: Send + Sync,
-{
-    type Rejection = AppError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, AppError> {
-        let app = AppState::from_ref(state);
-
-        let auth_value = parts
-            .headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .ok_or(AppError::Unauthorized)?;
-
-        let header = parse_auth_header(auth_value).ok_or(AppError::Unauthorized)?;
-
-        let recovered = verify_signature(&header)?;
-
-        let device = auth_repository::get_device_by_address(&app.db, &recovered)
-            .await
-            .map_err(AppError::from)?
-            .ok_or(AppError::Unauthorized)?;
-
-        Ok(RequireDevice(DeviceInfo {
-            id:          device.id,
-            address:     recovered,
-            role:        device.role,
-            user_id:     device.user_id,
-            business_id: device.business_id,
-        }))
-    }
-}
-
 // ── RequireStaff ──────────────────────────────────────────────────────────────
 
 /// Verified staff credentials scoped to a specific business.
-///
-/// A regular user JWT is rejected at the signature-verification step —
-/// it was not signed with STAFF_JWT_SECRET. A staff token for business A
-/// cannot satisfy an endpoint that asserts business B's ID.
 pub struct RequireStaff(pub StaffClaims);
 
 impl RequireStaff {
@@ -177,9 +121,6 @@ where
         let claims = staff_auth::verify_staff_token(bearer.token(), &app.cfg)
             .ok_or(AppError::Unauthorized)?;
 
-        // Staff tokens are revocation-checked via Redis. Logout, admin-forced
-        // termination, and staff removal all trigger revocation. The 8-hour TTL
-        // is defense-in-depth alongside revocation, not a substitute for it.
         if auth::check_revoked(&app.redis, &app.revoked, &claims.jti).await {
             return Err(AppError::Unauthorized);
         }

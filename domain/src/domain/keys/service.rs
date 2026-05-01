@@ -2,8 +2,12 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use ring::signature::{self, UnparsedPublicKey};
 use sqlx::PgPool;
 
-use crate::error::{DomainError, AppResult};
-use crate::types::{KeyId, UserId};
+use crate::{
+    error::{DomainError, AppResult},
+    event_bus::EventBus,
+    events::DomainEvent,
+    types::{KeyId, UserId},
+};
 use super::{
     repository,
     types::{KeyBundleResponse, OtpkResponse, RegisterKeysBody},
@@ -18,9 +22,10 @@ pub async fn issue_challenge(pool: &PgPool, user_id: UserId) -> AppResult<String
 // ── Key registration ──────────────────────────────────────────────────────────
 
 pub async fn register_keys(
-    pool:    &PgPool,
-    user_id: UserId,
-    body:    RegisterKeysBody,
+    pool:      &PgPool,
+    user_id:   UserId,
+    body:      RegisterKeysBody,
+    event_bus: &EventBus,
 ) -> AppResult<()> {
     match (&body.identity_signing_key, &body.challenge_sig) {
         (Some(signing_key_b64), Some(sig_b64)) => {
@@ -57,6 +62,8 @@ pub async fn register_keys(
         repository::insert_otpks(pool, user_id, &pairs).await?;
     }
 
+    event_bus.publish(DomainEvent::KeyBundleRegistered { user_id });
+
     Ok(())
 }
 
@@ -78,7 +85,11 @@ const KEY_REFRESH_GRACE_DAYS: i64 = 30;
 // Named claim_ because it consumes a one-time pre-key from the DB on every
 // call. OTPK consumption is inseparable: X3DH requires the initiating party
 // receive exactly one fresh pre-key per session establishment.
-pub async fn claim_key_bundle(pool: &PgPool, target_id: UserId) -> AppResult<KeyBundleResponse> {
+pub async fn claim_key_bundle(
+    pool:      &PgPool,
+    target_id: UserId,
+    event_bus: &EventBus,
+) -> AppResult<KeyBundleResponse> {
     let keys = repository::find_user_keys(pool, target_id)
         .await?
         .ok_or(DomainError::NotFound)?;
@@ -96,6 +107,12 @@ pub async fn claim_key_bundle(pool: &PgPool, target_id: UserId) -> AppResult<Key
         public_key: r.public_key,
     });
 
+    // If the OTPK we just claimed was the last one, alert the key owner.
+    let remaining = repository::count_otpks(pool, target_id).await?;
+    if remaining == 0 {
+        event_bus.publish(DomainEvent::KeyBundleDepleted { user_id: target_id });
+    }
+
     Ok(KeyBundleResponse {
         user_id:              target_id,
         identity_key:         keys.identity_key,
@@ -106,12 +123,16 @@ pub async fn claim_key_bundle(pool: &PgPool, target_id: UserId) -> AppResult<Key
     })
 }
 
-pub async fn claim_key_bundle_by_code(pool: &PgPool, code: &str) -> AppResult<KeyBundleResponse> {
+pub async fn claim_key_bundle_by_code(
+    pool:      &PgPool,
+    code:      &str,
+    event_bus: &EventBus,
+) -> AppResult<KeyBundleResponse> {
     let target_id = repository::user_id_by_code(pool, code)
         .await?
         .ok_or(DomainError::NotFound)?;
 
-    claim_key_bundle(pool, target_id).await
+    claim_key_bundle(pool, target_id, event_bus).await
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -133,7 +154,7 @@ fn verify_ed25519(message: &[u8], sig_b64: &str, pubkey_b64: &str) -> AppResult<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{KeyId, UserId};
+    use crate::{event_bus::EventBus, types::{KeyId, UserId}};
     use sqlx::PgPool;
 
     async fn test_user(pool: &PgPool) -> UserId {
@@ -173,6 +194,7 @@ mod tests {
     #[sqlx::test(migrations = "../server/migrations")]
     async fn register_keys_inserts_user_keys_row(pool: PgPool) {
         let user_id = test_user(&pool).await;
+        let bus = EventBus::new();
         let body = RegisterKeysBody {
             identity_key:         "ik_pub".to_owned(),
             identity_signing_key: None,
@@ -181,7 +203,7 @@ mod tests {
             one_time_pre_keys:    vec![],
             challenge_sig:        None,
         };
-        register_keys(&pool, user_id, body).await.unwrap();
+        register_keys(&pool, user_id, body, &bus).await.unwrap();
 
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM user_keys WHERE user_id = $1")
@@ -195,6 +217,7 @@ mod tests {
     #[sqlx::test(migrations = "../server/migrations")]
     async fn register_keys_batch_inserts_otpks(pool: PgPool) {
         let user_id = test_user(&pool).await;
+        let bus = EventBus::new();
         let body = RegisterKeysBody {
             identity_key:         "ik".to_owned(),
             identity_signing_key: None,
@@ -206,7 +229,7 @@ mod tests {
             ],
             challenge_sig: None,
         };
-        register_keys(&pool, user_id, body).await.unwrap();
+        register_keys(&pool, user_id, body, &bus).await.unwrap();
 
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM one_time_pre_keys WHERE user_id = $1")
@@ -222,8 +245,9 @@ mod tests {
         let user_id = test_user(&pool).await;
         seed_keys(&pool, user_id).await;
         seed_otpk(&pool, user_id, 42).await;
+        let bus = EventBus::new();
 
-        let bundle = claim_key_bundle(&pool, user_id).await.unwrap();
+        let bundle = claim_key_bundle(&pool, user_id, &bus).await.unwrap();
         assert_eq!(bundle.user_id, user_id);
         assert!(bundle.one_time_pre_key.is_some(), "should have consumed one OTPK");
         assert_eq!(bundle.one_time_pre_key.unwrap().key_id, KeyId::from(42));
@@ -234,14 +258,61 @@ mod tests {
         let user_id = test_user(&pool).await;
         seed_keys(&pool, user_id).await;
         // No OTPKs seeded — bundle is depleted.
+        let bus = EventBus::new();
 
-        let bundle = claim_key_bundle(&pool, user_id).await.unwrap();
+        let bundle = claim_key_bundle(&pool, user_id, &bus).await.unwrap();
         assert!(bundle.one_time_pre_key.is_none(), "depleted bundle must have no OTPK");
     }
 
     #[sqlx::test(migrations = "../server/migrations")]
     async fn claim_key_bundle_not_found_for_unknown_user(pool: PgPool) {
-        let result = claim_key_bundle(&pool, UserId::from(99999)).await;
+        let bus = EventBus::new();
+        let result = claim_key_bundle(&pool, UserId::from(99999), &bus).await;
+        assert!(matches!(result, Err(DomainError::NotFound)));
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn get_otpk_count_returns_correct_count(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        seed_keys(&pool, user_id).await;
+        seed_otpk(&pool, user_id, 10).await;
+        seed_otpk(&pool, user_id, 11).await;
+        seed_otpk(&pool, user_id, 12).await;
+
+        let count = get_otpk_count(&pool, user_id).await.unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn get_otpk_count_zero_when_none_seeded(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        let count = get_otpk_count(&pool, user_id).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn claim_key_bundle_by_code_success(pool: PgPool) {
+        let user_id = test_user(&pool).await;
+        seed_keys(&pool, user_id).await;
+        seed_otpk(&pool, user_id, 99).await;
+        let bus = EventBus::new();
+
+        // Give the user a user_code so claim_key_bundle_by_code can look them up.
+        sqlx::query("UPDATE users SET user_code = 'TESTCODE' WHERE id = $1")
+            .bind(i32::from(user_id))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let bundle = claim_key_bundle_by_code(&pool, "TESTCODE", &bus).await.unwrap();
+        assert_eq!(bundle.user_id, user_id);
+        assert!(bundle.one_time_pre_key.is_some());
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn claim_key_bundle_by_code_not_found_for_unknown_code(pool: PgPool) {
+        let bus = EventBus::new();
+        let result = claim_key_bundle_by_code(&pool, "XXXXXX", &bus).await;
         assert!(matches!(result, Err(DomainError::NotFound)));
     }
 }
