@@ -9,7 +9,7 @@ use crate::types::{OrderId, UserId};
 pub struct OrderRow {
     pub id: OrderId,
     pub user_id: Option<UserId>,
-    pub variety_id: i32,
+    pub variety_id: Option<i32>,
     pub location_id: i32,
     pub business_id: Option<i32>,
     pub time_slot_id: Option<i32>,

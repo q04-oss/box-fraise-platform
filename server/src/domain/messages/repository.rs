@@ -11,10 +11,9 @@ const MSG_COLS: &str =
 
 /// Returns true if `from` is permitted to send a message to `to`.
 ///
-/// Rules (matching TypeScript canMessage):
+/// Rules:
 ///   1. Shop accounts can always receive messages.
-///   2. Users who share an evening token (dinner date) can always message.
-///   3. Otherwise: both must be verified AND have an NFC connection.
+///   2. Both must be verified AND have an NFC connection.
 pub async fn can_message(pool: &PgPool, from: UserId, to: UserId) -> AppResult<bool> {
     // Rule 1: shop account.
     let is_shop: bool = sqlx::query_scalar(
@@ -26,22 +25,7 @@ pub async fn can_message(pool: &PgPool, from: UserId, to: UserId) -> AppResult<b
     .map_err(AppError::Db)?;
     if is_shop { return Ok(true); }
 
-    // Rule 2: shared evening token (confirmed dinner-date pair).
-    let has_date: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM evening_tokens
-             WHERE (user_id_1 = $1 AND user_id_2 = $2)
-                OR (user_id_1 = $2 AND user_id_2 = $1)
-         )",
-    )
-    .bind(from)
-    .bind(to)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Db)?;
-    if has_date { return Ok(true); }
-
-    // Rule 3: both verified + NFC connection.
+    // Rule 2: both verified + NFC connection.
     let both_verified: bool = sqlx::query_scalar(
         "SELECT (
              (SELECT verified FROM users WHERE id = $1) = true AND

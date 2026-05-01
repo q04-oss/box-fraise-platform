@@ -35,8 +35,6 @@ pub struct SocialAccess {
 
 #[derive(Debug, Serialize)]
 pub struct UserStats {
-    pub evening_token_count:  i64,
-    pub portrait_token_count: i64,
     pub nfc_connection_count: i64,
     pub membership_tier:      Option<String>,
 }

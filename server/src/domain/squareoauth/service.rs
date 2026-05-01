@@ -35,6 +35,7 @@ const REFRESH_THRESHOLD_HOURS: i64 = 24;
 
 /// Decrypted token data, usable for API calls.
 /// Never stored, never logged — constructed on the fly and dropped after use.
+#[derive(Debug)]
 pub struct LiveTokens {
     pub access_token:      String,
     pub square_location_id: String,

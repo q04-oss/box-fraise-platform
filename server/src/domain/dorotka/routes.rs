@@ -18,9 +18,6 @@ use super::service;
 
 /// 4 KB body cap — queries are short text, anything larger is suspicious.
 const BODY_LIMIT: usize = 4_096;
-/// 20 Dorotka requests per IP per minute.
-/// Anthropic calls are expensive; this prevents runaway cost from a single source.
-const RATE_LIMIT: i64 = 20;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -51,8 +48,8 @@ async fn ask(
     // proxy's IP, not the client's.
     let ip = client_ip(&headers, Some(&ConnectInfo(addr)));
 
-    // Rate check before any other work — cheap Redis call prevents wasted Anthropic spend
-    rate_check(&state, ip).await?;
+    // Rate check before any other work — prevents wasted Anthropic spend
+    rate_check(&state, ip)?;
 
     // Sanitise input — returns 400 for empty or oversized queries
     let query = service::sanitise(&body.query)
@@ -109,41 +106,13 @@ fn context_from_host(headers: &HeaderMap) -> &'static str {
     }
 }
 
-/// Fixed-window Redis rate limiter — same pattern as loyalty and HTML stamp endpoints.
-async fn rate_check(state: &AppState, ip: std::net::IpAddr) -> AppResult<()> {
-    use deadpool_redis::redis;
-
-    // Fail closed — if Redis is unavailable, deny the request rather than
-    // allowing unlimited Anthropic calls. A Redis outage is a plausible
-    // attack precondition, not just an ops failure.
-    let Some(pool) = state.redis.as_ref() else {
-        return Err(AppError::Unprocessable("service temporarily unavailable".into()));
-    };
-
-    let key = format!("fraise:rate:dorotka:{ip}");
-    let mut conn = pool.get().await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis pool: {e}")))?;
-
-    let count: i64 = redis::cmd("INCR")
-        .arg(&key)
-        .query_async(&mut *conn)
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis INCR: {e}")))?;
-
-    if count == 1 {
-        // If EXPIRE fails the key has no TTL and will block this IP forever —
-        // log the failure so it surfaces in ops rather than silently breaking.
-        if let Err(e) = redis::cmd("EXPIRE")
-            .arg(&key).arg(60u64)
-            .query_async::<_, ()>(&mut *conn).await
-        {
-            tracing::error!(key = %key, error = %e, "dorotka rate limit EXPIRE failed — key has no TTL");
-        }
-    }
-
-    if count > RATE_LIMIT {
-        Err(AppError::Unprocessable("rate limit exceeded — try again shortly".into()))
-    } else {
+/// Sliding-window rate check — 20 req/IP/60 s.
+/// Uses the same VecDeque<Instant> approach as the global SharedRateLimiter.
+/// Always enforces the limit; never fails open.
+fn rate_check(state: &AppState, ip: std::net::IpAddr) -> AppResult<()> {
+    if state.dorotka_rate.allow(ip) {
         Ok(())
+    } else {
+        Err(AppError::TooManyRequests)
     }
 }

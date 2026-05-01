@@ -84,7 +84,7 @@ fn parse_returns_error_on_malformed_json() {
 ///
 /// After handle_callback completes, square_oauth_tokens.square_location_id
 /// must contain the location ID from the mock response.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn callback_stores_resolved_location_id(pool: PgPool) {
     let (_redis, redis_pool) = common::start_redis().await;
     let state = common::build_state_with_square_oauth(pool.clone(), Some(redis_pool.clone()));
@@ -149,7 +149,7 @@ async fn callback_stores_resolved_location_id(pool: PgPool) {
 
 /// When Square's locations endpoint returns no ACTIVE locations, the callback
 /// must fail with BadGateway — not silently store an empty string.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn callback_fails_when_square_has_no_active_locations(pool: PgPool) {
     let (_redis, redis_pool) = common::start_redis().await;
     let state = common::build_state_with_square_oauth(pool.clone(), Some(redis_pool.clone()));
@@ -207,7 +207,7 @@ async fn callback_fails_when_square_has_no_active_locations(pool: PgPool) {
 ///
 /// This is the path that previously hardcoded the production URL — the fix is
 /// tested here by pointing it at a mock server.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn load_decrypted_refreshes_near_expiry_token(pool: PgPool) {
     let state = common::build_state_with_square_oauth(pool.clone(), None);
 
@@ -256,7 +256,7 @@ async fn load_decrypted_refreshes_near_expiry_token(pool: PgPool) {
 
 /// When stored tokens are not near expiry, load_decrypted must return the
 /// existing token without calling Square's refresh endpoint.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn load_decrypted_skips_refresh_for_valid_token(pool: PgPool) {
     let state = common::build_state_with_square_oauth(pool.clone(), None);
 

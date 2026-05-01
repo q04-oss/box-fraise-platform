@@ -66,7 +66,7 @@ async fn insert_pushed_order(pool: &PgPool, user_id: i32, business_id: i32, squa
 /// A correctly signed webhook must pass the verification gate and return 200.
 /// The HTTP test asserts the status code only — processing happens in a
 /// tokio::spawn and is tested deterministically in test 1b below.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn valid_signature_returns_200(pool: PgPool) {
     let state = common::build_state_with_square(pool.clone(), None);
     let app   = box_fraise_server::app::build(state);
@@ -106,7 +106,7 @@ async fn valid_signature_returns_200(pool: PgPool) {
 /// This is the correct test for the processing path. The HTTP handler wraps
 /// this function in tokio::spawn for throughput; the spawn is irrelevant to
 /// what the processing actually does.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn complete_order_from_square_marks_completed_and_credits_steep(pool: PgPool) {
     let state    = common::build_state_with_square(pool.clone(), None);
     let customer = common::create_user(&pool, "customer@test.com").await;
@@ -147,7 +147,7 @@ async fn complete_order_from_square_marks_completed_and_credits_steep(pool: PgPo
 
 /// A request with an incorrect signature must be rejected before any database
 /// work begins. The venue_order status must remain unchanged.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn invalid_signature_returns_401_and_does_not_process_payload(pool: PgPool) {
     let state = common::build_state_with_square(pool.clone(), None);
     let app   = box_fraise_server::app::build(state);
@@ -199,7 +199,7 @@ async fn invalid_signature_returns_401_and_does_not_process_payload(pool: PgPool
 
 /// A request with no `x-square-hmacsha256-signature` header must be rejected
 /// immediately. No database work should begin.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn missing_signature_header_returns_401(pool: PgPool) {
     let state = common::build_state_with_square(pool.clone(), None);
     let app   = box_fraise_server::app::build(state);

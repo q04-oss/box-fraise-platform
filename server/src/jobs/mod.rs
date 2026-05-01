@@ -246,7 +246,9 @@ async fn send_standing_order_email(state: &AppState, order: &StandingOrder) {
     let oid     = order.id; // use standing_order id as reference; real order_id from DB insert is opaque here
 
     tokio::spawn(async move {
-        let _ = resend::send_order_confirmation(&http, &key, &email, oid, &variety, total).await;
+        if let Err(e) = resend::send_order_confirmation(&http, &key, &email, oid, &variety, total).await {
+            tracing::error!(standing_order_id = oid, error = %e, "standing order confirmation email delivery failed");
+        }
     });
 }
 
@@ -297,7 +299,7 @@ async fn membership_reminders(state: &AppState) {
 
     // Mark all reminded in one shot.
     if !rows.is_empty() {
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "UPDATE memberships
              SET renewal_notified = true
              WHERE status = 'active'
@@ -306,7 +308,10 @@ async fn membership_reminders(state: &AppState) {
                AND renewal_notified = false",
         )
         .execute(&state.db)
-        .await;
+        .await
+        {
+            tracing::error!(error = %e, "memberships renewal_notified UPDATE failed — reminders will re-fire on next run");
+        }
     }
 }
 
@@ -320,7 +325,9 @@ async fn send_renewal_reminder(
     let days_left = (renews_at - chrono::Utc::now().naive_utc()).num_days().max(0);
     let subject   = format!("Your {tier} membership renews in {days_left} days — Maison Fraise");
     let html      = resend::renewal_reminder_html(tier, renews_at, days_left);
-    let _ = resend::send(http, key, email, &subject, &html).await;
+    if let Err(e) = resend::send(http, key, email, &subject, &html).await {
+        tracing::error!(tier, error = %e, "membership renewal reminder email delivery failed");
+    }
 }
 
 // ── Square push failure alerts ────────────────────────────────────────────────
@@ -387,7 +394,9 @@ async fn alert_square_push_failures(state: &AppState) {
     let key   = key.expose_secret().to_owned();
     let email = operator_email.clone();
     tokio::spawn(async move {
-        let _ = resend::send(&http, &key, &email, &subject, &html).await;
+        if let Err(e) = resend::send(&http, &key, &email, &subject, &html).await {
+            tracing::error!(error = %e, "operator Square-failure alert email delivery failed");
+        }
     });
 }
 

@@ -131,6 +131,14 @@ See `src/http/middleware/hmac.rs` for the full HMAC verification flow with threa
 | `migrations/README.md` | Migration history and schema domain groupings |
 | `.env.example` | Every environment variable with description and source |
 
+## Magic fields
+
+These columns carry meaning not obvious from their names alone.
+
+| Column | Table | Meaning |
+|---|---|---|
+| `is_dorotka` | `users` | **Platform admin flag.** `true` for the Dorotka AI service account only. Gates access to admin-level API endpoints (e.g. device role elevation). Must never be set to `true` for regular users and must never be set manually in production. Granting it to any other row is equivalent to granting full admin access. |
+
 ## Adding a new endpoint
 
 1. Add the route to `domain/<name>/routes.rs` using the appropriate extractor.

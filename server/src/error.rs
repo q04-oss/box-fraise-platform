@@ -26,6 +26,9 @@ pub enum AppError {
     #[error("{0}")]
     Unprocessable(String),
 
+    #[error("rate limit exceeded")]
+    TooManyRequests,
+
     #[error("payment required")]
     PaymentRequired,
 
@@ -65,6 +68,7 @@ impl IntoResponse for AppError {
             Self::NotFound          => (StatusCode::NOT_FOUND,             self.to_string()),
             Self::Conflict(m)       => (StatusCode::CONFLICT,              m.clone()),
             Self::Unprocessable(m)  => (StatusCode::UNPROCESSABLE_ENTITY,  m.clone()),
+            Self::TooManyRequests   => (StatusCode::TOO_MANY_REQUESTS,     self.to_string()),
             Self::PaymentRequired   => (StatusCode::PAYMENT_REQUIRED,      self.to_string()),
             Self::BadGateway(m)     => (StatusCode::BAD_GATEWAY,           m.clone()),
             Self::Internal(e) => {

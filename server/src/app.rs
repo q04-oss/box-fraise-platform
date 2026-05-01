@@ -50,6 +50,9 @@ pub struct AppState {
     /// None when REDIS_URL is not set — falls back to `nonces`.
     pub redis: Option<RedisPool>,
     pub rate: SharedRateLimiter,
+    /// Separate sliding-window limiter for the Dorotka AI endpoint.
+    /// 20 req/IP/min — tighter than the global limit because Anthropic calls have real cost.
+    pub dorotka_rate: SharedRateLimiter,
     /// Shared HTTP client — reuses the connection pool across all integration calls.
     pub http: reqwest::Client,
     /// bcrypt hashes of operator PINs. Raw PIN values are not kept in AppState.
@@ -110,7 +113,8 @@ impl AppState {
             revoked: new_revoked_tokens(),
             nonces: new_nonce_cache(),
             redis,
-            rate: RateLimiter::new(),
+            rate:         RateLimiter::new(120, 60),
+            dorotka_rate: RateLimiter::new(20, 60),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -151,7 +155,6 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::venue_drinks::routes::router())
         .merge(crate::domain::squareoauth::routes::router())
         .merge(crate::domain::staff_web::routes::router())
-        .merge(crate::domain::tokens::routes::router())
         .merge(crate::domain::dorotka::routes::router())
         // ── Security middleware (innermost — applied last, runs first) ─────
         .layer(middleware::from_fn_with_state(

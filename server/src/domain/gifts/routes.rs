@@ -90,7 +90,9 @@ async fn send(
             .flatten();
 
             let sender = from_name.as_deref().unwrap_or("Someone");
-            let _ = resend::send_gift_notification(&http, &key, &to_email, sender, &token).await;
+            if let Err(e) = resend::send_gift_notification(&http, &key, &to_email, sender, &token).await {
+                tracing::error!(sender_user_id = %uid, error = %e, "gift notification email delivery failed");
+            }
         });
     }
 

@@ -316,7 +316,9 @@ async fn nominate(
 
             if let Some(NomInfo { nominee_email: Some(email), nominator_name, event_name }) = info {
                 let nominator = nominator_name.as_deref().unwrap_or("Someone");
-                let _ = resend::send_nomination(&http, &key, &email, &event_name, nominator).await;
+                if let Err(e) = resend::send_nomination(&http, &key, &email, &event_name, nominator).await {
+                    tracing::error!(nominator_user_id = %uid, error = %e, "nomination email delivery failed");
+                }
             }
         });
     }

@@ -33,7 +33,7 @@ use sqlx::PgPool;
 /// This test seeds a venue_order already in 'paid' status and asserts that a
 /// second complete_venue_order call is a strict no-op: no audit event written,
 /// no loyalty event credited, order status unchanged.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn complete_venue_order_is_idempotent_after_paid(pool: PgPool) {
     let state    = common::build_state(pool.clone(), None);
     let customer = common::create_user(&pool, "customer@idempotency.test").await;
@@ -114,7 +114,7 @@ async fn insert_drink(
 
 /// get_menu must filter out unavailable drinks. Only drinks with available = true
 /// should appear on the menu.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn get_menu_excludes_unavailable_drinks(pool: PgPool) {
     let state = common::build_state(pool.clone(), None);
     let biz   = common::create_business(&pool, "Test Café").await;
@@ -135,7 +135,7 @@ async fn get_menu_excludes_unavailable_drinks(pool: PgPool) {
 }
 
 /// Menu for a business with no drinks must return an empty list, not an error.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn get_menu_empty_for_new_business(pool: PgPool) {
     let state = common::build_state(pool.clone(), None);
     let biz   = common::create_business(&pool, "New Café").await;
@@ -149,7 +149,7 @@ async fn get_menu_empty_for_new_business(pool: PgPool) {
 /// A business without a Stripe Connect account must return a meaningful error
 /// before any Stripe API call is made. This confirms the Connect account guard
 /// fires and the error message is user-facing (not an internal 500).
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn create_order_fails_without_stripe_connect_account(pool: PgPool) {
     let state    = common::build_state(pool.clone(), None);
     let customer = common::create_user(&pool, "customer@test.com").await;
@@ -171,7 +171,7 @@ async fn create_order_fails_without_stripe_connect_account(pool: PgPool) {
 }
 
 /// An empty items list must be rejected before reaching any external call.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn create_order_rejects_empty_items(pool: PgPool) {
     let state    = common::build_state(pool.clone(), None);
     let customer = common::create_user(&pool, "customer@test.com").await;
@@ -193,7 +193,7 @@ async fn create_order_rejects_empty_items(pool: PgPool) {
 
 /// A drink_id that belongs to a different business (or doesn't exist) must be
 /// rejected. This guards against cross-business order injection.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn create_order_rejects_drink_from_wrong_business(pool: PgPool) {
     let state    = common::build_state(pool.clone(), None);
     let customer = common::create_user(&pool, "customer@test.com").await;

@@ -22,5 +22,4 @@ pub mod squareoauth;
 pub mod staff_web;
 pub mod users;
 pub mod venue_drinks;
-pub mod tokens;
 pub mod ventures;

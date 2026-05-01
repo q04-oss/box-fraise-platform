@@ -17,7 +17,7 @@ use sqlx::PgPool;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Happy path: user_id present in metadata → membership row created.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn membership_webhook_creates_row_when_user_id_present(pool: PgPool) {
     let user_id: i32 = sqlx::query_scalar(
         "INSERT INTO users (email, verified) VALUES ('buyer@test.com', true) RETURNING id",
@@ -45,7 +45,7 @@ async fn membership_webhook_creates_row_when_user_id_present(pool: PgPool) {
     .unwrap();
 
     let (tier, status): (String, String) =
-        sqlx::query_as("SELECT tier, status FROM memberships WHERE user_id = $1")
+        sqlx::query_as("SELECT tier::text, status FROM memberships WHERE user_id = $1")
             .bind(user_id)
             .fetch_one(&pool)
             .await
@@ -57,7 +57,7 @@ async fn membership_webhook_creates_row_when_user_id_present(pool: PgPool) {
 
 /// Regression: when user_id is None (original bug — missing from PI metadata),
 /// no membership row is created and no panic occurs.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn membership_webhook_is_no_op_when_user_id_missing(pool: PgPool) {
     // Simulate the None branch in complete_membership().
     let user_id: Option<i32> = None;
@@ -89,7 +89,7 @@ async fn membership_webhook_is_no_op_when_user_id_missing(pool: PgPool) {
 
 /// Idempotency: calling the webhook handler twice for the same user upgrades
 /// the membership in place rather than creating a duplicate row.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn membership_webhook_is_idempotent(pool: PgPool) {
     let user_id: i32 = sqlx::query_scalar(
         "INSERT INTO users (email, verified) VALUES ('member@test.com', true) RETURNING id",
@@ -133,7 +133,7 @@ async fn membership_webhook_is_idempotent(pool: PgPool) {
         "ON CONFLICT DO UPDATE must keep exactly one membership row"
     );
 
-    let tier: String = sqlx::query_scalar("SELECT tier FROM memberships WHERE user_id = $1")
+    let tier: String = sqlx::query_scalar("SELECT tier::text FROM memberships WHERE user_id = $1")
         .bind(user_id)
         .fetch_one(&pool)
         .await
@@ -149,7 +149,7 @@ async fn membership_webhook_is_idempotent(pool: PgPool) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Orders inherit business_id from their location at insert time.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn order_carries_business_id_from_location(pool: PgPool) {
     let owner_id: i32 = sqlx::query_scalar(
         "INSERT INTO users (email, verified) VALUES ('biz_owner@test.com', true) RETURNING id",
@@ -167,7 +167,7 @@ async fn order_carries_business_id_from_location(pool: PgPool) {
     .unwrap();
 
     let loc_id: i32 = sqlx::query_scalar(
-        "INSERT INTO locations (business_id, name) VALUES ($1, 'Loc A') RETURNING id",
+        "INSERT INTO locations (business_id, name, address) VALUES ($1, 'Loc A', '1 Test St') RETURNING id",
     )
     .bind(biz_id)
     .fetch_one(&pool)
@@ -191,7 +191,7 @@ async fn order_carries_business_id_from_location(pool: PgPool) {
 }
 
 /// device_collect business-scope check: device business != order business → deny.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn device_collect_cross_business_is_denied(pool: PgPool) {
     // Two businesses.
     let owner_a: i32 =
@@ -234,7 +234,7 @@ async fn device_collect_cross_business_is_denied(pool: PgPool) {
 }
 
 /// device_collect same business → allowed.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn device_collect_same_business_is_allowed(pool: PgPool) {
     let owner: i32 =
         sqlx::query_scalar("INSERT INTO users (email) VALUES ('same@test.com') RETURNING id")
@@ -269,7 +269,7 @@ async fn device_collect_same_business_is_allowed(pool: PgPool) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// First call to find-or-create creates a new unverified user.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn magic_link_creates_new_user_on_first_call(pool: PgPool) {
     let email = "newuser@test.com";
 
@@ -300,7 +300,7 @@ async fn magic_link_creates_new_user_on_first_call(pool: PgPool) {
 }
 
 /// Verifying a magic link token marks the user as verified.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn magic_link_verify_marks_user_verified(pool: PgPool) {
     let user_id: i32 = sqlx::query_scalar(
         "INSERT INTO users (email, verified) VALUES ('toverify@test.com', false) RETURNING id",
@@ -329,7 +329,7 @@ async fn magic_link_verify_marks_user_verified(pool: PgPool) {
 }
 
 /// A banned user's magic link request is silently dropped — no token sent.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn magic_link_banned_user_is_silently_skipped(pool: PgPool) {
     let user_id: i32 = sqlx::query_scalar(
         "INSERT INTO users (email, verified, banned) VALUES ('banned@test.com', true, true) RETURNING id",
@@ -355,7 +355,7 @@ async fn magic_link_banned_user_is_silently_skipped(pool: PgPool) {
 }
 
 /// find-or-create is idempotent: calling twice returns the same user ID.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn magic_link_find_or_create_is_idempotent(pool: PgPool) {
     let email = "idempotent@test.com";
 
@@ -402,7 +402,7 @@ async fn magic_link_find_or_create_is_idempotent(pool: PgPool) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Happy path: pending membership row exists → webhook activates it.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn membership_webhook_activates_pending_row(pool: PgPool) {
     let user_id: i32 = sqlx::query_scalar(
         "INSERT INTO users (email, verified) VALUES ('member@pay.test', true) RETURNING id",
@@ -434,7 +434,7 @@ async fn membership_webhook_activates_pending_row(pool: PgPool) {
         "UPDATE memberships
          SET status = 'active', started_at = NOW(), renews_at = $2
          WHERE stripe_payment_intent_id = $1 AND status = 'pending'
-         RETURNING user_id, tier, amount_cents",
+         RETURNING user_id, tier::text, amount_cents",
     )
     .bind("pi_mem_happy")
     .bind(renews_at)
@@ -456,7 +456,7 @@ async fn membership_webhook_activates_pending_row(pool: PgPool) {
 }
 
 /// Regression: wrong pi_id → membership stays pending, audit event written.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn membership_webhook_wrong_pi_id_is_no_op(pool: PgPool) {
     let user_id: i32 = sqlx::query_scalar(
         "INSERT INTO users (email, verified) VALUES ('mem_reg@pay.test', true) RETURNING id",
@@ -537,7 +537,7 @@ async fn membership_webhook_wrong_pi_id_is_no_op(pool: PgPool) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Happy path: tip_payments row found → earnings_ledger credited to placed worker.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn tip_webhook_credits_correct_worker(pool: PgPool) {
     let owner_id: i32 = sqlx::query_scalar(
         "INSERT INTO users (email) VALUES ('tipbiz_owner@pay.test') RETURNING id",
@@ -641,7 +641,7 @@ async fn tip_webhook_credits_correct_worker(pool: PgPool) {
 }
 
 /// Regression: wrong pi_id → tip_payments not claimed, earnings_ledger stays empty.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn tip_webhook_wrong_pi_id_is_no_op(pool: PgPool) {
     let owner_id: i32 = sqlx::query_scalar(
         "INSERT INTO users (email) VALUES ('tipbiz2_owner@pay.test') RETURNING id",
@@ -710,265 +710,3 @@ async fn tip_webhook_wrong_pi_id_is_no_op(pool: PgPool) {
     );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Flow 6: Portrait purchase webhook
-//
-// Tests the DB layer that complete_portrait_purchase() runs:
-// 1. UPDATE portrait_purchase_intents … RETURNING all parties + amount
-// 2. UPDATE portrait_tokens SET owner_id = buyer WHERE id=$token AND owner_id=$seller
-// 3. INSERT INTO earnings_ledger (royalty 15% + sale 85%)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Happy path: intent found → ownership transferred, royalty split written.
-#[sqlx::test(migrations = "migrations")]
-async fn portrait_webhook_transfers_and_splits_royalty(pool: PgPool) {
-    let creator_id: i32 = sqlx::query_scalar(
-        "INSERT INTO users (email) VALUES ('portrait_creator@pay.test') RETURNING id",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let seller_id: i32 = sqlx::query_scalar(
-        "INSERT INTO users (email) VALUES ('portrait_seller@pay.test') RETURNING id",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let buyer_id: i32 = sqlx::query_scalar(
-        "INSERT INTO users (email) VALUES ('portrait_buyer@pay.test') RETURNING id",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    let token_id: i32 = sqlx::query_scalar(
-        "INSERT INTO portrait_tokens
-             (owner_id, original_owner_id, image_url, minted_by)
-         VALUES ($1, $1, 'https://cdn.test/portrait.jpg', $2)
-         RETURNING id",
-    )
-    .bind(seller_id)
-    .bind(creator_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        "INSERT INTO portrait_purchase_intents
-             (token_id, buyer_user_id, seller_user_id, creator_user_id,
-              amount_cents, stripe_payment_intent_id)
-         VALUES ($1, $2, $3, $4, 1000, 'pi_portrait_happy')",
-    )
-    .bind(token_id)
-    .bind(buyer_id)
-    .bind(seller_id)
-    .bind(creator_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    // Step 1: claim the intent.
-    #[derive(sqlx::FromRow)]
-    struct IntentRow {
-        token_id: i32,
-        buyer_user_id: i32,
-        seller_user_id: i32,
-        creator_user_id: i32,
-        amount_cents: i64,
-    }
-
-    let intent: Option<IntentRow> = sqlx::query_as(
-        "UPDATE portrait_purchase_intents SET status = 'processing'
-         WHERE stripe_payment_intent_id = $1 AND status = 'pending'
-         RETURNING token_id, buyer_user_id, seller_user_id, creator_user_id, amount_cents",
-    )
-    .bind("pi_portrait_happy")
-    .fetch_optional(&pool)
-    .await
-    .unwrap();
-
-    let intent = intent.expect("intent UPDATE must return a row for matching pi_id");
-    assert_eq!(intent.token_id, token_id);
-    assert_eq!(intent.buyer_user_id, buyer_id);
-    assert_eq!(intent.seller_user_id, seller_id);
-    assert_eq!(intent.creator_user_id, creator_id);
-    assert_eq!(intent.amount_cents, 1000);
-
-    // Step 2: transfer ownership.
-    let rows = sqlx::query(
-        "UPDATE portrait_tokens SET owner_id = $1
-         WHERE id = $2 AND owner_id = $3",
-    )
-    .bind(intent.buyer_user_id)
-    .bind(intent.token_id)
-    .bind(intent.seller_user_id)
-    .execute(&pool)
-    .await
-    .unwrap()
-    .rows_affected();
-
-    assert_eq!(rows, 1, "ownership transfer must affect exactly one token");
-
-    let new_owner: i32 = sqlx::query_scalar("SELECT owner_id FROM portrait_tokens WHERE id = $1")
-        .bind(token_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(
-        new_owner, buyer_id,
-        "token owner must be the buyer after transfer"
-    );
-
-    // Step 3: write royalty split (15% creator, 85% seller).
-    let creator_cut = (intent.amount_cents * 15) / 100; // 150
-    let seller_cut = intent.amount_cents - creator_cut; // 850
-
-    sqlx::query(
-        "INSERT INTO earnings_ledger
-             (user_id, amount_cents, type, stripe_payment_intent_id)
-         VALUES ($1, $2, 'portrait_royalty', 'pi_portrait_happy'),
-                ($3, $4, 'portrait_sale',    'pi_portrait_happy')",
-    )
-    .bind(intent.creator_user_id)
-    .bind(creator_cut)
-    .bind(intent.seller_user_id)
-    .bind(seller_cut)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let ledger_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM earnings_ledger WHERE stripe_payment_intent_id = 'pi_portrait_happy'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        ledger_count, 2,
-        "earnings_ledger must have two entries — royalty and sale"
-    );
-
-    let creator_earned: i64 = sqlx::query_scalar(
-        "SELECT amount_cents FROM earnings_ledger
-         WHERE user_id = $1 AND type = 'portrait_royalty'",
-    )
-    .bind(creator_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(creator_earned, 150, "creator royalty must be 15% of 1000");
-
-    let seller_earned: i64 = sqlx::query_scalar(
-        "SELECT amount_cents FROM earnings_ledger
-         WHERE user_id = $1 AND type = 'portrait_sale'",
-    )
-    .bind(seller_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(seller_earned, 850, "seller cut must be 85% of 1000");
-}
-
-/// Regression: wrong pi_id → intent not claimed, ownership unchanged, ledger empty.
-#[sqlx::test(migrations = "migrations")]
-async fn portrait_webhook_wrong_pi_id_is_no_op(pool: PgPool) {
-    let creator_id: i32 = sqlx::query_scalar(
-        "INSERT INTO users (email) VALUES ('portrait_creator2@pay.test') RETURNING id",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let seller_id: i32 = sqlx::query_scalar(
-        "INSERT INTO users (email) VALUES ('portrait_seller2@pay.test') RETURNING id",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let buyer_id: i32 = sqlx::query_scalar(
-        "INSERT INTO users (email) VALUES ('portrait_buyer2@pay.test') RETURNING id",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    let token_id: i32 = sqlx::query_scalar(
-        "INSERT INTO portrait_tokens
-             (owner_id, original_owner_id, image_url, minted_by)
-         VALUES ($1, $1, 'https://cdn.test/portrait2.jpg', $2)
-         RETURNING id",
-    )
-    .bind(seller_id)
-    .bind(creator_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        "INSERT INTO portrait_purchase_intents
-             (token_id, buyer_user_id, seller_user_id, creator_user_id,
-              amount_cents, stripe_payment_intent_id)
-         VALUES ($1, $2, $3, $4, 800, 'pi_portrait_real')",
-    )
-    .bind(token_id)
-    .bind(buyer_id)
-    .bind(seller_id)
-    .bind(creator_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let intent: Option<(i32,)> = sqlx::query_as(
-        "UPDATE portrait_purchase_intents SET status = 'processing'
-         WHERE stripe_payment_intent_id = $1 AND status = 'pending'
-         RETURNING token_id",
-    )
-    .bind("pi_portrait_wrong")
-    .fetch_optional(&pool)
-    .await
-    .unwrap();
-
-    assert!(
-        intent.is_none(),
-        "wrong pi_id must not claim any purchase intent"
-    );
-
-    let owner: i32 = sqlx::query_scalar("SELECT owner_id FROM portrait_tokens WHERE id = $1")
-        .bind(token_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(
-        owner, seller_id,
-        "token must remain owned by seller after wrong pi_id"
-    );
-
-    let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM earnings_ledger")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(
-        ledger_count, 0,
-        "earnings_ledger must stay empty when pi_id misses"
-    );
-
-    // Audit trail.
-    sqlx::query(
-        "INSERT INTO audit_events (actor_id, business_id, event_kind, metadata)
-         VALUES (NULL, NULL, 'payment.portrait_intent_not_found',
-                 '{\"pi_id\": \"pi_portrait_wrong\", \"outcome\": \"no_pending_row\"}'::jsonb)",
-    )
-    .execute(&pool)
-    .await
-    .expect("audit_events must accept the failure record");
-
-    let audit_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM audit_events WHERE event_kind = 'payment.portrait_intent_not_found'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        audit_count, 1,
-        "audit event must be recorded on webhook miss"
-    );
-}

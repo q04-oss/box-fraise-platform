@@ -77,23 +77,6 @@ pub async fn social_access(pool: &PgPool, user_id: UserId) -> AppResult<Option<S
 // ── Stats ─────────────────────────────────────────────────────────────────────
 
 pub async fn stats(pool: &PgPool, user_id: UserId) -> AppResult<UserStats> {
-    let evening: i64 = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM evening_tokens
-         WHERE user_id_1 = $1 OR user_id_2 = $1",
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Db)?;
-
-    let portrait: i64 = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM portrait_tokens WHERE owner_id = $1",
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Db)?;
-
     let nfc: i64 = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint FROM nfc_connections
          WHERE user_id = $1 OR connected_user_id = $1",
@@ -114,8 +97,6 @@ pub async fn stats(pool: &PgPool, user_id: UserId) -> AppResult<UserStats> {
     .map_err(AppError::Db)?;
 
     Ok(UserStats {
-        evening_token_count:  evening,
-        portrait_token_count: portrait,
         nfc_connection_count: nfc,
         membership_tier:      tier,
     })

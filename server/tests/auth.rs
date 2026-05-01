@@ -17,7 +17,7 @@ const RESEND_RATE_PREFIX: &str = "fraise:rate:email-resend:";
 
 /// Seeding a token in Redis and calling verify_email must mark the user as
 /// verified in the DB and return their email address.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn verify_email_marks_user_verified_and_returns_email(pool: PgPool) {
     let (_redis, redis_pool) = common::start_redis().await;
     let state = common::build_state(pool.clone(), Some(redis_pool.clone()));
@@ -63,7 +63,7 @@ async fn verify_email_marks_user_verified_and_returns_email(pool: PgPool) {
 
 /// A verification token is consumed on first use (GETDEL). A second attempt
 /// with the same token must return Unauthorized.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn verify_email_token_is_single_use(pool: PgPool) {
     let (_redis, redis_pool) = common::start_redis().await;
     let state = common::build_state(pool.clone(), Some(redis_pool.clone()));
@@ -98,7 +98,7 @@ async fn verify_email_token_is_single_use(pool: PgPool) {
 // ── verify_email: unknown token ───────────────────────────────────────────────
 
 /// A token that was never issued (or has already expired) returns Unauthorized.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn verify_email_unknown_token_returns_unauthorized(pool: PgPool) {
     let (_redis, redis_pool) = common::start_redis().await;
     let state = common::build_state(pool.clone(), Some(redis_pool));
@@ -119,7 +119,7 @@ async fn verify_email_unknown_token_returns_unauthorized(pool: PgPool) {
 /// Approach: pre-seed the INCR counter to 1 so the next INCR pushes it to 2,
 /// which is > 1 and triggers the Unprocessable return before the API-key check.
 /// This tests the rate limiting gate in isolation from the email integration.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn resend_verification_rate_limit_blocks_second_request(pool: PgPool) {
     let (_redis, redis_pool) = common::start_redis().await;
     let state = common::build_state(pool.clone(), Some(redis_pool.clone()));

@@ -76,7 +76,6 @@ async fn handle_pi_succeeded(state: &AppState, event: &serde_json::Value) {
         "membership" => complete_membership(state, pi_id).await,
         "tip" => complete_tip(state, pi_id).await,
         "portal_access" => complete_portal_access(state, pi_id).await,
-        "portrait_purchase" => complete_portrait_purchase(state, pi_id).await,
         // Venue drink orders: push to Square POS + credit loyalty steep.
         "venue_order" => {
             crate::domain::venue_drinks::service::complete_venue_order(state, pi_id).await
@@ -139,13 +138,21 @@ async fn complete_order(state: &AppState, pi_id: &str) {
                     .map(|k| k.expose_secret().to_owned()),
             ) {
                 let http = state.http.clone();
+                let db = state.db.clone();
                 let variety = info.variety_name.clone();
                 let total = info.total_cents as i32;
                 let oid = info.id;
+                let pi = pi_id.to_owned();
                 tokio::spawn(async move {
-                    let _ =
-                        resend::send_order_confirmation(&http, &key, &email, oid, &variety, total)
-                            .await;
+                    if let Err(e) = resend::send_order_confirmation(&http, &key, &email, oid, &variety, total).await {
+                        tracing::error!(order_id = %oid, pi_id = pi, error = %e, "order confirmation email delivery failed");
+                        audit::write(
+                            &db, None, None,
+                            "email.order_confirmation_failed",
+                            serde_json::json!({ "order_id": i32::from(oid), "pi_id": pi, "error": e.to_string() }),
+                            None,
+                        ).await;
+                    }
                 });
             }
         }
@@ -195,9 +202,20 @@ async fn complete_rsvp(state: &AppState, pi_id: &str) {
                     .map(|k| k.expose_secret().to_owned()),
             ) {
                 let http = state.http.clone();
+                let db = state.db.clone();
                 let event = info.event_name.clone();
+                let uid = info.user_id;
+                let pi = pi_id.to_owned();
                 tokio::spawn(async move {
-                    let _ = resend::send_rsvp_confirmed(&http, &key, &email, &event).await;
+                    if let Err(e) = resend::send_rsvp_confirmed(&http, &key, &email, &event).await {
+                        tracing::error!(user_id = uid, pi_id = pi, error = %e, "RSVP confirmation email delivery failed");
+                        audit::write(
+                            &db, Some(uid), None,
+                            "email.rsvp_confirmation_failed",
+                            serde_json::json!({ "pi_id": pi, "event": event, "error": e.to_string() }),
+                            None,
+                        ).await;
+                    }
                 });
             }
         }
@@ -248,7 +266,15 @@ async fn complete_membership(state: &AppState, pi_id: &str) {
             )
             .await;
         }
-        Ok(None) => tracing::warn!(pi_id, "no pending membership found for webhook pi"),
+        Ok(None) => {
+            tracing::warn!(pi_id, "no pending membership found for webhook pi");
+            audit::write(
+                &state.db, None, None,
+                "payment.membership_not_found",
+                serde_json::json!({ "pi_id": pi_id, "outcome": "no_pending_row" }),
+                None,
+            ).await;
+        }
         Err(e) => tracing::error!(pi_id, error = %e, "complete_membership failed"),
     }
 }
@@ -325,7 +351,7 @@ async fn complete_tip(state: &AppState, pi_id: &str) {
         return;
     };
 
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "INSERT INTO earnings_ledger (user_id, amount_cents, type, stripe_payment_intent_id)
          VALUES ($1, $2, 'tip', $3)",
     )
@@ -333,15 +359,21 @@ async fn complete_tip(state: &AppState, pi_id: &str) {
     .bind(tip.amount_cents)
     .bind(pi_id)
     .execute(&state.db)
-    .await;
+    .await
+    {
+        tracing::error!(pi_id, worker_id, error = %e, "earnings_ledger INSERT failed for tip — earning record lost");
+    }
 
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "UPDATE tip_payments SET status = 'completed'
          WHERE stripe_payment_intent_id = $1",
     )
     .bind(pi_id)
     .execute(&state.db)
-    .await;
+    .await
+    {
+        tracing::error!(pi_id, error = %e, "tip_payments status UPDATE failed — tip will appear pending");
+    }
 
     tracing::info!(
         pi_id,
@@ -372,16 +404,26 @@ async fn complete_tip(state: &AppState, pi_id: &str) {
         let http = state.http.clone();
         let db = state.db.clone();
         let amt = tip.amount_cents as i32;
+        let pi = pi_id.to_owned();
         tokio::spawn(async move {
-            let email: Option<String> = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+            match sqlx::query_scalar::<_, Option<String>>("SELECT email FROM users WHERE id = $1")
                 .bind(worker_id)
                 .fetch_optional(&db)
                 .await
-                .unwrap_or(None)
-                .flatten();
-
-            if let Some(addr) = email {
-                let _ = resend::send_tip_received(&http, &key, &addr, amt).await;
+            {
+                Ok(Some(Some(addr))) => {
+                    if let Err(e) = resend::send_tip_received(&http, &key, &addr, amt).await {
+                        tracing::error!(worker_id, pi_id = pi, error = %e, "tip received email delivery failed");
+                        audit::write(
+                            &db, Some(worker_id), None,
+                            "email.tip_notification_failed",
+                            serde_json::json!({ "pi_id": pi, "amount_cents": amt, "error": e.to_string() }),
+                            None,
+                        ).await;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => tracing::error!(worker_id, error = %e, "worker email lookup failed for tip notification"),
             }
         });
     }
@@ -433,131 +475,6 @@ async fn complete_portal_access(state: &AppState, pi_id: &str) {
         Ok(None) => tracing::warn!(pi_id, "no pending portal_access found for webhook pi"),
         Err(e) => tracing::error!(pi_id, error = %e, "complete_portal_access failed"),
     }
-}
-
-// ── portrait_purchase ─────────────────────────────────────────────────────────
-
-async fn complete_portrait_purchase(state: &AppState, pi_id: &str) {
-    #[derive(sqlx::FromRow)]
-    struct PurchaseIntent {
-        token_id: i32,
-        buyer_user_id: i32,
-        seller_user_id: i32,
-        creator_user_id: i32,
-        amount_cents: i64,
-    }
-
-    // Resolve all parties from the DB — never from metadata.
-    let intent_result: Result<Option<PurchaseIntent>, _> = sqlx::query_as(
-        "UPDATE portrait_purchase_intents SET status = 'processing'
-         WHERE stripe_payment_intent_id = $1 AND status = 'pending'
-         RETURNING token_id, buyer_user_id, seller_user_id, creator_user_id, amount_cents",
-    )
-    .bind(pi_id)
-    .fetch_optional(&state.db)
-    .await;
-
-    let intent = match intent_result {
-        Ok(Some(i)) => i,
-        Ok(None) => {
-            tracing::warn!(
-                pi_id,
-                "no pending portrait_purchase_intent found for webhook pi"
-            );
-            return;
-        }
-        Err(e) => {
-            tracing::error!(pi_id, error = %e, "complete_portrait_purchase: intent lookup failed");
-            return;
-        }
-    };
-
-    // Transfer ownership.
-    let transfer = sqlx::query(
-        "UPDATE portrait_tokens SET owner_id = $1
-         WHERE id = $2 AND owner_id = $3",
-    )
-    .bind(intent.buyer_user_id)
-    .bind(intent.token_id)
-    .bind(intent.seller_user_id)
-    .execute(&state.db)
-    .await;
-
-    match transfer {
-        Ok(r) if r.rows_affected() == 0 => {
-            // Token already moved — idempotent; mark intent complete and exit.
-            tracing::warn!(
-                pi_id,
-                token = intent.token_id,
-                "portrait token already transferred or seller mismatch"
-            );
-            let _ = sqlx::query(
-                "UPDATE portrait_purchase_intents SET status = 'completed'
-                 WHERE stripe_payment_intent_id = $1",
-            )
-            .bind(pi_id)
-            .execute(&state.db)
-            .await;
-            return;
-        }
-        Err(e) => {
-            tracing::error!(pi_id, error = %e, "portrait_purchase ownership transfer failed");
-            return;
-        }
-        Ok(_) => {}
-    }
-
-    tracing::info!(
-        pi_id,
-        buyer = intent.buyer_user_id,
-        token = intent.token_id,
-        "portrait token transferred via webhook"
-    );
-
-    // Royalty: 15% to creator, 85% to seller (recorded; actual payout is manual / batched).
-    let creator_cut = (intent.amount_cents * 15) / 100;
-    let seller_cut = intent.amount_cents - creator_cut;
-
-    let _ = sqlx::query(
-        "INSERT INTO earnings_ledger
-             (user_id, amount_cents, type, stripe_payment_intent_id)
-         VALUES ($1, $2, 'portrait_royalty', $5), ($3, $4, 'portrait_sale', $5)",
-    )
-    .bind(intent.creator_user_id)
-    .bind(creator_cut)
-    .bind(intent.seller_user_id)
-    .bind(seller_cut)
-    .bind(pi_id)
-    .execute(&state.db)
-    .await;
-
-    let _ = sqlx::query(
-        "UPDATE portrait_purchase_intents SET status = 'completed'
-         WHERE stripe_payment_intent_id = $1",
-    )
-    .bind(pi_id)
-    .execute(&state.db)
-    .await;
-
-    audit::write(
-        &state.db,
-        Some(intent.buyer_user_id),
-        None,
-        "payment.portrait_purchased",
-        serde_json::json!({
-            "pi_id":          pi_id,
-            "token_id":       intent.token_id,
-            "buyer_id":       intent.buyer_user_id,
-            "seller_id":      intent.seller_user_id,
-            "creator_id":     intent.creator_user_id,
-            "amount_cents":   intent.amount_cents,
-            "creator_cut":    creator_cut,
-            "seller_cut":     seller_cut,
-            "outcome":        "transferred",
-        }),
-        None,
-    )
-    .await;
 }
 
 // ── identity.verification_session.verified ────────────────────────────────────

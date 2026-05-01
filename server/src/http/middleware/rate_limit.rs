@@ -29,23 +29,26 @@ const WINDOW_SECS:  u64 = 60;
 // ── In-process fallback limiter ───────────────────────────────────────────────
 
 pub struct RateLimiter {
-    windows: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
+    windows:      Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
+    max_requests: usize,
+    window:       Duration,
 }
 
 impl RateLimiter {
-    pub fn new() -> Arc<Self> {
+    pub fn new(max_requests: usize, window_secs: u64) -> Arc<Self> {
         Arc::new(Self {
             windows: Mutex::new(HashMap::new()),
+            max_requests,
+            window: Duration::from_secs(window_secs),
         })
     }
 
     pub fn allow(&self, ip: IpAddr) -> bool {
-        let now    = Instant::now();
-        let window = Duration::from_secs(WINDOW_SECS);
+        let now = Instant::now();
         let mut map = self.windows.lock().unwrap();
         let deque = map.entry(ip).or_insert_with(VecDeque::new);
-        deque.retain(|&t| now.duration_since(t) < window);
-        if deque.len() >= MAX_REQUESTS as usize {
+        deque.retain(|&t| now.duration_since(t) < self.window);
+        if deque.len() >= self.max_requests {
             return false;
         }
         deque.push_back(now);

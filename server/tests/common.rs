@@ -15,7 +15,7 @@ use testcontainers::ContainerAsync;
 use testcontainers_modules::redis::Redis;
 
 use box_fraise_server::{
-    app::AppState,
+    app::{AppState, PinHashes},
     auth::new_revoked_tokens,
     config::Config,
     http::middleware::{hmac::new_nonce_cache, rate_limit::RateLimiter},
@@ -32,7 +32,7 @@ pub fn test_config() -> Config {
         staff_jwt_secret:         SecretString::from("test-staff-secret-minimum-32-chars!!".to_string()),
         staff_jwt_secret_previous: None,
         stripe_secret_key:     SecretString::from("sk_test_placeholder".to_string()),
-        stripe_webhook_secret: SecretString::from("whsec_placeholder".to_string()),
+        stripe_webhook_secret: SecretString::from("whsec_test_secret_for_handler_tests".to_string()),
         admin_pin:       SecretString::from("testpin1".to_string()),
         chocolatier_pin: SecretString::from("testpin2".to_string()),
         supplier_pin:    SecretString::from("testpin3".to_string()),
@@ -62,15 +62,46 @@ pub fn test_config() -> Config {
     }
 }
 
+fn test_pin_hashes() -> Arc<PinHashes> {
+    Arc::new(PinHashes {
+        admin:       bcrypt::hash("testpin1", 4).unwrap(),
+        chocolatier: bcrypt::hash("testpin2", 4).unwrap(),
+        supplier:    bcrypt::hash("testpin3", 4).unwrap(),
+    })
+}
+
 pub fn build_state(db: PgPool, redis: Option<RedisPool>) -> AppState {
     AppState {
         db,
-        cfg:     Arc::new(test_config()),
-        revoked: new_revoked_tokens(),
-        nonces:  new_nonce_cache(),
+        cfg:          Arc::new(test_config()),
+        revoked:      new_revoked_tokens(),
+        nonces:       new_nonce_cache(),
         redis,
-        rate:    RateLimiter::new(),
-        http:    reqwest::Client::new(),
+        rate:         RateLimiter::new(120, 60),
+        dorotka_rate: RateLimiter::new(20, 60),
+        http:         reqwest::Client::new(),
+        pin_hashes:   test_pin_hashes(),
+    }
+}
+
+/// Build a state with a custom Dorotka rate limit — used by rate limit tests
+/// that need a tighter window for speed (e.g. 3/1s instead of 20/60s).
+pub fn build_state_with_dorotka_rate(
+    db: PgPool,
+    redis: Option<RedisPool>,
+    max_requests: usize,
+    window_secs: u64,
+) -> AppState {
+    AppState {
+        db,
+        cfg:          Arc::new(test_config()),
+        revoked:      new_revoked_tokens(),
+        nonces:       new_nonce_cache(),
+        redis,
+        rate:         RateLimiter::new(120, 60),
+        dorotka_rate: RateLimiter::new(max_requests, window_secs),
+        http:         reqwest::Client::new(),
+        pin_hashes:   test_pin_hashes(),
     }
 }
 
@@ -134,6 +165,18 @@ pub async fn create_business(pool: &PgPool, name: &str) -> Biz {
     Biz { id }
 }
 
+pub async fn create_location(pool: &PgPool, business_id: i32, name: &str) -> i32 {
+    let (id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (business_id, name, address) VALUES ($1, $2, '1 Test St') RETURNING id"
+    )
+    .bind(business_id)
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("create_location: {e}"));
+    id
+}
+
 pub async fn seed_loyalty_config(pool: &PgPool, business_id: i32, steeps_per_reward: i32) {
     sqlx::query(
         "INSERT INTO business_loyalty_config (business_id, steeps_per_reward)
@@ -145,6 +188,61 @@ pub async fn seed_loyalty_config(pool: &PgPool, business_id: i32, steeps_per_rew
     .execute(pool)
     .await
     .unwrap_or_else(|e| panic!("seed_loyalty_config: {e}"));
+}
+
+// ── JWT helpers ───────────────────────────────────────────────────────────────
+
+/// Sign a valid JWT for `user_id` using the test JWT secret.
+pub fn valid_token(user_id: i32) -> String {
+    use box_fraise_server::auth::Claims;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    let exp = (chrono::Utc::now().timestamp() + 86400 * 90) as usize;
+    let claims = Claims {
+        user_id: UserId::from(user_id),
+        exp,
+        jti: uuid::Uuid::new_v4().to_string(),
+    };
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(b"test-jwt-secret-minimum-32-characters!!"),
+    )
+    .unwrap()
+}
+
+/// Sign a JWT for `user_id` that is already expired (exp = 1).
+pub fn expired_token(user_id: i32) -> String {
+    use box_fraise_server::auth::Claims;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    let claims = Claims {
+        user_id: UserId::from(user_id),
+        exp: 1, // Unix epoch + 1 second — always expired
+        jti: "test-expired-jti".to_string(),
+    };
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(b"test-jwt-secret-minimum-32-characters!!"),
+    )
+    .unwrap()
+}
+
+// ── Stripe webhook helpers ─────────────────────────────────────────────────────
+
+/// The test webhook secret — must match the stripe_webhook_secret in test_config().
+pub const STRIPE_WEBHOOK_SECRET: &str = "whsec_test_secret_for_handler_tests";
+
+/// Compute a valid `Stripe-Signature` header for a given payload.
+/// Mirrors Stripe's HMAC-SHA256 algorithm: `t=<unix>,v1=<hex(HMAC(t.payload))>`.
+pub fn sign_stripe_webhook(payload: &[u8]) -> String {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let signed = format!("{}.{}", timestamp, String::from_utf8_lossy(payload));
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, STRIPE_WEBHOOK_SECRET.as_bytes());
+    let sig = ring::hmac::sign(&key, signed.as_bytes());
+    format!("t={},v1={}", timestamp, hex::encode(sig.as_ref()))
 }
 
 // ── Square webhook helpers ─────────────────────────────────────────────────────
@@ -168,16 +266,17 @@ pub fn test_config_with_square_oauth() -> Config {
     }
 }
 
-pub fn build_state_with_square_oauth(db: PgPool, redis: Option<RedisPool>) -> box_fraise_server::app::AppState {
-    use box_fraise_server::app::AppState;
+pub fn build_state_with_square_oauth(db: PgPool, redis: Option<RedisPool>) -> AppState {
     AppState {
         db,
-        cfg:     Arc::new(test_config_with_square_oauth()),
-        revoked: box_fraise_server::auth::new_revoked_tokens(),
-        nonces:  box_fraise_server::http::middleware::hmac::new_nonce_cache(),
+        cfg:          Arc::new(test_config_with_square_oauth()),
+        revoked:      new_revoked_tokens(),
+        nonces:       new_nonce_cache(),
         redis,
-        rate:    box_fraise_server::http::middleware::rate_limit::RateLimiter::new(),
-        http:    reqwest::Client::new(),
+        rate:         RateLimiter::new(120, 60),
+        dorotka_rate: RateLimiter::new(20, 60),
+        http:         reqwest::Client::new(),
+        pin_hashes:   test_pin_hashes(),
     }
 }
 
@@ -208,8 +307,6 @@ pub async fn seed_oauth_tokens(
 }
 
 /// Seeds a venue_orders row in 'paid' status for testing idempotency paths.
-/// The order has no items — sufficient for testing the status guard without
-/// needing a full Create→Pay flow.
 pub async fn seed_paid_venue_order(
     pool:        &PgPool,
     business_id: i32,
@@ -234,7 +331,6 @@ pub async fn seed_paid_venue_order(
 }
 
 /// Seeds a Square OAuth CSRF state token in Redis.
-/// Key: fraise:square-oauth-state:{token} → "{business_id}"
 pub async fn seed_oauth_csrf_state(redis_pool: &RedisPool, token: &str, business_id: i32) {
     use deadpool_redis::redis;
     let key = format!("fraise:square-oauth-state:{token}");
@@ -252,23 +348,24 @@ pub fn test_config_with_square() -> Config {
     Config {
         square_app_id: Some("sq0idp-test".to_string()),
         square_order_webhook_signing_key: Some(
-            SecretString::from(SQUARE_SIGNING_KEY)
+            SecretString::from(SQUARE_SIGNING_KEY.to_string())
         ),
         square_order_notification_url: Some(SQUARE_NOTIFICATION_URL.to_string()),
         ..test_config()
     }
 }
 
-pub fn build_state_with_square(db: PgPool, redis: Option<RedisPool>) -> box_fraise_server::app::AppState {
-    use box_fraise_server::app::AppState;
+pub fn build_state_with_square(db: PgPool, redis: Option<RedisPool>) -> AppState {
     AppState {
         db,
-        cfg:     Arc::new(test_config_with_square()),
-        revoked: box_fraise_server::auth::new_revoked_tokens(),
-        nonces:  box_fraise_server::http::middleware::hmac::new_nonce_cache(),
+        cfg:          Arc::new(test_config_with_square()),
+        revoked:      new_revoked_tokens(),
+        nonces:       new_nonce_cache(),
         redis,
-        rate:    box_fraise_server::http::middleware::rate_limit::RateLimiter::new(),
-        http:    reqwest::Client::new(),
+        rate:         RateLimiter::new(120, 60),
+        dorotka_rate: RateLimiter::new(20, 60),
+        http:         reqwest::Client::new(),
+        pin_hashes:   test_pin_hashes(),
     }
 }
 
@@ -282,4 +379,101 @@ pub fn sign_square_payload(key: &str, url: &str, body: &[u8]) -> String {
     ctx.update(url.as_bytes());
     ctx.update(body);
     base64::engine::general_purpose::STANDARD.encode(ctx.sign().as_ref())
+}
+
+// ── Device auth helpers ───────────────────────────────────────────────────────
+
+/// Generate a fresh k256 signing key (Ethereum private key) for device auth tests.
+pub fn device_signing_key() -> k256::ecdsa::SigningKey {
+    k256::ecdsa::SigningKey::random(&mut rand::thread_rng())
+}
+
+/// Derive the Ethereum address (0x-prefixed lowercase hex) from a signing key.
+pub fn device_eth_address(signing_key: &k256::ecdsa::SigningKey) -> String {
+    use sha3::{Digest, Keccak256};
+    let verifying_key = signing_key.verifying_key();
+    let encoded = verifying_key.to_encoded_point(false);
+    let pubkey_bytes = &encoded.as_bytes()[1..]; // strip 0x04 uncompressed prefix
+    let hash: [u8; 32] = Keccak256::digest(pubkey_bytes).into();
+    format!("0x{}", hex::encode(&hash[12..]))
+}
+
+/// Build the `Authorization: Fraise <address>:<signature>` header value
+/// for the current minute — matches the server's ±1 minute tolerance window.
+pub fn device_auth_header(signing_key: &k256::ecdsa::SigningKey) -> String {
+    use k256::ecdsa::signature::hazmat::PrehashSigner;
+    use sha3::{Digest, Keccak256};
+
+    let minute = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() / 60;
+
+    let message = minute.to_string();
+    let prefixed = format!("\x19Ethereum Signed Message:\n{}{}", message.len(), message);
+    let hash: [u8; 32] = Keccak256::digest(prefixed.as_bytes()).into();
+
+    let (sig, rid): (k256::ecdsa::Signature, k256::ecdsa::RecoveryId) =
+        signing_key.sign_prehash(&hash).expect("sign_prehash");
+
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[..64].copy_from_slice(&sig.to_bytes());
+    sig_bytes[64] = u8::from(rid) + 27;
+
+    format!("Fraise {}:{}", device_eth_address(signing_key), hex::encode(&sig_bytes))
+}
+
+/// Insert a device record in the DB.
+/// Creates a throwaway user as the device owner (devices require a user_id).
+pub async fn create_device(
+    pool:        &PgPool,
+    eth_address: &str,
+    role:        &str,
+    business_id: Option<i32>,
+) -> i32 {
+    let owner_email = format!("device_owner_{}@test.com", uuid::Uuid::new_v4().simple());
+    let (owner_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email) VALUES ($1) RETURNING id"
+    )
+    .bind(&owner_email)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("create_device owner: {e}"));
+
+    let (id,): (i32,) = sqlx::query_as(
+        "INSERT INTO devices (device_address, user_id, role, business_id)
+         VALUES ($1, $2, $3, $4) RETURNING id"
+    )
+    .bind(eth_address)
+    .bind(owner_id)
+    .bind(role)
+    .bind(business_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("create_device: {e}"));
+    id
+}
+
+/// Insert a minimal order in 'ready' status for device_collect tests.
+/// Returns the nfc_token used for routing.
+pub async fn create_ready_order(
+    pool:        &PgPool,
+    location_id: i32,
+    business_id: i32,
+) -> String {
+    let nfc_token = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO orders
+             (location_id, business_id, chocolate, finish, quantity,
+              total_cents, customer_email, status, nfc_token)
+         VALUES ($1, $2, 'guanaja_70', 'plain', 1, 1000, 'customer@test.com',
+                 'ready', $3)"
+    )
+    .bind(location_id)
+    .bind(business_id)
+    .bind(&nfc_token)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|e| panic!("create_ready_order: {e}"));
+    nfc_token
 }

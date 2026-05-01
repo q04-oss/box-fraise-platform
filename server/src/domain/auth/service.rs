@@ -192,8 +192,9 @@ pub async fn register(
             if let Some(verify_url) =
                 issue_verification_token(redis.as_ref(), user_id, &base_url).await
             {
-                let _ = resend::send_verification_email(&http, &api_key, &user_email, &verify_url)
-                    .await;
+                if let Err(e) = resend::send_verification_email(&http, &api_key, &user_email, &verify_url).await {
+                    tracing::error!(user_id = %user_id, error = %e, "verification email delivery failed");
+                }
             }
         });
     }
@@ -318,7 +319,10 @@ pub async fn forgot_password(state: &AppState, email: &str) -> AppResult<()> {
             tokio::spawn(async move {
                 // Universal Link — iOS intercepts this and shows the in-app reset form.
                 let reset_url = format!("{base_url}/reset-password?token={token}");
-                let _ = resend::send_password_reset(&http, &api_key, &to, &reset_url).await;
+                if let Err(e) = resend::send_password_reset(&http, &api_key, &to, &reset_url).await {
+                    // No user context logged — prevents confirming whether an email exists.
+                    tracing::error!(error = %e, "password reset email delivery failed");
+                }
             });
         }
     }
@@ -418,7 +422,9 @@ pub async fn request_magic_link(state: &AppState, email: &str) -> AppResult<()> 
         let to = email.to_owned();
         tokio::spawn(async move {
             let link = format!("{base_url}/api/auth/magic-link/open?token={token}");
-            let _ = resend::send_magic_link_email(&http, &api_key, &to, &link).await;
+            if let Err(e) = resend::send_magic_link_email(&http, &api_key, &to, &link).await {
+                tracing::error!(error = %e, "magic link email delivery failed");
+            }
         });
     }
 

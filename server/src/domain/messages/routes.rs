@@ -77,22 +77,27 @@ async fn send(
         let http = state.http.clone();
         let rid  = body.recipient_id;
         tokio::spawn(async move {
-            if let Ok(Some((token,))) = sqlx::query_as::<_, (Option<String>,)>(
+            match sqlx::query_as::<_, (Option<String>,)>(
                 "SELECT push_token FROM users WHERE id = $1"
             )
             .bind(rid)
             .fetch_optional(&pool)
-            .await {
-                if let Some(t) = token {
-                    let _ = crate::integrations::expo_push::send(
+            .await
+            {
+                Ok(Some((Some(t),))) => {
+                    if let Err(e) = crate::integrations::expo_push::send(
                         &http,
                         crate::integrations::expo_push::PushMessage {
                             to:   &t,
                             body: "New message",
                             ..Default::default()
                         },
-                    ).await;
+                    ).await {
+                        tracing::error!(recipient_id = i32::from(rid), error = %e, "message push notification failed");
+                    }
                 }
+                Ok(_) => {} // no push token registered
+                Err(e) => tracing::error!(recipient_id = i32::from(rid), error = %e, "push token lookup failed"),
             }
         });
     }

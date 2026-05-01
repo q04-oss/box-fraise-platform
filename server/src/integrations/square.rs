@@ -278,7 +278,7 @@ impl<'a> ApiClient<'a> {
 ///
 /// `pub(crate)` so unit tests can exercise this parsing logic directly without
 /// making HTTP calls. The HTTP layer is tested separately in the integration test.
-pub(crate) fn parse_first_active_location(body: &str) -> AppResult<String> {
+pub fn parse_first_active_location(body: &str) -> AppResult<String> {
     let v: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Square locations parse: {e}")))?;
 

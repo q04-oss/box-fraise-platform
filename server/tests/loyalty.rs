@@ -20,7 +20,7 @@ use sqlx::PgPool;
 /// This test also exercises the Lua consume script end-to-end against real
 /// Redis — confirming that redis::Value::Data matching is correct for this
 /// crate version.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn qr_token_valid_redemption(pool: PgPool) {
     let (_redis, redis_pool) = common::start_redis().await;
     let state = common::build_state(pool.clone(), Some(redis_pool));
@@ -59,7 +59,7 @@ async fn qr_token_valid_redemption(pool: PgPool) {
 /// Security property: a staff member from business B cannot consume a QR token
 /// that was issued for business A. The token must survive the rejection so the
 /// customer can present it to the correct staff member.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn qr_token_cross_business_rejected_and_preserved(pool: PgPool) {
     let (_redis, redis_pool) = common::start_redis().await;
     let state = common::build_state(pool.clone(), Some(redis_pool));
@@ -103,7 +103,7 @@ async fn qr_token_cross_business_rejected_and_preserved(pool: PgPool) {
 
 /// A token consumed on a valid stamp must not be redeemable a second time.
 /// This tests the GETDEL atomicity of the Lua consume script.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn qr_token_is_single_use(pool: PgPool) {
     let (_redis, redis_pool) = common::start_redis().await;
     let state = common::build_state(pool.clone(), Some(redis_pool));
@@ -143,7 +143,7 @@ async fn qr_token_is_single_use(pool: PgPool) {
 // ── QR token: unknown token returns Unauthorized ──────────────────────────────
 
 /// A token that was never issued (or has already expired) returns Unauthorized.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn qr_token_unknown_returns_unauthorized(pool: PgPool) {
     let (_redis, redis_pool) = common::start_redis().await;
     let state = common::build_state(pool.clone(), Some(redis_pool));
@@ -167,7 +167,7 @@ async fn qr_token_unknown_returns_unauthorized(pool: PgPool) {
 
 /// issue_qr_token must be gated behind email verification — an unverified
 /// user cannot start earning walk-in steeps.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn qr_token_unverified_user_rejected(pool: PgPool) {
     let (_redis, redis_pool) = common::start_redis().await;
     let state = common::build_state(pool.clone(), Some(redis_pool));
@@ -188,7 +188,7 @@ async fn qr_token_unverified_user_rejected(pool: PgPool) {
 
 /// The HTML /stamp page has no staff JWT — actor_id is None. The audit row
 /// must write NULL, not crash or default to 0.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn html_stamp_none_actor_writes_null_to_audit(pool: PgPool) {
     let (_redis, redis_pool) = common::start_redis().await;
     let state = common::build_state(pool.clone(), Some(redis_pool));
@@ -230,7 +230,7 @@ async fn html_stamp_none_actor_writes_null_to_audit(pool: PgPool) {
 /// record_steep_from_webhook must treat a duplicate idempotency_key as a
 /// Conflict — not a 500. This exercises the UNIQUE constraint on loyalty_events
 /// and confirms the error mapping is correct.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn webhook_steep_idempotent_on_duplicate_key(pool: PgPool) {
     let state = common::build_state(pool.clone(), None); // no Redis needed
 
@@ -269,7 +269,7 @@ async fn webhook_steep_idempotent_on_duplicate_key(pool: PgPool) {
 
 /// The DB trigger must reject any attempt to UPDATE or DELETE a loyalty_event
 /// row. This is load-bearing for the integrity of the loyalty ledger.
-#[sqlx::test(migrations = "migrations")]
+#[sqlx::test]
 async fn loyalty_events_are_append_only(pool: PgPool) {
     let state = common::build_state(pool.clone(), None);
 
