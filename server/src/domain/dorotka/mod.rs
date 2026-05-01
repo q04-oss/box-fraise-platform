@@ -1,2 +1,2 @@
 pub mod routes;
-pub mod service;
+pub use box_fraise_domain::domain::dorotka::service;

@@ -1,0 +1,20 @@
+[package]
+name    = "box-fraise-integrations"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "box_fraise_integrations"
+path = "src/lib.rs"
+
+[dependencies]
+reqwest    = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+tracing    = { workspace = true }
+ring       = { workspace = true }
+base64     = { workspace = true }
+hex        = { workspace = true }
+secrecy    = { workspace = true }
+chrono     = { workspace = true }

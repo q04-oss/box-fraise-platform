@@ -1,4 +1,2 @@
-pub mod repository;
 pub mod routes;
-pub mod service;
-pub mod types;
+pub use box_fraise_domain::domain::auth::{repository, service, types};

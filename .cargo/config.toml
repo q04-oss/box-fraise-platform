@@ -1,0 +1,26 @@
+# Windows-local linker configuration.
+#
+# Context: MSVC Build Tools are not installed on this machine. The active
+# toolchain is therefore x86_64-pc-windows-gnu, which uses MinGW-w64 GCC
+# as its linker. The GNU toolchain and GCC are both already present:
+#
+#   toolchain : stable-x86_64-pc-windows-gnu  (via `rustup override`)
+#   linker    : C:\msys64\mingw64\bin\gcc.exe  (MSYS2 MinGW-w64, GCC 15.2)
+#
+# This section is only active when the target triple is x86_64-pc-windows-gnu.
+# Linux CI uses x86_64-unknown-linux-gnu — this section does not apply there.
+# macOS CI would use x86_64/aarch64-apple-darwin — also unaffected.
+#
+# If MSVC Build Tools are installed in the future, remove the rustup override
+# (`rustup override unset`) and delete this file or switch the target section
+# to x86_64-pc-windows-msvc pointing at the real link.exe.
+
+[target.x86_64-pc-windows-gnu]
+linker = "C:\\msys64\\mingw64\\bin\\gcc.exe"
+ar     = "C:\\msys64\\mingw64\\bin\\ar.exe"
+
+# windows-sys build script calls dlltool to generate import libraries.
+# dlltool is part of MinGW Binutils and lives alongside gcc.
+# The [env] block exposes it without requiring C:\msys64\mingw64\bin on PATH.
+[env]
+DLLTOOL = "C:\\msys64\\mingw64\\bin\\dlltool.exe"

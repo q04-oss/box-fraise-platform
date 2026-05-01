@@ -12,44 +12,37 @@ use tower_http::{
 };
 use tracing::Level;
 
-use crate::{
+use box_fraise_domain::{
     auth::{new_revoked_tokens, RevokedTokens},
     config::Config,
-    http::{
-        middleware::{
-            hmac::{new_nonce_cache, NonceCache},
-            rate_limit::{RateLimiter, SharedRateLimiter},
-        },
-        routes::meta,
+};
+use crate::http::{
+    middleware::{
+        hmac::{new_nonce_cache, NonceCache},
+        rate_limit::{RateLimiter, SharedRateLimiter},
     },
+    routes::meta,
 };
 
 // ── AppState ──────────────────────────────────────────────────────────────────
 
-/// Shared application state — cheap to clone (all heap data is Arc-backed).
 #[derive(Clone)]
 pub struct AppState {
-    pub db: PgPool,
-    pub cfg: Arc<Config>,
-    pub revoked: RevokedTokens,
-    /// In-process nonce cache — used as fallback when Redis is not configured.
-    /// Safe for single-instance deployments only. Ignored when `redis` is Some.
-    pub nonces: NonceCache,
-    /// Redis pool for distributed nonce deduplication.
-    /// None when REDIS_URL is not set — falls back to `nonces`.
-    pub redis: Option<RedisPool>,
-    pub rate: SharedRateLimiter,
-    /// Separate sliding-window limiter for the Dorotka AI endpoint.
-    /// 20 req/IP/min — tighter than the global limit because Anthropic calls have real cost.
+    pub db:           PgPool,
+    pub cfg:          Arc<Config>,
+    pub revoked:      RevokedTokens,
+    pub nonces:       NonceCache,
+    pub redis:        Option<RedisPool>,
+    pub rate:         SharedRateLimiter,
     pub dorotka_rate: SharedRateLimiter,
-    /// Shared HTTP client — reuses the connection pool across all integration calls.
-    pub http: reqwest::Client,
+    pub http:         reqwest::Client,
 }
 
 impl AppState {
     pub fn new(db: PgPool, cfg: Config) -> Self {
+        use secrecy::ExposeSecret;
+
         let redis = cfg.redis_url.as_ref().and_then(|url| {
-            use secrecy::ExposeSecret;
             let url_str = url.expose_secret().to_owned();
             match deadpool_redis::Config::from_url(url_str)
                 .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -74,9 +67,9 @@ impl AppState {
 
         Self {
             db,
-            cfg: Arc::new(cfg),
-            revoked: new_revoked_tokens(),
-            nonces: new_nonce_cache(),
+            cfg:          Arc::new(cfg),
+            revoked:      new_revoked_tokens(),
+            nonces:       new_nonce_cache(),
             redis,
             rate:         RateLimiter::new(120, 60),
             dorotka_rate: RateLimiter::new(20, 60),
@@ -92,15 +85,12 @@ impl AppState {
 
 pub fn build(state: AppState) -> Router {
     Router::new()
-        // ── Platform-level routes ─────────────────────────────────────────
         .merge(meta::router())
-        // ── Domain routes ─────────────────────────────────────────────────
         .merge(crate::domain::auth::routes::router())
         .merge(crate::domain::keys::routes::router())
         .merge(crate::domain::messages::routes::router())
         .merge(crate::domain::users::routes::router())
         .merge(crate::domain::dorotka::routes::router())
-        // ── Security middleware (innermost — applied last, runs first) ─────
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::http::middleware::hmac::validate,
@@ -109,12 +99,10 @@ pub fn build(state: AppState) -> Router {
             state.clone(),
             crate::http::middleware::rate_limit::check,
         ))
-        // Outer of hmac + rate_limit so it sees their 401/403 rejections too.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::http::middleware::log_rejections::log_rejections,
         ))
-        // ── Observability ─────────────────────────────────────────────────
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(
             TraceLayer::new_for_http()
@@ -122,9 +110,7 @@ pub fn build(state: AppState) -> Router {
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-        // ── Transport ─────────────────────────────────────────────────────
         .layer(CompressionLayer::new())
-        // ── Security headers ──────────────────────────────────────────────
         .layer(SetResponseHeaderLayer::overriding(
             header::STRICT_TRANSPORT_SECURITY,
             HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
@@ -160,6 +146,5 @@ pub fn build(state: AppState) -> Router {
                  frame-ancestors 'none'",
             ),
         ))
-        // ── State ─────────────────────────────────────────────────────────
         .with_state(state)
 }

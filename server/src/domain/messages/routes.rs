@@ -85,9 +85,9 @@ async fn send(
             .await
             {
                 Ok(Some((Some(t),))) => {
-                    if let Err(e) = crate::integrations::expo_push::send(
+                    if let Err(e) = box_fraise_integrations::expo_push::send(
                         &http,
-                        crate::integrations::expo_push::PushMessage {
+                        box_fraise_integrations::expo_push::PushMessage {
                             to:   &t,
                             body: "New message",
                             ..Default::default()

@@ -1,3 +1,2 @@
-pub mod repository;
 pub mod routes;
-pub mod types;
+pub use box_fraise_domain::domain::messages::{repository, types};

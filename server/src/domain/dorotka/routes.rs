@@ -7,12 +7,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
+use box_fraise_integrations::anthropic;
+
 use crate::{
     app::AppState,
     audit,
     error::{AppError, AppResult},
     http::middleware::rate_limit::client_ip,
-    integrations::anthropic,
 };
 use super::service;
 

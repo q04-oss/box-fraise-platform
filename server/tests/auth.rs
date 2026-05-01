@@ -45,7 +45,7 @@ async fn verify_email_marks_user_verified_and_returns_email(pool: PgPool) {
         .unwrap();
     drop(conn);
 
-    let email = auth::verify_email(&state, token)
+    let email = auth::verify_email(&state.db, state.redis.as_ref(), token)
         .await
         .expect("verify_email must succeed with a valid token");
 
@@ -83,12 +83,12 @@ async fn verify_email_token_is_single_use(pool: PgPool) {
     drop(conn);
 
     // First use succeeds.
-    auth::verify_email(&state, token)
+    auth::verify_email(&state.db, state.redis.as_ref(), token)
         .await
         .expect("first verification must succeed");
 
     // Second use must fail — token was consumed.
-    let replay = auth::verify_email(&state, token).await;
+    let replay = auth::verify_email(&state.db, state.redis.as_ref(), token).await;
     assert!(
         matches!(replay, Err(AppError::Unauthorized)),
         "replayed verification token must return Unauthorized, got: {replay:?}"
@@ -103,7 +103,7 @@ async fn verify_email_unknown_token_returns_unauthorized(pool: PgPool) {
     let (_redis, redis_pool) = common::start_redis().await;
     let state = common::build_state(pool.clone(), Some(redis_pool));
 
-    let result = auth::verify_email(&state, "00000000-0000-0000-0000-000000000000").await;
+    let result = auth::verify_email(&state.db, state.redis.as_ref(), "00000000-0000-0000-0000-000000000000").await;
     assert!(
         matches!(result, Err(AppError::Unauthorized)),
         "unknown verification token must return Unauthorized, got: {result:?}"
@@ -139,7 +139,7 @@ async fn resend_verification_rate_limit_blocks_second_request(pool: PgPool) {
     drop(conn);
 
     // Next call must be blocked — counter would become 2, which is > 1.
-    let result = auth::resend_verification(&state, user.id, "customer@test.com").await;
+    let result = auth::resend_verification(&state.cfg, &state.http, state.redis.as_ref(), user.id, "customer@test.com").await;
     assert!(
         matches!(result, Err(AppError::Unprocessable(_))),
         "second resend in window must return Unprocessable, got: {result:?}"

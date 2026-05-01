@@ -1,8 +1,6 @@
 /// Expo push notification client.
 use serde::Serialize;
 
-use crate::error::{AppError, AppResult};
-
 const EXPO_PUSH_URL: &str = "https://exp.host/--/api/v2/push/send";
 
 #[derive(Debug, Serialize)]
@@ -21,12 +19,11 @@ impl<'a> Default for PushMessage<'a> {
     }
 }
 
-/// Send a push notification. Logs warnings on non-fatal failures rather than
-/// propagating — a failed push should never roll back a successful transaction.
+/// Send a push notification. Non-fatal: logs warnings rather than propagating.
 pub async fn send(
     http: &reqwest::Client,
     msg:  PushMessage<'_>,
-) -> AppResult<()> {
+) -> anyhow::Result<()> {
     if !is_expo_token(msg.to) {
         tracing::warn!(token = msg.to, "send_push: not an Expo token, skipping");
         return Ok(());
@@ -37,7 +34,7 @@ pub async fn send(
         .json(&msg)
         .send()
         .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("push request failed: {e}")))?;
+        .map_err(|e| anyhow::anyhow!("push request failed: {e}"))?;
 
     if !resp.status().is_success() {
         tracing::warn!(status = %resp.status(), "push notification failed");

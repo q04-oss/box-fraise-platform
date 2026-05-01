@@ -1,0 +1,44 @@
+[workspace]
+members = [
+    "server",
+    "domain",
+    "integrations",
+]
+resolver = "2"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid", "json"] }
+
+# Serialisation
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+
+# Redis
+deadpool-redis = { version = "0.13", features = ["rt_tokio_1"] }
+redis          = { version = "0.23", features = ["script", "aio", "tokio-comp"] }
+
+# Utilities
+chrono    = { version = "0.4", features = ["serde"] }
+uuid      = { version = "1",   features = ["v4", "serde"] }
+anyhow    = "1"
+thiserror = "2"
+secrecy   = "0.8"
+tracing   = "0.1"
+
+# Crypto
+ring  = "0.17"
+base64 = "0.22"
+hex    = "0.4"
+
+[profile.release]
+opt-level     = 3
+lto           = true
+strip         = true
+codegen-units = 1

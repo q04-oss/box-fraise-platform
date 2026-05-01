@@ -32,9 +32,6 @@ pub enum AppError {
     #[error("payment required")]
     PaymentRequired,
 
-    /// 502 — an upstream service (Square, Stripe, etc.) returned an error or
-    /// an unexpected response. The message is user-facing: it should explain
-    /// what failed and what the operator needs to do to fix it.
     #[error("{0}")]
     BadGateway(String),
 

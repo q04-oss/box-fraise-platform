@@ -1,11 +1,9 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ring::signature::{self, UnparsedPublicKey};
+use sqlx::PgPool;
 
-use crate::{
-    app::AppState,
-    error::{AppError, AppResult},
-    types::UserId,
-};
+use crate::error::{AppError, AppResult};
+use crate::types::UserId;
 use super::{
     repository,
     types::{KeyBundleResponse, OtpkResponse, RegisterKeysBody},
@@ -13,42 +11,35 @@ use super::{
 
 // ── Challenge ─────────────────────────────────────────────────────────────────
 
-pub async fn issue_challenge(state: &AppState, user_id: UserId) -> AppResult<String> {
-    repository::create_challenge(&state.db, user_id).await
+pub async fn issue_challenge(pool: &PgPool, user_id: UserId) -> AppResult<String> {
+    repository::create_challenge(pool, user_id).await
 }
 
 // ── Key registration ──────────────────────────────────────────────────────────
 
 pub async fn register_keys(
-    state:   &AppState,
+    pool:    &PgPool,
     user_id: UserId,
     body:    RegisterKeysBody,
 ) -> AppResult<()> {
     match (&body.identity_signing_key, &body.challenge_sig) {
-        // Both present — perform proof-of-possession.
         (Some(signing_key_b64), Some(sig_b64)) => {
-            let challenge = repository::consume_challenge(&state.db, user_id)
+            let challenge = repository::consume_challenge(pool, user_id)
                 .await?
                 .ok_or_else(|| AppError::bad_request("no valid challenge found — request one first"))?;
 
             verify_ed25519(challenge.as_bytes(), sig_b64, signing_key_b64)?;
         }
-
-        // Signing key provided but no signature — reject.
-        // Accepting the key without PoP would allow an attacker to substitute any
-        // identity_signing_key and impersonate the user.
         (Some(_), None) => {
             return Err(AppError::bad_request(
                 "challenge_sig is required when identity_signing_key is provided",
             ));
         }
-
-        // Neither provided — register keys without signing key (older clients).
         _ => {}
     }
 
     repository::upsert_user_keys(
-        &state.db,
+        pool,
         user_id,
         &body.identity_key,
         body.identity_signing_key.as_deref(),
@@ -63,7 +54,7 @@ pub async fn register_keys(
             .into_iter()
             .map(|k| (k.key_id, k.public_key))
             .collect();
-        repository::insert_otpks(&state.db, user_id, &pairs).await?;
+        repository::insert_otpks(pool, user_id, &pairs).await?;
     }
 
     Ok(())
@@ -71,41 +62,32 @@ pub async fn register_keys(
 
 // ── OPK management ────────────────────────────────────────────────────────────
 
-pub async fn upload_otpks(
-    state:   &AppState,
-    user_id: UserId,
-    keys:    Vec<(i32, String)>,
-) -> AppResult<()> {
-    repository::insert_otpks(&state.db, user_id, &keys).await
+pub async fn upload_otpks(pool: &PgPool, user_id: UserId, keys: Vec<(i32, String)>) -> AppResult<()> {
+    repository::insert_otpks(pool, user_id, &keys).await
 }
 
-pub async fn otpk_count(state: &AppState, user_id: UserId) -> AppResult<i64> {
-    repository::count_otpks(&state.db, user_id).await
+pub async fn otpk_count(pool: &PgPool, user_id: UserId) -> AppResult<i64> {
+    repository::count_otpks(pool, user_id).await
 }
 
 // ── Key bundle (X3DH) ─────────────────────────────────────────────────────────
 
-// Keys registered before identity_signing_key was required have a NULL signing key.
-// These cannot be used to establish verifiable E2E sessions. The client must re-publish
-// before sessions can begin. After KEY_REFRESH_GRACE_DAYS, treat as permanently expired.
 const KEY_REFRESH_GRACE_DAYS: i64 = 30;
 
-pub async fn fetch_bundle(state: &AppState, target_id: UserId) -> AppResult<KeyBundleResponse> {
-    let keys = repository::find_user_keys(&state.db, target_id)
+pub async fn fetch_bundle(pool: &PgPool, target_id: UserId) -> AppResult<KeyBundleResponse> {
+    let keys = repository::find_user_keys(pool, target_id)
         .await?
         .ok_or(AppError::NotFound)?;
 
     if keys.identity_signing_key.is_none() {
         let age_days = (chrono::Utc::now().naive_utc() - keys.updated_at).num_days();
         if age_days >= KEY_REFRESH_GRACE_DAYS {
-            // Grace period elapsed — contact must re-register to message.
             return Err(AppError::Unprocessable("keys_expired".to_string()));
         }
-        // Within grace period — signal client to retry after contact re-publishes.
         return Err(AppError::Conflict("keys_need_refresh".to_string()));
     }
 
-    let otpk = repository::claim_otpk(&state.db, target_id).await?.map(|r| OtpkResponse {
+    let otpk = repository::claim_otpk(pool, target_id).await?.map(|r| OtpkResponse {
         key_id:     r.key_id,
         public_key: r.public_key,
     });
@@ -120,21 +102,16 @@ pub async fn fetch_bundle(state: &AppState, target_id: UserId) -> AppResult<KeyB
     })
 }
 
-pub async fn fetch_bundle_by_code(
-    state: &AppState,
-    code:  &str,
-) -> AppResult<KeyBundleResponse> {
-    let target_id = repository::user_id_by_code(&state.db, code)
+pub async fn fetch_bundle_by_code(pool: &PgPool, code: &str) -> AppResult<KeyBundleResponse> {
+    let target_id = repository::user_id_by_code(pool, code)
         .await?
         .ok_or(AppError::NotFound)?;
 
-    fetch_bundle(state, target_id).await
+    fetch_bundle(pool, target_id).await
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Verify an Ed25519 signature over `message` bytes.
-/// `sig_b64` and `pubkey_b64` are standard base64-encoded.
 fn verify_ed25519(message: &[u8], sig_b64: &str, pubkey_b64: &str) -> AppResult<()> {
     let sig = STANDARD
         .decode(sig_b64)

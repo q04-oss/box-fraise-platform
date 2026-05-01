@@ -1,14 +1,20 @@
 pub mod app;
-pub mod audit;
-pub mod auth;
-pub mod config;
-pub mod crypto;
-pub mod db;
 pub mod domain;
-pub mod error;
 pub mod http;
-pub mod integrations;
-pub mod types;
+
+// Re-export shared infrastructure from the domain crate so that:
+// 1. Route files can still use `use crate::error::AppError` unchanged.
+// 2. Tests can still import via `box_fraise_server::error::AppError`.
+pub use box_fraise_domain::audit;
+pub use box_fraise_domain::auth;
+pub use box_fraise_domain::config;
+pub use box_fraise_domain::crypto;
+pub use box_fraise_domain::db;
+pub use box_fraise_domain::error;
+pub use box_fraise_domain::types;
+
+// Re-export integrations for route files.
+pub use box_fraise_integrations as integrations;
 
 use secrecy::ExposeSecret;
 use tracing::info;

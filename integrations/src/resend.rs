@@ -4,8 +4,6 @@
 /// failure must never roll back a successful business transaction.
 use serde::Serialize;
 
-use crate::error::{AppError, AppResult};
-
 const RESEND_API: &str = "https://api.resend.com/emails";
 const FROM:       &str = "Maison Fraise <hello@fraise.box>";
 
@@ -25,14 +23,14 @@ pub async fn send(
     to:      &str,
     subject: &str,
     html:    &str,
-) -> AppResult<()> {
+) -> anyhow::Result<()> {
     let resp = http
         .post(RESEND_API)
         .bearer_auth(api_key)
         .json(&SendRequest { from: FROM, to: vec![to], subject, html })
         .send()
         .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Resend request failed: {e}")))?;
+        .map_err(|e| anyhow::anyhow!("Resend request failed: {e}"))?;
 
     if !resp.status().is_success() {
         tracing::warn!(to, status = %resp.status(), "email delivery failed");
@@ -43,15 +41,12 @@ pub async fn send(
 
 // ── Email templates ───────────────────────────────────────────────────────────
 
-/// `order_ref` is formatted as a display string in the email body. It accepts
-/// `OrderId` for real orders or an `i32` standing-order reference from the
-/// cron job, which does not yet have a real order ID at send time.
 pub async fn send_verification_email(
     http:       &reqwest::Client,
     api_key:    &str,
     to:         &str,
     verify_url: &str,
-) -> AppResult<()> {
+) -> anyhow::Result<()> {
     let html = base_template(&format!(
         r#"<p>Verify your email to start earning loyalty steeps.</p>
            <p style="margin:32px 0">
@@ -74,7 +69,7 @@ pub async fn send_password_reset(
     api_key:   &str,
     to:        &str,
     reset_url: &str,
-) -> AppResult<()> {
+) -> anyhow::Result<()> {
     let html = base_template(&format!(
         r#"<p>We received a request to reset your Box Fraise password.</p>
            <p style="margin:32px 0">
@@ -100,7 +95,7 @@ pub async fn send_order_confirmation(
     order_ref: impl std::fmt::Display,
     variety:   &str,
     total_cents: i32,
-) -> AppResult<()> {
+) -> anyhow::Result<()> {
     let html = base_template(&format!(
         "<p>Your order #{order_ref} for <strong>{variety}</strong> has been placed.</p>
          <p>Total: <strong>{}</strong></p>
@@ -116,7 +111,7 @@ pub async fn send_order_ready(
     to:      &str,
     order_id: i32,
     location: &str,
-) -> AppResult<()> {
+) -> anyhow::Result<()> {
     let html = base_template(&format!(
         "<p>Your box is ready for collection at <strong>{location}</strong>.</p>
          <p>Order #{order_id}</p>",
@@ -129,7 +124,7 @@ pub async fn send_order_queued(
     api_key: &str,
     to:      &str,
     variety: &str,
-) -> AppResult<()> {
+) -> anyhow::Result<()> {
     let html = base_template(&format!(
         "<p>Your order for <strong>{variety}</strong> has been added to the next batch.</p>
          <p>You'll be charged only when the batch is confirmed.</p>",
@@ -142,7 +137,7 @@ pub async fn send_rsvp_confirmed(
     api_key:  &str,
     to:       &str,
     event:    &str,
-) -> AppResult<()> {
+) -> anyhow::Result<()> {
     let html = base_template(&format!(
         "<p>Your RSVP for <strong>{event}</strong> is confirmed.</p>",
     ));
@@ -155,7 +150,7 @@ pub async fn send_gift_notification(
     to:         &str,
     from_name:  &str,
     claim_token: &str,
-) -> AppResult<()> {
+) -> anyhow::Result<()> {
     let html = base_template(&format!(
         "<p><strong>{from_name}</strong> sent you a gift.</p>
          <p>Claim code: <strong>{claim_token}</strong></p>",
@@ -169,7 +164,7 @@ pub async fn send_nomination(
     to:       &str,
     event:    &str,
     nominator: &str,
-) -> AppResult<()> {
+) -> anyhow::Result<()> {
     let html = base_template(&format!(
         "<p><strong>{nominator}</strong> nominated you for <strong>{event}</strong>.</p>",
     ));
@@ -181,7 +176,7 @@ pub async fn send_contract_offer(
     api_key:     &str,
     to:          &str,
     business:    &str,
-) -> AppResult<()> {
+) -> anyhow::Result<()> {
     let html = base_template(&format!(
         "<p>You have a new placement offer from <strong>{business}</strong>.</p>
          <p>Open the app to accept or decline.</p>",
@@ -194,7 +189,7 @@ pub async fn send_tip_received(
     api_key:    &str,
     to:         &str,
     amount_cents: i32,
-) -> AppResult<()> {
+) -> anyhow::Result<()> {
     let html = base_template(&format!(
         "<p>You received a tip of <strong>{}</strong>.</p>",
         format_cents(amount_cents),
@@ -207,7 +202,7 @@ pub async fn send_magic_link_email(
     api_key:  &str,
     to:       &str,
     link_url: &str,
-) -> AppResult<()> {
+) -> anyhow::Result<()> {
     let html = base_template(&format!(
         r#"<p>Tap the button below to sign in. This link expires in 15 minutes.</p>
            <p style="margin:32px 0">
