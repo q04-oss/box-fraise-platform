@@ -19,9 +19,13 @@ Audit the staged changes against the following classes:
    - Business/ownership scope missing from a device or staff action (e.g. collecting or modifying resources across business boundaries)
    - Email or identifier accepted from request body for a verification step that should use the server's own record
 
+6. **Secrets or keys in plain `String` fields** — Does any new config struct field, request body, or database column store a secret as a plain `String` instead of `SecretString`? Look for: API keys, tokens, passwords, private key material stored or logged without protection.
+
+7. **Layer violations** — Does any route handler import `repository` or call a repository function directly? Does any `service.rs` file import `axum`, `Json`, `Router`, or any HTTP type? The rule is strict: `routes.rs → service.rs → repository.rs`, no layer may skip another.
+
 For each finding, report:
 - File and line number
-- Which class (1–5) it falls under
+- Which class (1–7) it falls under
 - Whether it is exploitable now, needs a precondition, or is theoretical
 - The exact attack sequence if exploitable now
 

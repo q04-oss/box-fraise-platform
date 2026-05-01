@@ -1,2 +1,2 @@
 pub mod routes;
-pub use box_fraise_domain::domain::users::{repository, types};
+pub use box_fraise_domain::domain::users::{service, types};

@@ -378,6 +378,38 @@ pub async fn resend_verification(
     Ok(())
 }
 
+// ── Profile mutations ─────────────────────────────────────────────────────────
+
+pub async fn update_push_token(pool: &PgPool, user_id: UserId, token: &str) -> AppResult<()> {
+    repository::set_push_token(pool, user_id, token).await
+}
+
+pub async fn update_display_name(pool: &PgPool, user_id: UserId, name: &str) -> AppResult<()> {
+    repository::set_display_name(pool, user_id, name).await
+}
+
+/// Looks up the user, checks whether they are already verified, and re-issues
+/// a verification email if not. Returns `true` when the user was already
+/// verified (the caller can surface this to the client).
+pub async fn request_resend_verification(
+    pool:    &PgPool,
+    cfg:     &Arc<Config>,
+    http:    &reqwest::Client,
+    redis:   Option<&deadpool_redis::Pool>,
+    user_id: UserId,
+) -> AppResult<bool> {
+    let user = repository::find_by_id(pool, user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    if user.verified {
+        return Ok(true);
+    }
+
+    resend_verification(cfg, http, redis, user_id, &user.email).await?;
+    Ok(false)
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

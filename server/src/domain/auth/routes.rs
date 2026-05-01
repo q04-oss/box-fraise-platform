@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 
 use crate::http::middleware::rate_limit::client_ip;
 
-use super::{repository, service, types::*};
+use super::{service, types::*};
 use crate::{
     app::AppState,
     auth,
@@ -96,7 +96,7 @@ async fn push_token(
     RequireUser(user_id): RequireUser,
     AppJson(body): AppJson<PushTokenBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    repository::set_push_token(&state.db, user_id, &body.push_token).await?;
+    service::update_push_token(&state.db, user_id, &body.push_token).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -110,7 +110,7 @@ async fn display_name(
     if char_count == 0 || char_count > 50 {
         return Err(AppError::bad_request("display_name must be 1–50 characters"));
     }
-    repository::set_display_name(&state.db, user_id, trimmed).await?;
+    service::update_display_name(&state.db, user_id, trimmed).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -155,16 +155,10 @@ async fn resend_verification(
     State(state): State<AppState>,
     RequireUser(uid): RequireUser,
 ) -> AppResult<Json<serde_json::Value>> {
-    let user = repository::find_by_id(&state.db, uid)
-        .await?
-        .ok_or(AppError::NotFound)?;
-
-    if user.verified {
-        return Ok(Json(serde_json::json!({ "ok": true, "already_verified": true })));
-    }
-
-    service::resend_verification(&state.cfg, &state.http, state.redis.as_ref(), uid, &user.email).await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    let already_verified = service::request_resend_verification(
+        &state.db, &state.cfg, &state.http, state.redis.as_ref(), uid,
+    ).await?;
+    Ok(Json(serde_json::json!({ "ok": true, "already_verified": already_verified })))
 }
 
 async fn magic_link_request(

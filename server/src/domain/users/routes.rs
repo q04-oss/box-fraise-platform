@@ -10,22 +10,19 @@ use crate::{
     http::extractors::auth::RequireUser,
     types::UserId,
 };
-use super::{repository, types::*};
+use super::{service, types::*};
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        // Search & profiles
         .route("/api/users/search",                  get(search))
         .route("/api/users/{id}/public-profile",      get(public_profile))
-        // My profile
         .route("/api/users/me/social-access",        get(social_access))
-        // Notifications
         .route("/api/notifications",                 get(list_notifications))
         .route("/api/notifications/read-all",        post(read_all))
         .route("/api/notifications/{id}/read",        patch(mark_read))
 }
 
-// ── Search ────────────────────────────────────────────────────────────────────
+// ── Handlers ──────────────────────────────────────────────────────────────────
 
 async fn search(
     State(state): State<AppState>,
@@ -36,40 +33,28 @@ async fn search(
     if trimmed.is_empty() || trimmed.len() > 50 {
         return Err(AppError::bad_request("q must be 1-50 characters"));
     }
-    Ok(Json(repository::search(&state.db, trimmed).await?))
+    Ok(Json(service::search_users(&state.db, trimmed).await?))
 }
-
-// ── Public profile ────────────────────────────────────────────────────────────
 
 async fn public_profile(
     State(state): State<AppState>,
     Path(user_id): Path<UserId>,
 ) -> AppResult<Json<PublicProfile>> {
-    repository::public_profile(&state.db, user_id)
-        .await?
-        .ok_or(AppError::NotFound)
-        .map(Json)
+    Ok(Json(service::get_public_profile(&state.db, user_id).await?))
 }
-
-// ── My profile ────────────────────────────────────────────────────────────────
 
 async fn social_access(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<SocialAccess>> {
-    repository::social_access(&state.db, user_id)
-        .await?
-        .ok_or(AppError::NotFound)
-        .map(Json)
+    Ok(Json(service::get_social_access(&state.db, user_id).await?))
 }
-
-// ── Notifications ─────────────────────────────────────────────────────────────
 
 async fn list_notifications(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<NotificationRow>>> {
-    Ok(Json(repository::list_notifications(&state.db, user_id).await?))
+    Ok(Json(service::list_notifications(&state.db, user_id).await?))
 }
 
 async fn mark_read(
@@ -77,7 +62,7 @@ async fn mark_read(
     RequireUser(user_id): RequireUser,
     Path(notif_id): Path<i32>,
 ) -> AppResult<Json<serde_json::Value>> {
-    repository::mark_read(&state.db, user_id, notif_id).await?;
+    service::mark_notification_read(&state.db, user_id, notif_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -85,6 +70,6 @@ async fn read_all(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<serde_json::Value>> {
-    repository::mark_all_read(&state.db, user_id).await?;
+    service::mark_all_notifications_read(&state.db, user_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

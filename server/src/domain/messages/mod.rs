@@ -1,2 +1,2 @@
 pub mod routes;
-pub use box_fraise_domain::domain::messages::{repository, types};
+pub use box_fraise_domain::domain::messages::{service, types};
