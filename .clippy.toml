@@ -1,0 +1,16 @@
+# Clippy configuration for the box-fraise-platform workspace.
+#
+# disallowed-methods blocks specific function calls across the entire
+# codebase. Each entry becomes a deny(clippy::disallowed_methods) error
+# at every call site except where explicitly allowed.
+#
+# RULE: environment variables may only be read in domain/src/config.rs.
+# Add `#[allow(clippy::disallowed_methods)]` ONLY to that file.
+# All other code must obtain config values through the Config struct.
+# See CONTRIBUTING.md for the rationale.
+
+disallowed-methods = [
+  { path = "std::env::var",    reason = "Read env vars only through Config::load() in domain/src/config.rs. See CONTRIBUTING.md." },
+  { path = "std::env::var_os", reason = "Read env vars only through Config::load() in domain/src/config.rs. See CONTRIBUTING.md." },
+  { path = "std::env::vars",   reason = "Read env vars only through Config::load() in domain/src/config.rs. See CONTRIBUTING.md." },
+]

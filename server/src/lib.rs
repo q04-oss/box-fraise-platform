@@ -31,7 +31,15 @@ pub async fn run() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let cfg  = config::Config::load()?;
+    // Fail immediately with a human-readable message if any required variable
+    // is absent or invalid. The server must never reach the bind() call with
+    // incomplete configuration. process::exit(1) is used rather than panic so
+    // the exit code is unambiguous and no Rust backtrace noise is printed.
+    let cfg = config::Config::load().unwrap_or_else(|e| {
+        tracing::error!("configuration error — server will not start: {e:#}");
+        eprintln!("FATAL: {e:#}");
+        std::process::exit(1);
+    });
     let port = cfg.port;
     let pool = db::connect(cfg.database_url.expose_secret()).await?;
 

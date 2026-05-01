@@ -37,6 +37,11 @@ ring  = "0.17"
 base64 = "0.22"
 hex    = "0.4"
 
+[workspace.lints.clippy]
+# All three are blocked via .clippy.toml disallowed-methods.
+# config.rs carries #![allow(clippy::disallowed_methods)] as the sole exemption.
+disallowed_methods = "deny"
+
 [profile.release]
 opt-level     = 3
 lto           = true

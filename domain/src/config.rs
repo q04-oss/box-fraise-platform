@@ -1,3 +1,9 @@
+// This is the ONLY file permitted to call std::env::var / var_os / vars.
+// All other code must obtain configuration through the Config struct.
+// The allow below is the sole exemption — do not copy it elsewhere.
+// See CONTRIBUTING.md and .clippy.toml for the workspace rule.
+#![allow(clippy::disallowed_methods)]
+
 use std::env;
 use secrecy::SecretString;
 
