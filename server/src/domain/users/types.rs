@@ -56,11 +56,6 @@ pub struct NotificationRow {
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub struct WalletBody {
-    pub eth_address: String,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct SearchQuery {
     pub q: String,
 }

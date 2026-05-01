@@ -97,27 +97,6 @@ pub async fn stats(pool: &PgPool, user_id: UserId) -> AppResult<UserStats> {
     })
 }
 
-// ── Wallet ────────────────────────────────────────────────────────────────────
-
-pub async fn set_wallet(pool: &PgPool, user_id: UserId, address: &str) -> AppResult<()> {
-    sqlx::query("UPDATE users SET eth_address = $1 WHERE id = $2")
-        .bind(address)
-        .bind(user_id)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            if let sqlx::Error::Database(ref db) = e {
-                if db.constraint() == Some("users_eth_address_key") {
-                    return AppError::conflict(
-                        "wallet address already linked to another account",
-                    );
-                }
-            }
-            AppError::Db(e)
-        })?;
-    Ok(())
-}
-
 // ── Notifications ─────────────────────────────────────────────────────────────
 
 pub async fn list_notifications(

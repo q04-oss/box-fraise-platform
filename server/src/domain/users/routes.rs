@@ -7,7 +7,7 @@ use axum::{
 use crate::{
     app::AppState,
     error::{AppError, AppResult},
-    http::extractors::{auth::RequireUser, json::AppJson},
+    http::extractors::auth::RequireUser,
     types::UserId,
 };
 use super::{repository, types::*};
@@ -17,8 +17,7 @@ pub fn router() -> Router<AppState> {
         // Search & profiles
         .route("/api/users/search",                  get(search))
         .route("/api/users/{id}/public-profile",      get(public_profile))
-        // My profile mutations
-        .route("/api/users/me/wallet",               patch(wallet))
+        // My profile
         .route("/api/users/me/social-access",        get(social_access))
         .route("/api/users/me/stats",                get(stats))
         // Notifications
@@ -53,20 +52,7 @@ async fn public_profile(
         .map(Json)
 }
 
-// ── My profile mutations ──────────────────────────────────────────────────────
-
-async fn wallet(
-    State(state): State<AppState>,
-    RequireUser(user_id): RequireUser,
-    AppJson(body): AppJson<WalletBody>,
-) -> AppResult<Json<serde_json::Value>> {
-    let addr = body.eth_address.trim().to_lowercase();
-    if !is_valid_eth_address(&addr) {
-        return Err(AppError::bad_request("invalid Ethereum address"));
-    }
-    repository::set_wallet(&state.db, user_id, &addr).await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
+// ── My profile ────────────────────────────────────────────────────────────────
 
 async fn social_access(
     State(state): State<AppState>,
@@ -109,13 +95,4 @@ async fn read_all(
 ) -> AppResult<Json<serde_json::Value>> {
     repository::mark_all_read(&state.db, user_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Validate an Ethereum address: 0x-prefixed, 42 chars total, 40 hex digits.
-fn is_valid_eth_address(addr: &str) -> bool {
-    addr.starts_with("0x")
-        && addr.len() == 42
-        && addr[2..].chars().all(|c| c.is_ascii_hexdigit())
 }

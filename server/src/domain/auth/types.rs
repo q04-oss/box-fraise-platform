@@ -28,7 +28,6 @@ pub struct UserRow {
     pub portal_opted_in:           bool,
     pub identity_verified:         bool,
     pub worker_status:             Option<String>,
-    pub eth_address:               Option<String>,
     pub portrait_url:              Option<String>,
     pub password_hash:             Option<String>,
     pub created_at:                NaiveDateTime,
@@ -40,7 +39,7 @@ pub const USER_COLS: &str =
      verified, banned, table_verified, is_dorotka, stripe_customer_id, \
      stripe_connect_account_id, stripe_connect_onboarded, \
      ad_balance_cents, platform_credit_cents, social_time_bank_seconds, \
-     portal_opted_in, identity_verified, worker_status, eth_address, \
+     portal_opted_in, identity_verified, worker_status, \
      portrait_url, password_hash, created_at";
 
 // ── Request bodies ────────────────────────────────────────────────────────────
