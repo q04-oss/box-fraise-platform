@@ -2,10 +2,14 @@
 //!
 //! Run with:
 //!   DATABASE_URL=postgres://localhost/test cargo test --test auth
+//!
+//! Tests that require Redis skip gracefully when neither REDIS_URL nor Docker
+//! is available. In CI the GitHub Actions Redis service is used via REDIS_URL.
 
 mod common;
 
-use box_fraise_server::{domain::auth::service as auth, error::AppError};
+use box_fraise_domain::error::DomainError;
+use box_fraise_server::domain::auth::service as auth;
 use deadpool_redis::redis;
 use sqlx::PgPool;
 
@@ -19,7 +23,10 @@ const RESEND_RATE_PREFIX: &str = "fraise:rate:email-resend:";
 /// verified in the DB and return their email address.
 #[sqlx::test]
 async fn verify_email_marks_user_verified_and_returns_email(pool: PgPool) {
-    let (_redis, redis_pool) = common::start_redis().await;
+    let Some((_redis, redis_pool)) = common::start_redis().await else {
+        eprintln!("skipping: Redis not available (set REDIS_URL or start Docker)");
+        return;
+    };
     let state = common::build_state(pool.clone(), Some(redis_pool.clone()));
 
     let user = common::create_user(&pool, "customer@test.com").await;
@@ -65,7 +72,10 @@ async fn verify_email_marks_user_verified_and_returns_email(pool: PgPool) {
 /// with the same token must return Unauthorized.
 #[sqlx::test]
 async fn verify_email_token_is_single_use(pool: PgPool) {
-    let (_redis, redis_pool) = common::start_redis().await;
+    let Some((_redis, redis_pool)) = common::start_redis().await else {
+        eprintln!("skipping: Redis not available (set REDIS_URL or start Docker)");
+        return;
+    };
     let state = common::build_state(pool.clone(), Some(redis_pool.clone()));
 
     let user  = common::create_user(&pool, "customer@test.com").await;
@@ -90,7 +100,7 @@ async fn verify_email_token_is_single_use(pool: PgPool) {
     // Second use must fail — token was consumed.
     let replay = auth::verify_email(&state.db, state.redis.as_ref(), token).await;
     assert!(
-        matches!(replay, Err(AppError::Unauthorized)),
+        matches!(replay, Err(DomainError::Unauthorized)),
         "replayed verification token must return Unauthorized, got: {replay:?}"
     );
 }
@@ -100,12 +110,15 @@ async fn verify_email_token_is_single_use(pool: PgPool) {
 /// A token that was never issued (or has already expired) returns Unauthorized.
 #[sqlx::test]
 async fn verify_email_unknown_token_returns_unauthorized(pool: PgPool) {
-    let (_redis, redis_pool) = common::start_redis().await;
+    let Some((_redis, redis_pool)) = common::start_redis().await else {
+        eprintln!("skipping: Redis not available (set REDIS_URL or start Docker)");
+        return;
+    };
     let state = common::build_state(pool.clone(), Some(redis_pool));
 
     let result = auth::verify_email(&state.db, state.redis.as_ref(), "00000000-0000-0000-0000-000000000000").await;
     assert!(
-        matches!(result, Err(AppError::Unauthorized)),
+        matches!(result, Err(DomainError::Unauthorized)),
         "unknown verification token must return Unauthorized, got: {result:?}"
     );
 }
@@ -121,7 +134,10 @@ async fn verify_email_unknown_token_returns_unauthorized(pool: PgPool) {
 /// This tests the rate limiting gate in isolation from the email integration.
 #[sqlx::test]
 async fn resend_verification_rate_limit_blocks_second_request(pool: PgPool) {
-    let (_redis, redis_pool) = common::start_redis().await;
+    let Some((_redis, redis_pool)) = common::start_redis().await else {
+        eprintln!("skipping: Redis not available (set REDIS_URL or start Docker)");
+        return;
+    };
     let state = common::build_state(pool.clone(), Some(redis_pool.clone()));
 
     let user = common::create_user(&pool, "customer@test.com").await;
@@ -139,9 +155,11 @@ async fn resend_verification_rate_limit_blocks_second_request(pool: PgPool) {
     drop(conn);
 
     // Next call must be blocked — counter would become 2, which is > 1.
-    let result = auth::resend_verification(&state.cfg, &state.http, state.redis.as_ref(), user.id, "customer@test.com").await;
+    let result = auth::resend_verification_email(
+        &state.db, &state.cfg, &state.http, state.redis.as_ref(), user.id,
+    ).await;
     assert!(
-        matches!(result, Err(AppError::Unprocessable(_))),
+        matches!(result, Err(DomainError::Unprocessable(_))),
         "second resend in window must return Unprocessable, got: {result:?}"
     );
 

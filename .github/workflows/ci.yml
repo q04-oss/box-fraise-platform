@@ -25,6 +25,15 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -55,4 +64,4 @@ jobs:
         run: cargo test
         env:
           DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_test
-          # testcontainers handles Redis — no Redis service needed here
+          REDIS_URL: redis://localhost:6379

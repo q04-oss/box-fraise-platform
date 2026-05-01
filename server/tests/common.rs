@@ -2,7 +2,8 @@
 //!
 //! Usage in each test file:
 //!   mod common;
-//!   let (redis, pool) = common::start_redis().await;
+//!   let redis = common::start_redis().await;
+//!   let Some((_container, redis_pool)) = redis else { return; };
 //!   let state = common::build_state(db_pool, Some(redis_pool));
 
 use std::sync::Arc;
@@ -14,6 +15,7 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::ContainerAsync;
 use testcontainers_modules::redis::Redis;
 
+use box_fraise_domain::event_bus::EventBus;
 use box_fraise_server::{
     app::AppState,
     auth::new_revoked_tokens,
@@ -72,6 +74,7 @@ pub fn build_state(db: PgPool, redis: Option<RedisPool>) -> AppState {
         rate:         RateLimiter::new(120, 60),
         dorotka_rate: RateLimiter::new(20, 60),
         http:         reqwest::Client::new(),
+        event_bus:    EventBus::new(),
     }
 }
 
@@ -92,27 +95,46 @@ pub fn build_state_with_dorotka_rate(
         rate:         RateLimiter::new(120, 60),
         dorotka_rate: RateLimiter::new(max_requests, window_secs),
         http:         reqwest::Client::new(),
+        event_bus:    EventBus::new(),
     }
 }
 
-// ── Redis container ───────────────────────────────────────────────────────────
+// ── Redis ─────────────────────────────────────────────────────────────────────
 
-/// Starts a Redis container and returns (container, pool).
-/// The container must be held alive by the caller — dropping it stops Redis.
-pub async fn start_redis() -> (ContainerAsync<Redis>, RedisPool) {
-    let container = Redis::default()
-        .start()
-        .await
-        .expect("Redis test container must start");
-    let port = container
-        .get_host_port_ipv4(6379)
-        .await
-        .expect("Redis port must be exposed");
-    let url  = format!("redis://127.0.0.1:{port}");
-    let pool = deadpool_redis::Config::from_url(url)
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .expect("Redis pool must be created");
-    (container, pool)
+/// Resolves a Redis pool for tests, in priority order:
+///
+/// 1. `REDIS_URL` env var — used in CI (GitHub Actions Redis service).
+///    Returns `(None, pool)` — no container to keep alive.
+///
+/// 2. Docker testcontainer — used in local dev when Docker is available.
+///    Returns `(Some(container), pool)` — caller must hold the container alive.
+///
+/// 3. Neither available — returns `None`.
+///    Caller should `return;` to skip the test gracefully.
+pub async fn start_redis() -> Option<(Option<ContainerAsync<Redis>>, RedisPool)> {
+    // CI path: use the Redis service wired up by the workflow.
+    if let Ok(url) = std::env::var("REDIS_URL") {
+        let pool = deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("Redis pool from REDIS_URL must be created");
+        return Some((None, pool));
+    }
+
+    // Local dev path: spin up a container. Returns None if Docker is absent.
+    match Redis::default().start().await {
+        Ok(container) => {
+            let port = container
+                .get_host_port_ipv4(6379)
+                .await
+                .expect("Redis container port must be exposed");
+            let url  = format!("redis://127.0.0.1:{port}");
+            let pool = deadpool_redis::Config::from_url(url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("Redis pool must be created");
+            Some((Some(container), pool))
+        }
+        Err(_) => None,
+    }
 }
 
 // ── DB fixtures ───────────────────────────────────────────────────────────────
@@ -177,4 +199,3 @@ pub fn expired_token(user_id: i32) -> String {
     )
     .unwrap()
 }
-
