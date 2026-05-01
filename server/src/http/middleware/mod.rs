@@ -1,3 +1,4 @@
+pub mod correlation_id;
 pub mod hmac;
 pub mod log_rejections;
 pub mod rate_limit;

@@ -6,11 +6,8 @@ use deadpool_redis::Pool as RedisPool;
 use sqlx::PgPool;
 use tower_http::{
     compression::CompressionLayer,
-    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     set_header::SetResponseHeaderLayer,
-    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
 };
-use tracing::Level;
 
 use box_fraise_domain::{
     auth::{new_revoked_tokens, RevokedTokens},
@@ -18,6 +15,7 @@ use box_fraise_domain::{
 };
 use crate::http::{
     middleware::{
+        correlation_id,
         hmac::{new_nonce_cache, NonceCache},
         rate_limit::{RateLimiter, SharedRateLimiter},
     },
@@ -85,12 +83,14 @@ impl AppState {
 
 pub fn build(state: AppState) -> Router {
     Router::new()
+        // ── Domain routes ─────────────────────────────────────────────────────
         .merge(meta::router())
         .merge(crate::domain::auth::routes::router())
         .merge(crate::domain::keys::routes::router())
         .merge(crate::domain::messages::routes::router())
         .merge(crate::domain::users::routes::router())
         .merge(crate::domain::dorotka::routes::router())
+        // ── Security middleware (innermost — runs first) ───────────────────────
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::http::middleware::hmac::validate,
@@ -99,18 +99,17 @@ pub fn build(state: AppState) -> Router {
             state.clone(),
             crate::http::middleware::rate_limit::check,
         ))
+        // Outer of hmac + rate_limit; captures their 401/403 rejections.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::http::middleware::log_rejections::log_rejections,
         ))
-        .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
-                .on_response(DefaultOnResponse::new().level(Level::INFO)),
-        )
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        // Correlation ID: wraps everything above so every log line from every
+        // handler includes request_id, method, path in its span context.
+        .layer(middleware::from_fn(correlation_id::track))
+        // ── Transport ─────────────────────────────────────────────────────────
         .layer(CompressionLayer::new())
+        // ── Security headers ──────────────────────────────────────────────────
         .layer(SetResponseHeaderLayer::overriding(
             header::STRICT_TRANSPORT_SECURITY,
             HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
@@ -146,5 +145,6 @@ pub fn build(state: AppState) -> Router {
                  frame-ancestors 'none'",
             ),
         ))
+        // ── State ─────────────────────────────────────────────────────────────
         .with_state(state)
 }
