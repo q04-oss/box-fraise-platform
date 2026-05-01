@@ -82,6 +82,7 @@ pub async fn authenticate_demo(
 
 // ── Email + password ──────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub async fn register_user(
     pool:         &PgPool,
     cfg:          &Arc<Config>,

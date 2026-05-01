@@ -46,7 +46,7 @@ impl RateLimiter {
     pub fn allow(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
         let mut map = self.windows.lock().unwrap();
-        let deque = map.entry(ip).or_insert_with(VecDeque::new);
+        let deque = map.entry(ip).or_default();
         deque.retain(|&t| now.duration_since(t) < self.window);
         if deque.len() >= self.max_requests {
             return false;

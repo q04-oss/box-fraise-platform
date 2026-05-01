@@ -129,7 +129,7 @@ pub async fn check_revoked(redis: &Option<RedisPool>, fallback: &RevokedTokens, 
         match pool.get().await {
             Ok(mut conn) => {
                 match deadpool_redis::redis::cmd("EXISTS")
-                    .arg(&format!("{REVOKED_KEY_PREFIX}{jti}"))
+                    .arg(format!("{REVOKED_KEY_PREFIX}{jti}"))
                     .query_async::<_, i64>(&mut *conn)
                     .await
                 {

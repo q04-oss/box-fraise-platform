@@ -1,19 +1,19 @@
-/// Apple App Attest — attestation chain parsing and per-request assertion verification.
-///
-/// Two operations are implemented:
-///
-///   1. `parse_attestation` — called once at device registration.
-///      Decodes the CBOR attestation blob, walks the x5c certificate chain,
-///      extracts the leaf certificate's EC public key (P-256 SEC1 bytes), and
-///      validates the authData rpIdHash against the known App ID.
-///
-///   2. `verify_assertion` — called on every request from an attested device.
-///      Decodes the CBOR assertion, reconstructs the signed digest, and verifies
-///      the ECDSA-P256 signature against the stored leaf-cert public key.
-///
-/// References:
-///   https://developer.apple.com/documentation/devicecheck/validating_apps_that_connect_to_your_server
-///   https://www.w3.org/TR/webauthn-2/#authenticator-data (authData format)
+//! Apple App Attest — attestation chain parsing and per-request assertion verification.
+//!
+//! Two operations are implemented:
+//!
+//!   1. `parse_attestation` — called once at device registration.
+//!      Decodes the CBOR attestation blob, walks the x5c certificate chain,
+//!      extracts the leaf certificate's EC public key (P-256 SEC1 bytes), and
+//!      validates the authData rpIdHash against the known App ID.
+//!
+//!   2. `verify_assertion` — called on every request from an attested device.
+//!      Decodes the CBOR assertion, reconstructs the signed digest, and verifies
+//!      the ECDSA-P256 signature against the stored leaf-cert public key.
+//!
+//! References:
+//!   https://developer.apple.com/documentation/devicecheck/validating_apps_that_connect_to_your_server
+//!   https://www.w3.org/TR/webauthn-2/#authenticator-data (authData format)
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ciborium::value::Value as Cbor;

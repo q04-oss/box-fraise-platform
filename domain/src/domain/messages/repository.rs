@@ -152,6 +152,7 @@ pub async fn thread(
 
 // ── Send ──────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub async fn insert(
     pool:                &PgPool,
     sender_id:           UserId,

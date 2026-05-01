@@ -54,7 +54,7 @@ async fn ask(
 
     // Sanitise input — returns 400 for empty or oversized queries
     let query = service::sanitise(&body.query)
-        .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        .map_err(|e| AppError::bad_request(e.to_string()))?;
 
     let context = context_from_host(&headers);
     let system  = service::get_system_prompt(context);
