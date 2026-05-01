@@ -1,4 +1,4 @@
-﻿-- Migration 000: Initial platform schema
+-- Migration 000: Initial platform schema
 --
 -- Captured from the live Railway database (PostgreSQL 18.3) via pg_dump.
 -- This establishes the baseline schema before the numbered migrations (001+)

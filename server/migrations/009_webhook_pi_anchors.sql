@@ -50,9 +50,18 @@ CREATE TABLE IF NOT EXISTS portrait_purchase_intents (
 -- portal/routes.rs uses ON CONFLICT (buyer_id, owner_id) but the initial schema
 -- had no unique constraint on those columns. Add it so the clause is valid.
 
-ALTER TABLE portal_access
-    ADD CONSTRAINT IF NOT EXISTS portal_access_buyer_owner_unique
-    UNIQUE (buyer_id, owner_id);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE table_schema    = 'public'
+          AND table_name      = 'portal_access'
+          AND constraint_name = 'portal_access_buyer_owner_unique'
+    ) THEN
+        ALTER TABLE portal_access ADD CONSTRAINT portal_access_buyer_owner_unique UNIQUE (buyer_id, owner_id);
+    END IF;
+END;
+$$;
 
 -- ── 5. identity_verification_sessions — anchor for handle_identity_verified ───
 -- Session IDs (vs_xxx) are stored at creation time; the webhook resolves
