@@ -8,6 +8,8 @@ use crate::{
     audit, auth,
     config::Config,
     error::{DomainError, AppResult},
+    event_bus::EventBus,
+    events::DomainEvent,
     types::UserId,
 };
 use box_fraise_integrations::resend;
@@ -88,11 +90,17 @@ pub async fn register_user(
     email:        &str,
     password:     &str,
     display_name: Option<&str>,
+    event_bus:    &EventBus,
 ) -> AppResult<AuthResponse> {
     let hash = bcrypt::hash(password, 10)
         .map_err(|e| DomainError::Internal(anyhow::anyhow!("bcrypt: {e}")))?;
 
     let user = repository::create_email_user(pool, email, &hash, display_name).await?;
+
+    event_bus.publish(DomainEvent::UserRegistered {
+        user_id: user.id,
+        email:   email.to_owned(),
+    });
 
     if let Some(api_key) = cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned()) {
         let http    = http.clone();

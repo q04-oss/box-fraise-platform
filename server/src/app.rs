@@ -12,6 +12,7 @@ use tower_http::{
 use box_fraise_domain::{
     auth::{new_revoked_tokens, RevokedTokens},
     config::Config,
+    event_bus::EventBus,
 };
 use crate::http::{
     middleware::{
@@ -34,6 +35,7 @@ pub struct AppState {
     pub rate:         SharedRateLimiter,
     pub dorotka_rate: SharedRateLimiter,
     pub http:         reqwest::Client,
+    pub event_bus:    EventBus,
 }
 
 impl AppState {
@@ -75,6 +77,7 @@ impl AppState {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("reqwest client is infallible"),
+            event_bus: EventBus::new(),
         }
     }
 }

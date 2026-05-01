@@ -44,6 +44,24 @@ pub async fn run() -> anyhow::Result<()> {
     let pool = db::connect(cfg.database_url.expose_secret()).await?;
 
     let state  = app::AppState::new(pool, cfg);
+
+    // Subscribe before building the router so no early events are missed.
+    // This consumer logs every event at DEBUG — it proves the bus end-to-end
+    // without requiring a real cross-domain consumer yet.
+    let mut event_rx = state.event_bus.subscribe();
+    tokio::spawn(async move {
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            match event_rx.recv().await {
+                Ok(event) => tracing::debug!(?event, "domain event"),
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!(dropped = n, "event bus consumer lagged — events dropped");
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+
     let router = app::build(state.clone());
 
     let addr = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(

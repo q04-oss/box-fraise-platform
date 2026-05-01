@@ -5,4 +5,6 @@ pub mod crypto;
 pub mod db;
 pub mod domain;
 pub mod error;
+pub mod event_bus;
+pub mod events;
 pub mod types;

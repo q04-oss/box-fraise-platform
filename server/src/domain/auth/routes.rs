@@ -70,6 +70,7 @@ async fn register(
     Ok(Json(service::register_user(
         &state.db, &state.cfg, &state.http, state.redis.as_ref(),
         &body.email, &body.password, body.display_name.as_deref(),
+        &state.event_bus,
     ).await?))
 }
 

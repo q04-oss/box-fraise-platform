@@ -155,3 +155,45 @@ HTTP.
   `server/src/error.rs`.
 - The `From` impl is the single mapping table — all status-code decisions
   live there and nowhere else.
+
+---
+
+## Domain events
+
+Significant state changes are broadcast on the `EventBus` so other domains
+can react without being directly coupled to the emitter.
+
+**Key files:**
+
+| File | Role |
+|---|---|
+| `domain/src/events.rs` | `DomainEvent` enum — all event types |
+| `domain/src/event_bus.rs` | `EventBus` — publish / subscribe |
+| `server/src/app.rs` | `AppState.event_bus` — the single bus instance |
+
+**When to emit:**
+
+Any state change that another domain or future feature might care about.
+If you're not sure, emit it — a subscriber that doesn't exist yet costs
+nothing.
+
+Current events: `UserRegistered`, `UserLoggedIn`, `EmailVerified`,
+`PasswordReset`, `MessageSent`, `KeyBundleRegistered`, `KeyBundleDepleted`.
+
+**When to listen:**
+
+When you need to react to another domain's state without importing its
+service or repository. Subscribe in `server/src/lib.rs::run()` and spawn
+a background task.
+
+**Rules:**
+
+- Never call another domain's `service.rs` or `repository.rs` directly
+  from a service. Emit a `DomainEvent` instead.
+- `EventBus::publish` is fire-and-forget. Do not rely on it for
+  transactional consistency — use it for side effects (notifications,
+  audit, cache invalidation).
+- Add `event_bus: &EventBus` to service function signatures that emit.
+  Pass `&state.event_bus` from the route.
+- Add new event variants to `domain/src/events.rs`. They must derive
+  `Clone + Debug`.
