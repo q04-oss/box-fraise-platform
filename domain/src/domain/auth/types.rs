@@ -7,6 +7,7 @@ use crate::types::{StripeCustomerId, UserId};
 
 /// Subset of `users` columns used across the auth domain.
 /// Extend with additional columns as other domains require them.
+#[allow(missing_docs)] // Database row — field names are identical to column names.
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct UserRow {
     pub id:                        UserId,
@@ -36,44 +37,62 @@ pub const USER_COLS: &str =
 
 // ── Request bodies ────────────────────────────────────────────────────────────
 
+/// Request body for `POST /api/auth/apple`.
 #[derive(Debug, Deserialize)]
 pub struct AppleAuthBody {
+    /// Apple identity token (JWT) returned by Sign in with Apple.
     pub identity_token: String,
+    /// Display name provided by the user on first sign-in (optional).
     pub display_name:   Option<String>,
 }
 
+/// Request body for `PATCH /api/auth/push-token`.
 #[derive(Debug, Deserialize)]
 pub struct PushTokenBody {
+    /// Expo push token to register for this device.
     pub push_token: String,
 }
 
+/// Request body for `PATCH /api/auth/display-name`.
 #[derive(Debug, Deserialize)]
 pub struct DisplayNameBody {
+    /// New display name (1–50 characters, trimmed).
     pub display_name: String,
 }
 
+/// Request body for `POST /api/auth/magic-link`.
 #[derive(Debug, Deserialize)]
 pub struct MagicLinkBody {
+    /// Email address to send the magic link to.
     pub email: String,
 }
 
+/// Request body for `POST /api/auth/magic-link/verify`.
 #[derive(Debug, Deserialize)]
 pub struct MagicLinkVerifyBody {
+    /// Single-use token extracted from the magic link URL.
     pub token: String,
 }
 
 // ── Response bodies ───────────────────────────────────────────────────────────
 
+/// Response returned on successful authentication (Apple or magic link).
 #[derive(Debug, Serialize)]
 pub struct AuthResponse {
+    /// Authenticated user's identifier.
     pub user_id: UserId,
+    /// Signed JWT for subsequent authenticated requests.
     pub token:   String,
+    /// `true` if this sign-in created a new account.
     pub is_new:  bool,
+    /// `true` if the user's email has been verified.
     pub verified: bool,
 }
 
+/// Response returned by `GET /api/auth/me`.
 #[derive(Debug, Serialize)]
 pub struct MeResponse {
+    /// The authenticated user's full profile row.
     #[serde(flatten)]
     pub user: UserRow,
 }

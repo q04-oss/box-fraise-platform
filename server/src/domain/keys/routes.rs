@@ -1,3 +1,4 @@
+
 use axum::{
     extract::{Path, State},
     routing::{get, post},
@@ -24,7 +25,7 @@ pub fn router() -> Router<AppState> {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-async fn challenge(
+pub async fn challenge(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<ChallengeResponse>> {
@@ -32,7 +33,7 @@ async fn challenge(
     Ok(Json(ChallengeResponse { challenge }))
 }
 
-async fn register(
+pub async fn register(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body): AppJson<RegisterKeysBody>,
@@ -41,7 +42,7 @@ async fn register(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn upload_otpks(
+pub async fn upload_otpks(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body): AppJson<UploadOtpkBody>,
@@ -55,7 +56,7 @@ async fn upload_otpks(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn otpk_count(
+pub async fn otpk_count(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<OtpkCountResponse>> {
@@ -63,7 +64,7 @@ async fn otpk_count(
     Ok(Json(OtpkCountResponse { count }))
 }
 
-async fn bundle_by_id(
+pub async fn bundle_by_id(
     State(state): State<AppState>,
     RequireUser(_): RequireUser,
     Path(target_id): Path<UserId>,
@@ -71,7 +72,7 @@ async fn bundle_by_id(
     Ok(Json(service::claim_key_bundle(&state.db, target_id, &state.event_bus).await?))
 }
 
-async fn bundle_by_code(
+pub async fn bundle_by_code(
     State(state): State<AppState>,
     RequireUser(_): RequireUser,
     Path(code): Path<String>,

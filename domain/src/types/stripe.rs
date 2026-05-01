@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // Stripe newtypes are self-documenting via their name and macro doc comments.
 /// Stripe API identifier newtypes.
 ///
 /// Stripe IDs have a documented prefix format (`cus_`, `sub_`, `pi_`).

@@ -86,6 +86,8 @@ impl AppState {
 
 pub fn build(state: AppState) -> Router {
     Router::new()
+        // ── OpenAPI docs ──────────────────────────────────────────────────────
+        .merge(crate::openapi::router())
         // ── Domain routes ─────────────────────────────────────────────────────
         .merge(meta::router())
         .merge(crate::domain::auth::routes::router())

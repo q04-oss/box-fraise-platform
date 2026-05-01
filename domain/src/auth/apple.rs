@@ -17,13 +17,19 @@ use crate::{config::Config, error::{DomainError, AppResult}};
 const APPLE_JWKS_URL: &str = "https://appleid.apple.com/auth/keys";
 const APPLE_ISSUER:   &str = "https://appleid.apple.com";
 
+/// Claims decoded from an Apple identity token (RS256 JWT).
 #[derive(Debug, Deserialize)]
 pub struct AppleClaims {
     /// Stable, unique user identifier — store as `apple_user_id`.
     pub sub:   String,
+    /// User's email address as provided by Apple (may be absent or relay address).
     pub email: Option<String>,
 }
 
+/// Verify an Apple identity token and return its decoded claims.
+///
+/// Fetches Apple's JWKS endpoint to validate the signature, then checks the
+/// standard claims (`iss`, `aud`, `exp`). Returns `Unauthorized` on any failure.
 pub async fn verify_identity_token(
     token:  &str,
     cfg:    &Config,

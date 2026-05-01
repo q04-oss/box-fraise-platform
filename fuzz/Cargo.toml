@@ -1,0 +1,27 @@
+[package]
+name    = "box-fraise-fuzz"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys     = "0.4"
+box-fraise-domain = { path = "../domain" }
+ring              = "0.17"
+base64            = "0.22"
+
+# Fuzz targets must not be included in the workspace build.
+[[bin]]
+name = "hmac_verify"
+path = "fuzz_targets/hmac_verify.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "sanitise"
+path = "fuzz_targets/sanitise.rs"
+test = false
+doc  = false

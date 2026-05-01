@@ -3,6 +3,7 @@ pub mod domain;
 pub mod error;
 pub mod events;
 pub mod http;
+pub mod openapi;
 
 // Re-export shared infrastructure from the domain crate so that:
 // 1. Route files can still use `use crate::error::AppError` unchanged.

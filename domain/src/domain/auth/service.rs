@@ -25,6 +25,9 @@ const MAGIC_RATE_TTL:    u64  = 120;
 
 // ── Apple Sign In ─────────────────────────────────────────────────────────────
 
+/// Verify an Apple identity token, find or create the corresponding user, and
+/// return a signed JWT. Emits [`DomainEvent::UserRegistered`] for new accounts
+/// and [`DomainEvent::UserLoggedIn`] for all successful sign-ins.
 pub async fn authenticate_apple(
     pool:           &PgPool,
     cfg:            &Arc<Config>,
@@ -57,6 +60,8 @@ pub async fn authenticate_apple(
 
 // ── Active user ───────────────────────────────────────────────────────────────
 
+/// Fetch the full user row for `user_id`. Returns `Unauthorized` if the user
+/// does not exist, or `Forbidden` if the account has been banned.
 pub async fn get_active_user(pool: &PgPool, user_id: UserId) -> AppResult<UserRow> {
     let user = repository::find_by_id(pool, user_id)
         .await?
@@ -68,6 +73,9 @@ pub async fn get_active_user(pool: &PgPool, user_id: UserId) -> AppResult<UserRo
 
 // ── Magic link auth ───────────────────────────────────────────────────────────
 
+/// Send a magic link email for `email`. Creates the user if they don't exist.
+/// Silently no-ops when rate-limited (avoids email enumeration).
+/// Returns `Ok` even when Redis is unavailable (token creation is skipped).
 pub async fn request_magic_link(
     pool:  &PgPool,
     cfg:   &Arc<Config>,
@@ -118,6 +126,10 @@ pub async fn request_magic_link(
     Ok(())
 }
 
+/// Consume a magic link `token` and return a signed JWT on success.
+///
+/// The token is consumed atomically (GETDEL) — a second call with the same
+/// token always returns `Unauthorized`. Emits [`DomainEvent::UserLoggedIn`].
 pub async fn verify_magic_link(
     pool:      &PgPool,
     cfg:       &Arc<Config>,
@@ -165,10 +177,13 @@ pub async fn verify_magic_link(
 
 // ── Profile mutations ─────────────────────────────────────────────────────────
 
+/// Register or update the Expo push token for `user_id`'s device.
 pub async fn update_push_token(pool: &PgPool, user_id: UserId, token: &str) -> AppResult<()> {
     repository::set_push_token(pool, user_id, token).await
 }
 
+/// Update the display name for `user_id`. The caller is responsible for
+/// validating length (1–50 characters) before calling this function.
 pub async fn update_display_name(pool: &PgPool, user_id: UserId, name: &str) -> AppResult<()> {
     repository::set_display_name(pool, user_id, name).await
 }

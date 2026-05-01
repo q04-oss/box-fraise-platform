@@ -5,12 +5,19 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: '0 9 * * 1'  # Monday 09:00 UTC — weekly dependency freshness
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
-  test:
-    name: check · clippy · test
-    runs-on: ubuntu-latest
+  # ── On push / PR ──────────────────────────────────────────────────────────────
 
+  check:
+    name: cargo check + clippy
+    runs-on: ubuntu-latest
     services:
       postgres:
         image: postgres:18
@@ -24,7 +31,33 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+    env:
+      DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace
+      - run: cargo clippy --workspace -- -D warnings
 
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: fraise
+          POSTGRES_PASSWORD: fraise
+          POSTGRES_DB: fraise_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
       redis:
         image: redis:7
         ports: ["6379:6379"]
@@ -33,39 +66,98 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-
+    env:
+      DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_test
+      REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (workspace)
+        run: cargo test --workspace
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+  audit:
+    name: security audit (cargo audit + deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+      - run: cargo install cargo-deny --locked
+      - run: cargo deny check --manifest-path server/Cargo.toml
+
+  secrets:
+    name: secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
         with:
-          components: clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
-
-      - name: cargo check
-        run: cargo check --workspace
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
         env:
-          DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_test
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: cargo clippy
-        run: cargo clippy --workspace -- -D warnings
+  schema-drift:
+    name: migration integrity
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
         env:
-          DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_test
+          POSTGRES_USER: fraise
+          POSTGRES_PASSWORD: fraise
+          POSTGRES_DB: fraise_drift
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_drift
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install sqlx-cli --no-default-features --features postgres --locked
+      - run: bash scripts/check_schema_drift.sh
 
-      - name: cargo test (server)
-        working-directory: server
-        run: cargo test
-        env:
-          DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_test
-          REDIS_URL: redis://localhost:6379
+  docs:
+    name: documentation check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fail on missing documentation
+        run: |
+          output=$(cargo doc --no-deps --workspace 2>&1)
+          printf '%s\n' "$output"
+          if printf '%s\n' "$output" | grep -q "missing documentation"; then
+            echo "::error::cargo doc found items with missing documentation"
+            exit 1
+          fi
 
-      - name: cargo test (domain)
-        working-directory: domain
-        run: cargo test
-        env:
-          DATABASE_URL: postgres://fraise:fraise@localhost:5432/fraise_test
+  # ── Weekly cron (Monday 09:00 UTC) ────────────────────────────────────────────
+
+  weekly:
+    name: weekly dependency check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+      - name: cargo deny check
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check --manifest-path server/Cargo.toml
+      - name: cargo outdated
+        run: |
+          cargo install cargo-outdated --locked
+          cargo outdated

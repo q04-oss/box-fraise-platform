@@ -25,14 +25,21 @@ use crate::{config::Config, error::DomainError, types::UserId};
 
 // ── Claims ────────────────────────────────────────────────────────────────────
 
+/// JWT claims embedded in staff access tokens.
+///
+/// The `business_id` field is required — a user JWT without it cannot be
+/// decoded as `StaffClaims`, providing compile-level token-type separation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StaffClaims {
+    /// Authenticated staff member's user identifier.
     pub user_id:     UserId,
     /// The business this staff member is authorised to act on behalf of.
     /// Non-optional — a user JWT (which has no business_id) cannot decode
     /// into this struct.
     pub business_id: i32,
+    /// Token expiry as a Unix timestamp.
     pub exp:         usize,
+    /// Unique token ID used for server-side revocation.
     pub jti:         String,
 }
 
@@ -40,6 +47,7 @@ pub struct StaffClaims {
 
 const SHIFT_HOURS: i64 = 8;
 
+/// Sign a staff JWT valid for one shift (8 hours) using `STAFF_JWT_SECRET`.
 pub fn sign_staff_token(
     user_id:     UserId,
     business_id: i32,
@@ -65,6 +73,8 @@ pub fn sign_staff_token(
     .map_err(|e| DomainError::Internal(anyhow::anyhow!("staff token encoding failed: {e}")))
 }
 
+/// Verify a staff JWT and return its [`StaffClaims`] if valid.
+/// Returns `None` for expired, tampered, or unrecognised tokens.
 pub fn verify_staff_token(token: &str, cfg: &Config) -> Option<StaffClaims> {
     // Try current secret first. Fall back to previous during rotation window.
     decode_staff_claims(token, cfg.staff_jwt_secret.expose_secret())

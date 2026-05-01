@@ -1,3 +1,4 @@
+
 use axum::{
     extract::{ConnectInfo, Query, State},
     http::HeaderMap,
@@ -35,7 +36,7 @@ pub fn router() -> Router<AppState> {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-async fn apple(
+pub async fn apple(
     State(state): State<AppState>,
     AppJson(body): AppJson<AppleAuthBody>,
 ) -> AppResult<Json<AuthResponse>> {
@@ -47,7 +48,7 @@ async fn apple(
     Ok(Json(resp))
 }
 
-async fn me(
+pub async fn me(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<MeResponse>> {
@@ -55,7 +56,7 @@ async fn me(
     Ok(Json(MeResponse { user }))
 }
 
-async fn push_token(
+pub async fn push_token(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body): AppJson<PushTokenBody>,
@@ -64,7 +65,7 @@ async fn push_token(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn display_name(
+pub async fn display_name(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body): AppJson<DisplayNameBody>,
@@ -78,7 +79,7 @@ async fn display_name(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn logout(
+pub async fn logout(
     State(state): State<AppState>,
     RequireClaims(claims): RequireClaims,
 ) -> AppResult<Json<serde_json::Value>> {
@@ -86,7 +87,7 @@ async fn logout(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn magic_link_request(
+pub async fn magic_link_request(
     State(state): State<AppState>,
     AppJson(body): AppJson<MagicLinkBody>,
 ) -> AppResult<Json<serde_json::Value>> {
@@ -103,7 +104,7 @@ async fn magic_link_open(Query(params): Query<MagicLinkOpenParams>) -> Response 
     Redirect::temporary(&format!("whisked://auth?token={}", params.token)).into_response()
 }
 
-async fn magic_link_verify(
+pub async fn magic_link_verify(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,

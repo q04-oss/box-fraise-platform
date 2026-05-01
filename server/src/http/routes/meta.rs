@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 /// Platform-level routes that don't belong to any domain.
 ///
 ///   GET  /health                              — liveness probe
@@ -14,6 +15,7 @@ use deadpool_redis::redis;
 use serde::Deserialize;
 use serde_json::json;
 
+
 use crate::app::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -25,7 +27,7 @@ pub fn router() -> Router<AppState> {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-async fn health(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let db_ok = sqlx::query("SELECT 1")
         .execute(&state.db)
         .await

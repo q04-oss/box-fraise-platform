@@ -1,3 +1,4 @@
+
 use axum::{
     extract::{Path, Query, State},
     routing::get,
@@ -20,7 +21,7 @@ pub fn router() -> Router<AppState> {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-async fn search(
+pub async fn search(
     State(state): State<AppState>,
     RequireUser(_): RequireUser,
     Query(q): Query<SearchQuery>,
@@ -32,7 +33,7 @@ async fn search(
     Ok(Json(service::search_users(&state.db, trimmed).await?))
 }
 
-async fn public_profile(
+pub async fn public_profile(
     State(state): State<AppState>,
     Path(user_id): Path<UserId>,
 ) -> AppResult<Json<PublicProfile>> {

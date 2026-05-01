@@ -1,5 +1,8 @@
+/// Apple Sign In identity token verification.
 pub mod apple;
+/// Apple App Attest device attestation verification.
 pub mod apple_attest;
+/// Staff JWT signing and verification.
 pub mod staff;
 
 use chrono::Utc;
@@ -18,9 +21,12 @@ use crate::{config::Config, error::DomainError, types::UserId};
 
 // ── Claims ────────────────────────────────────────────────────────────────────
 
+/// JWT claims payload embedded in every user access token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
+    /// Identifies the authenticated user.
     pub user_id: UserId,
+    /// Unix timestamp at which the token expires.
     pub exp:     usize,
     /// Unique token ID — used for server-side revocation.
     pub jti:     String,
@@ -28,6 +34,8 @@ pub struct Claims {
 
 // ── Token operations ──────────────────────────────────────────────────────────
 
+/// Sign a new JWT for `user_id` using the primary JWT secret from `cfg`.
+/// Tokens are valid for 90 days from the time of signing.
 pub fn sign_token(user_id: UserId, cfg: &Config) -> Result<String, DomainError> {
     let exp = Utc::now()
         .checked_add_signed(chrono::Duration::days(90))
@@ -44,6 +52,9 @@ pub fn sign_token(user_id: UserId, cfg: &Config) -> Result<String, DomainError> 
     .map_err(|e| DomainError::Internal(anyhow::anyhow!("token encoding failed: {e}")))
 }
 
+/// Verify a JWT and return its [`Claims`] if valid.
+/// Tries the current secret first, then the previous secret (rotation window).
+/// Returns `None` for expired, tampered, or unrecognised tokens.
 pub fn verify_token(token: &str, cfg: &Config) -> Option<Claims> {
     // Try current secret first. Fall back to previous during rotation window.
     decode_claims(token, cfg.jwt_secret.expose_secret())
@@ -64,10 +75,13 @@ fn decode_claims(token: &str, secret: &str) -> Option<Claims> {
 
 const REVOKED_KEY_PREFIX: &str = "fraise:revoked:";
 
-/// JTI → Unix expiry. In-process store used when Redis is not configured.
-/// Safe for single-instance deployments; replaced by Redis for multi-instance.
+/// In-process JWT revocation list mapping JTI to Unix expiry timestamp.
+///
+/// Used when Redis is not configured. Safe for single-instance deployments only;
+/// use Redis for multi-instance deployments so revocations propagate across instances.
 pub type RevokedTokens = Arc<Mutex<HashMap<String, usize>>>;
 
+/// Create an empty in-process token revocation list.
 pub fn new_revoked_tokens() -> RevokedTokens {
     Arc::new(Mutex::new(HashMap::new()))
 }
@@ -121,7 +135,7 @@ pub async fn revoke_token(redis: &Option<RedisPool>, fallback: &RevokedTokens, j
     }
 }
 
-/// Returns true if the JTI has been revoked. Checks Redis when available.
+/// Returns `true` if the JTI has been revoked. Checks Redis when available.
 /// On Redis failure, falls back to in-process list rather than failing open.
 pub async fn check_revoked(redis: &Option<RedisPool>, fallback: &RevokedTokens, jti: &str) -> bool {
     if let Some(pool) = redis {
@@ -146,5 +160,96 @@ pub async fn check_revoked(redis: &Option<RedisPool>, fallback: &RevokedTokens, 
         }
     } else {
         is_revoked_local(fallback, jti)
+    }
+}
+
+#[cfg(test)]
+mod proptest_tests {
+    use super::*;
+    use crate::config::Config;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use proptest::prelude::*;
+    use secrecy::SecretString;
+
+    fn s(v: &str) -> SecretString { SecretString::from(v.to_owned()) }
+
+    fn test_cfg() -> Config {
+        Config {
+            database_url:    s("postgres://localhost/test"),
+            jwt_secret:      s("test-jwt-secret-minimum-32-characters!!"),
+            jwt_secret_previous: None,
+            staff_jwt_secret: s("test-staff-secret-minimum-32-chars!!"),
+            staff_jwt_secret_previous: None,
+            stripe_secret_key:     s("sk_test_x"),
+            stripe_webhook_secret: s("whsec_x"),
+            admin_pin:       s("testpin11"),
+            chocolatier_pin: s("testpin22"),
+            supplier_pin:    s("testpin33"),
+            review_pin:      None,
+            port:            3001,
+            hmac_shared_key: None,
+            redis_url:       None,
+            apple_team_id: None, apple_key_id: None, apple_client_id: None,
+            apple_private_key: None, resend_api_key: None, anthropic_api_key: None,
+            cloudinary_cloud_name: None, cloudinary_api_key: None, cloudinary_api_secret: None,
+            square_app_id: None, square_app_secret: None, square_oauth_redirect_url: None,
+            square_token_encryption_key: None, operator_email: None,
+            api_base_url: "http://localhost:3001".to_owned(),
+            app_store_id: None, platform_fee_bips: 500,
+            square_order_webhook_signing_key: None, square_order_notification_url: None,
+        }
+    }
+
+    proptest! {
+        /// Any user ID that can be represented as i32 produces a token that
+        /// verifies to the same user ID.
+        #[test]
+        fn valid_token_round_trips(user_id_raw in 1i32..1_000_000i32) {
+            let cfg = test_cfg();
+            let uid = UserId::from(user_id_raw);
+            let token = sign_token(uid, &cfg).unwrap();
+            let claims = verify_token(&token, &cfg);
+            prop_assert!(claims.is_some(), "valid token must verify");
+            prop_assert_eq!(claims.unwrap().user_id, uid);
+        }
+
+        /// Appending arbitrary characters to a valid token must invalidate it.
+        #[test]
+        fn tampered_token_fails_verification(
+            user_id_raw in 1i32..1_000_000i32,
+            extra in "[a-zA-Z0-9+/]{1,20}",
+        ) {
+            let cfg = test_cfg();
+            let uid = UserId::from(user_id_raw);
+            let token = sign_token(uid, &cfg).unwrap();
+            let tampered = format!("{token}{extra}");
+            prop_assert!(
+                verify_token(&tampered, &cfg).is_none(),
+                "tampered token must not verify"
+            );
+        }
+
+        /// A token whose exp is in the past must always be rejected,
+        /// regardless of user_id content.
+        #[test]
+        fn expired_token_fails_verification(user_id_raw in 1i32..1_000_000i32) {
+            let cfg = test_cfg();
+            let uid = UserId::from(user_id_raw);
+            let expired_claims = Claims {
+                user_id: uid,
+                exp: 1_000_000, // 1970-01-12 — always expired
+                jti: "prop-test-jti".to_owned(),
+            };
+            use secrecy::ExposeSecret;
+            let expired_token = encode(
+                &Header::default(),
+                &expired_claims,
+                &EncodingKey::from_secret(cfg.jwt_secret.expose_secret().as_bytes()),
+            ).unwrap();
+            prop_assert!(
+                verify_token(&expired_token, &cfg).is_none(),
+                "expired token must not verify"
+            );
+        }
     }
 }

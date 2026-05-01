@@ -1,3 +1,4 @@
+
 use axum::{
     extract::{ConnectInfo, State},
     http::HeaderMap,
@@ -39,7 +40,7 @@ struct AskResponse {
     context: String,
 }
 
-async fn ask(
+pub async fn ask(
     State(state):      State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers:           HeaderMap,

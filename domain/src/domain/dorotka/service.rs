@@ -136,3 +136,29 @@ mod tests {
         assert!(out.contains("world"));
     }
 }
+
+#[cfg(test)]
+mod proptest_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// sanitise must never panic for any string input.
+        #[test]
+        fn sanitise_never_panics(s in ".*") {
+            let _ = sanitise(&s);
+        }
+
+        /// When sanitise succeeds the output must not exceed 500 chars.
+        #[test]
+        fn sanitise_bounded_output(s in ".{1,499}") {
+            if let Ok(out) = sanitise(&s) {
+                prop_assert!(
+                    out.chars().count() <= 500,
+                    "output exceeded 500 chars: {}",
+                    out.chars().count()
+                );
+            }
+        }
+    }
+}

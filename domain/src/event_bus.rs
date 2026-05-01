@@ -18,6 +18,7 @@ pub struct EventBus {
 }
 
 impl EventBus {
+    /// Create a new event bus with an internal channel capacity of 256 slots.
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(CAPACITY);
         Self { tx }

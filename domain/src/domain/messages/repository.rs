@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // Repository layer — internal implementation, documented at service layer.
 use sqlx::PgPool;
 
 use crate::{error::{DomainError, AppResult}, types::{KeyId, MessageId, UserId}};

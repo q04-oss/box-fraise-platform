@@ -515,3 +515,43 @@ pub(crate) mod tests {
         assert!(!constant_time_eq(b"abc", b"abcd"));
     }
 }
+
+#[cfg(test)]
+mod proptest_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// constant_time_eq must never panic on arbitrary byte slices of any length.
+        #[test]
+        fn constant_time_eq_never_panics(
+            a in proptest::collection::vec(any::<u8>(), 0..1024),
+            b in proptest::collection::vec(any::<u8>(), 0..1024),
+        ) {
+            let _ = constant_time_eq(&a, &b);
+        }
+
+        /// is_valid_nonce must never panic on arbitrary string input.
+        #[test]
+        fn is_valid_nonce_never_panics(s in ".*") {
+            let _ = is_valid_nonce(&s);
+        }
+
+        /// HMAC signing and constant-time comparison must never panic on
+        /// arbitrary key bytes and message bytes.
+        #[test]
+        fn hmac_sign_and_compare_never_panics(
+            key_bytes in proptest::collection::vec(any::<u8>(), 1..256),
+            msg       in proptest::collection::vec(any::<u8>(), 0..4096),
+            compare   in proptest::collection::vec(any::<u8>(), 0..512),
+        ) {
+            use ring::hmac as ring_hmac;
+            use base64::{engine::general_purpose::STANDARD, Engine};
+
+            let key     = ring_hmac::Key::new(ring_hmac::HMAC_SHA256, &key_bytes);
+            let sig     = ring_hmac::sign(&key, &msg);
+            let sig_b64 = STANDARD.encode(sig.as_ref());
+            let _       = constant_time_eq(sig_b64.as_bytes(), &compare);
+        }
+    }
+}

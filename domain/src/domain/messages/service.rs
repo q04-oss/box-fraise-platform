@@ -11,6 +11,7 @@ use super::{
     types::{ConversationSummary, MessageRow, SendMessageBody},
 };
 
+/// Return all active (non-archived) conversations for `user_id`, newest first.
 pub async fn list_conversations(
     pool:    &PgPool,
     user_id: UserId,
@@ -18,6 +19,8 @@ pub async fn list_conversations(
     repository::list_conversations(pool, user_id).await
 }
 
+/// Archive the conversation between `user_id` and `peer_id`.
+/// Archived conversations no longer appear in the conversation list for `user_id`.
 pub async fn archive_conversation(
     pool:    &PgPool,
     user_id: UserId,
@@ -26,6 +29,8 @@ pub async fn archive_conversation(
     repository::archive(pool, user_id, peer_id).await
 }
 
+/// Return messages between `user_id` and `peer_id`, newest first.
+/// `before_id` enables cursor pagination — only messages older than that ID are returned.
 pub async fn get_thread(
     pool:      &PgPool,
     user_id:   UserId,

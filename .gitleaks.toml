@@ -1,0 +1,29 @@
+title   = "Gitleaks configuration — box-fraise-platform"
+version = 2
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known false positives in test fixtures and placeholder env values"
+regexes = [
+    # Test JWT secrets used in unit and handler tests
+    '''test-jwt-secret-minimum-32-characters''',
+    '''test-staff-secret-minimum-32-chars''',
+    # Placeholder Stripe/webhook values
+    '''sk_test_placeholder''',
+    '''whsec_test_secret_for_handler_tests''',
+    # Test HMAC key
+    '''test-hmac-key-32-bytes-exactly''',
+    # Short test pins
+    '''testpin[0-9]+''',
+    # Integration test placeholders
+    '''sk_test_x''',
+    '''whsec_x''',
+]
+paths = [
+    '''server/tests/''',
+    '''server/src/''',
+    '''domain/src/''',
+    '''\.env\.example''',
+]

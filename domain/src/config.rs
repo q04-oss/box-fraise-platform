@@ -3,10 +3,17 @@
 // The allow below is the sole exemption — do not copy it elsewhere.
 // See CONTRIBUTING.md and .clippy.toml for the workspace rule.
 #![allow(clippy::disallowed_methods)]
+#![allow(missing_docs)] // Config fields are self-documenting by name; see .env.example for descriptions.
 
 use std::env;
 use secrecy::SecretString;
 
+/// Runtime configuration for the box-fraise platform server.
+///
+/// All fields are loaded once at startup from environment variables by
+/// [`Config::load`]. The server exits immediately with a clear error message
+/// if any required variable is missing or invalid — configuration errors are
+/// never deferred to first use.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url:             SecretString,
@@ -45,6 +52,11 @@ pub struct Config {
 }
 
 impl Config {
+    /// Load configuration from environment variables.
+    ///
+    /// Returns `Err` immediately if any required variable is absent or invalid.
+    /// Panicking at load time is intentional — a misconfigured server should
+    /// never reach the TCP bind.
     pub fn load() -> anyhow::Result<Self> {
         let jwt_secret_raw = require("JWT_SECRET")?;
         if jwt_secret_raw.len() < 32 {

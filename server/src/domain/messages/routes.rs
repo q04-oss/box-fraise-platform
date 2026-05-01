@@ -1,3 +1,4 @@
+
 use axum::{
     extract::{Path, Query, State},
     routing::{get, post},
@@ -22,14 +23,14 @@ pub fn router() -> Router<AppState> {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-async fn conversations(
+pub async fn conversations(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<ConversationSummary>>> {
     Ok(Json(service::list_conversations(&state.db, user_id).await?))
 }
 
-async fn archive(
+pub async fn archive(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(peer_id): Path<UserId>,
@@ -38,7 +39,7 @@ async fn archive(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn thread(
+pub async fn thread(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(peer_id): Path<UserId>,
@@ -48,7 +49,7 @@ async fn thread(
     Ok(Json(service::get_thread(&state.db, user_id, peer_id, q.before, limit).await?))
 }
 
-async fn send(
+pub async fn send(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body): AppJson<SendMessageBody>,

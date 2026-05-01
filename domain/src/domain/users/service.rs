@@ -9,10 +9,13 @@ use super::{
     types::{PublicProfile, UserSearchResult},
 };
 
+/// Search for users matching `query` (matched against display name and email).
 pub async fn search_users(pool: &PgPool, query: &str) -> AppResult<Vec<UserSearchResult>> {
     repository::search(pool, query).await
 }
 
+/// Return the public profile for `user_id`. Returns `NotFound` when the user
+/// does not exist or has been banned.
 pub async fn get_public_profile(pool: &PgPool, user_id: UserId) -> AppResult<PublicProfile> {
     repository::public_profile(pool, user_id)
         .await?

@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // Implementation details — public API is verify_assertion + parse_attestation.
 //! Apple App Attest — attestation chain parsing and per-request assertion verification.
 //!
 //! Two operations are implemented:

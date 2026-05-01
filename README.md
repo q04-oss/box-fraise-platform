@@ -94,6 +94,45 @@ sqlx migrate run
 - **JWT secret rotation without forced logout** — set `JWT_SECRET_PREVIOUS=$OLD_SECRET` and `JWT_SECRET=$NEW_SECRET` and deploy; tokens signed with the old key verify against the previous-secret fallback and remain valid until they naturally expire; unset `JWT_SECRET_PREVIOUS` after one full token TTL (90 days for user tokens, 8h for staff); same procedure applies to `STAFF_JWT_SECRET_PREVIOUS`
 - **Square webhook signature** — `validate_webhook` verifies HMAC-SHA256 over `notification_url + body`, base64-encoded, constant-time comparison via `subtle::ConstantTimeEq`; server refuses to start if Square is configured without the signing key
 
+## Development
+
+Install [just](https://github.com/casey/just): `cargo install just`
+
+```bash
+just test          # cargo test --workspace
+just check         # cargo check + cargo clippy -D warnings
+just audit         # cargo audit + cargo deny check
+just ci            # check → test → audit (full local CI)
+just drift         # check for schema/migration drift
+just docs          # cargo doc --no-deps --open
+just fuzz-hmac     # fuzz the HMAC verifier (requires nightly)
+just fuzz-sanitise # fuzz the input sanitiser (requires nightly)
+```
+
+See [WORKFLOW.md](WORKFLOW.md) for the four-phase development process.
+
+---
+
+## Security testing
+
+The two highest-risk surfaces have cargo-fuzz targets:
+
+```bash
+# Fuzz HMAC signing and constant-time comparison
+cargo +nightly fuzz run hmac_verify
+
+# Fuzz the Dorotka input sanitiser (null bytes, control chars, oversized inputs)
+cargo +nightly fuzz run sanitise
+```
+
+Property-based tests (via proptest) run as part of the normal test suite:
+
+```bash
+cargo test --workspace  # includes proptest runs
+```
+
+---
+
 ## Health check
 
 ```

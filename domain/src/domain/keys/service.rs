@@ -15,12 +15,19 @@ use super::{
 
 // ── Challenge ─────────────────────────────────────────────────────────────────
 
+/// Generate and persist a random challenge for `user_id`.
+/// The client must sign this challenge with its identity key when registering keys.
 pub async fn issue_challenge(pool: &PgPool, user_id: UserId) -> AppResult<String> {
     repository::create_challenge(pool, user_id).await
 }
 
 // ── Key registration ──────────────────────────────────────────────────────────
 
+/// Register or replace the user's X3DH public key bundle.
+///
+/// If `identity_signing_key` and `challenge_sig` are both provided the
+/// Ed25519 signature is verified against the stored challenge before any keys
+/// are written. Emits [`DomainEvent::KeyBundleRegistered`].
 pub async fn register_keys(
     pool:      &PgPool,
     user_id:   UserId,
@@ -69,10 +76,12 @@ pub async fn register_keys(
 
 // ── OPK management ────────────────────────────────────────────────────────────
 
+/// Append additional one-time pre-keys for `user_id` without touching the signed pre-key.
 pub async fn upload_otpks(pool: &PgPool, user_id: UserId, keys: Vec<(KeyId, String)>) -> AppResult<()> {
     repository::insert_otpks(pool, user_id, &keys).await
 }
 
+/// Return the number of unused one-time pre-keys remaining for `user_id`.
 pub async fn get_otpk_count(pool: &PgPool, user_id: UserId) -> AppResult<i64> {
     repository::count_otpks(pool, user_id).await
 }
@@ -81,10 +90,11 @@ pub async fn get_otpk_count(pool: &PgPool, user_id: UserId) -> AppResult<i64> {
 
 const KEY_REFRESH_GRACE_DAYS: i64 = 30;
 
-// COMMAND — reads key material and atomically claims one OTPK.
-// Named claim_ because it consumes a one-time pre-key from the DB on every
-// call. OTPK consumption is inseparable: X3DH requires the initiating party
-// receive exactly one fresh pre-key per session establishment.
+/// Fetch the key bundle for `target_id` and atomically consume one OTPK.
+///
+/// The OTPK is destroyed on every call — X3DH requires the initiating party
+/// receive exactly one fresh pre-key per session. Emits
+/// [`DomainEvent::KeyBundleDepleted`] when the supply hits zero.
 pub async fn claim_key_bundle(
     pool:      &PgPool,
     target_id: UserId,
@@ -123,6 +133,8 @@ pub async fn claim_key_bundle(
     })
 }
 
+/// Look up a user by their short `code` and return their key bundle.
+/// Delegates to [`claim_key_bundle`] after resolving the user ID.
 pub async fn claim_key_bundle_by_code(
     pool:      &PgPool,
     code:      &str,

@@ -161,6 +161,68 @@ HTTP.
 
 ---
 
+## Three-tests-per-endpoint rule
+
+Every new route handler requires **three test locations**:
+
+| Test type | Location | What it proves |
+|---|---|---|
+| Handler test | `server/tests/handler.rs` | HTTP stack: correct status codes, auth enforcement, request parsing |
+| Service test | `domain/src/domain/<name>/service.rs` (#[cfg(test)]) | Business logic: correct DB mutations, event emission, error cases |
+| Integration test | `server/tests/integration.rs` | Cross-domain flow: event bus fired, audit row written |
+
+**Minimum per handler:**
+1. `handler.rs` — unauthenticated request returns 401 (or 200 for public endpoints)
+2. `handler.rs` — valid authenticated request returns 200 with correct shape
+3. `service.rs` — happy path with a real database (sqlx::test)
+
+**Why three?** Handler tests prove the HTTP contract. Service tests prove the business logic. Integration tests prove the pieces work together. Passing all three is not optional.
+
+---
+
+## Running tests locally
+
+**Prerequisites:**
+- Rust stable (rustup)
+- Docker (for testcontainers Redis)
+- A running Postgres instance
+
+**Quick start:**
+```bash
+# Run all tests (Redis via testcontainers, Postgres required)
+DATABASE_URL=postgres://fraise:fraise@localhost/fraise cargo test --workspace
+
+# Run only no-database tests (proptest, unit tests)
+cargo test --workspace --lib
+
+# Run a specific test file
+cargo test --test handler
+cargo test --test integration
+cargo test --test contracts
+```
+
+**Redis:** Tests use testcontainers to spin up Redis automatically when Docker is available. If Docker is not available, Redis-dependent tests skip gracefully with an `eprintln!` message. In CI, the `REDIS_URL` env var points at the GitHub Actions Redis service and testcontainers are bypassed.
+
+**DATABASE_URL:** Required for `sqlx::test` tests. Each test gets an isolated database; migrations run automatically. No manual setup needed beyond having Postgres running.
+
+**Property tests (proptest):** Run as regular `cargo test` — no extra flags required. They run a fixed number of iterations locally (256 by default). The number can be increased with `PROPTEST_CASES=10000 cargo test`.
+
+**Fuzz testing (nightly only):**
+```bash
+cargo +nightly fuzz run hmac_verify
+cargo +nightly fuzz run sanitise
+```
+
+See `README.md → Security testing` for details.
+
+---
+
+## Reference
+
+See [WORKFLOW.md](WORKFLOW.md) for the four-phase development process used in this project.
+
+---
+
 ## Domain events
 
 Significant state changes are broadcast on the `EventBus` so other domains
