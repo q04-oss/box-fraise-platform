@@ -31,7 +31,7 @@ use crate::error::DomainError;
 
 pub struct AttestationData {
     /// DER-encoded SubjectPublicKeyInfo of the leaf certificate.
-    /// Stored in `device_attestations.public_key` (base64) for future assertion checks.
+    /// Stored base64-encoded in the identity store for future assertion checks (BFIP phase 2).
     pub public_key_der: Vec<u8>,
 }
 

@@ -85,7 +85,7 @@ sqlx migrate run
 ## Key security properties
 
 - **HMAC-SHA256 request signing** — every iOS request is signed with a per-device or shared key; the nonce is included in the signed message; nonces are tracked in Redis (or in-process) to prevent replay
-- **App Attest** — attested devices sign every request with an ECDSA key stored in `device_attestations`; the server verifies the assertion against the stored public key
+- **App Attest** — attested iOS devices sign presence events and attestations with an ECDSA key; assertion verification is wired into the BFIP presence and attestation flows (phase 2)
 - **Append-only loyalty ledger** — `loyalty_events` has a DB trigger that rejects UPDATE and DELETE; balances are always derived from the full event history
 - **Single-use tokens** — QR stamp tokens, email verification tokens, OAuth CSRF state, and NFC activation windows are all GETDEL (Redis) so replay is structurally impossible
 - **AES-256-GCM at rest** — Square OAuth tokens are encrypted at the application layer before hitting the DB; the encryption key is an env var, not in the database
