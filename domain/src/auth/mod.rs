@@ -220,6 +220,7 @@ mod proptest_tests {
             redis_url:       None,
             apple_team_id: None, apple_key_id: None, apple_client_id: None,
             apple_private_key: None, resend_api_key: None, anthropic_api_key: None,
+            anthropic_base_url: None,
             cloudinary_cloud_name: None, cloudinary_api_key: None, cloudinary_api_secret: None,
             square_app_id: None, square_app_secret: None, square_oauth_redirect_url: None,
             square_token_encryption_key: None, operator_email: None,

@@ -35,20 +35,21 @@ pub async fn verify_identity_token(
     cfg:    &Config,
     client: &reqwest::Client,
 ) -> AppResult<AppleClaims> {
-    // Audience validation is required. Reject early rather than silently skip it.
+    // Decode header first — a malformed or structurally invalid token is
+    // Unauthorized regardless of server config.
+    let header = decode_header(token)
+        .map_err(|_| DomainError::Unauthorized)?;
+
+    let kid = header.kid
+        .ok_or(DomainError::Unauthorized)?;
+
+    // Audience validation requires server config. Missing config is a server error.
     let audience = cfg
         .apple_client_id
         .as_deref()
         .ok_or_else(|| DomainError::Internal(anyhow::anyhow!(
             "APPLE_CLIENT_ID is required for Apple Sign In"
         )))?;
-
-    // Decode header only (no signature check yet) to identify which key Apple used.
-    let header = decode_header(token)
-        .map_err(|_| DomainError::invalid_input("malformed Apple identity token"))?;
-
-    let kid = header.kid
-        .ok_or_else(|| DomainError::invalid_input("Apple token missing kid"))?;
 
     // Fetch Apple's current public key set.
     let jwks: JwkSet = client

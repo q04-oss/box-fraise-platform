@@ -53,6 +53,7 @@ pub async fn ask_dorotka(
     pool:      &PgPool,
     http:      &reqwest::Client,
     api_key:   &str,
+    base_url:  &str,
     query:     &str,
     context:   &str,
     ip:        IpAddr,
@@ -73,7 +74,7 @@ pub async fn ask_dorotka(
         }),
     ).await;
 
-    let answer = anthropic::ask(http, api_key, system, query).await?;
+    let answer = anthropic::ask(http, api_key, base_url, system, query).await?;
 
     event_bus.publish(DomainEvent::DorotkaQueried {
         context: context.to_owned(),

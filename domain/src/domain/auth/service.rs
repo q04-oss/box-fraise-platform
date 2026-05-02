@@ -303,6 +303,7 @@ mod tests {
             apple_private_key:     None,
             resend_api_key:        None,
             anthropic_api_key:     None,
+            anthropic_base_url:    None,
             cloudinary_cloud_name: None,
             cloudinary_api_key:    None,
             cloudinary_api_secret: None,

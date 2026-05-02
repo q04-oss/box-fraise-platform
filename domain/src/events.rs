@@ -21,6 +21,15 @@ pub enum DomainEvent {
         user_id: UserId,
     },
 
+    // ── Businesses ────────────────────────────────────────────────────────────
+    /// A new business was registered on the platform.
+    BusinessCreated {
+        /// The newly created business's database ID.
+        business_id: i32,
+        /// The user who created the business.
+        user_id: i32,
+    },
+
     // ── Dorotka ───────────────────────────────────────────────────────────────
     /// A query was submitted to the Dorotka AI assistant.
     DorotkaQueried {

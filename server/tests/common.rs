@@ -48,6 +48,7 @@ pub fn test_config() -> Config {
         apple_private_key: None,
         resend_api_key:    None,
         anthropic_api_key: None,
+        anthropic_base_url: None,
         cloudinary_cloud_name:  None,
         cloudinary_api_key:     None,
         cloudinary_api_secret:  None,
@@ -65,9 +66,15 @@ pub fn test_config() -> Config {
 }
 
 pub fn build_state(db: PgPool, redis: Option<RedisPool>) -> AppState {
+    build_state_with_config(db, redis, test_config())
+}
+
+/// Build an AppState using a fully custom Config — used by tests that need
+/// to override specific fields (e.g., `anthropic_base_url` for Dorotka tests).
+pub fn build_state_with_config(db: PgPool, redis: Option<RedisPool>, cfg: Config) -> AppState {
     AppState {
         db,
-        cfg:          Arc::new(test_config()),
+        cfg:          Arc::new(cfg),
         revoked:      new_revoked_tokens(),
         nonces:       new_nonce_cache(),
         redis,
@@ -78,6 +85,19 @@ pub fn build_state(db: PgPool, redis: Option<RedisPool>) -> AppState {
     }
 }
 
+/// Build an AppState wired to a mock Anthropic server — used by Dorotka tests.
+pub fn build_state_with_anthropic(
+    db:       PgPool,
+    redis:    Option<RedisPool>,
+    api_key:  &str,
+    base_url: &str,
+) -> AppState {
+    let mut cfg = test_config();
+    cfg.anthropic_api_key  = Some(SecretString::from(api_key.to_string()));
+    cfg.anthropic_base_url = Some(base_url.to_string());
+    build_state_with_config(db, redis, cfg)
+}
+
 /// Build a state with a custom Dorotka rate limit — used by rate limit tests
 /// that need a tighter window for speed (e.g. 3/1s instead of 20/60s).
 pub fn build_state_with_dorotka_rate(
@@ -86,16 +106,12 @@ pub fn build_state_with_dorotka_rate(
     max_requests: usize,
     window_secs: u64,
 ) -> AppState {
+    let mut state = build_state(db, redis);
+    // Rebuild with the custom rate limiter — we shadow the field after construction
+    // because AppState::new is not available in tests.
     AppState {
-        db,
-        cfg:          Arc::new(test_config()),
-        revoked:      new_revoked_tokens(),
-        nonces:       new_nonce_cache(),
-        redis,
-        rate:         RateLimiter::new(120, 60),
         dorotka_rate: RateLimiter::new(max_requests, window_secs),
-        http:         reqwest::Client::new(),
-        event_bus:    EventBus::new(),
+        ..state
     }
 }
 
@@ -161,6 +177,19 @@ pub async fn create_verified_user(pool: &PgPool, email: &str) -> Usr {
         .await
         .unwrap_or_else(|e| panic!("verify_user: {e}"));
     u
+}
+
+/// Creates a user with `verification_status = 'attested'` — required to create businesses.
+pub async fn create_attested_user(pool: &PgPool, email: &str) -> Usr {
+    let (id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ($1, true, 'attested') RETURNING id"
+    )
+    .bind(email)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|e| panic!("create_attested_user({email}): {e}"));
+    Usr { id: UserId::from(id) }
 }
 
 // ── JWT helpers ───────────────────────────────────────────────────────────────

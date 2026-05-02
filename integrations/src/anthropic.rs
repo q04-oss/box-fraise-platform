@@ -4,7 +4,7 @@
 /// `.expose_secret()` at the call site — the key never lives in this module).
 use serde::{Deserialize, Serialize};
 
-const API_URL:     &str = "https://api.anthropic.com/v1/messages";
+pub const DEFAULT_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const MODEL:       &str = "claude-sonnet-4-6";
 const MAX_TOKENS:  u32  = 512;
 const API_VERSION: &str = "2023-06-01";
@@ -36,11 +36,15 @@ struct ContentBlock {
 }
 
 /// Send a single-turn message to the Anthropic API and return the text response.
+///
+/// `base_url` is the full messages endpoint URL. Pass `DEFAULT_API_URL` for
+/// production or a test server URL in tests.
 pub async fn ask(
-    http:    &reqwest::Client,
-    api_key: &str,
-    system:  &str,
-    query:   &str,
+    http:     &reqwest::Client,
+    api_key:  &str,
+    base_url: &str,
+    system:   &str,
+    query:    &str,
 ) -> anyhow::Result<String> {
     let body = Request {
         model:      MODEL,
@@ -50,7 +54,7 @@ pub async fn ask(
     };
 
     let resp = http
-        .post(API_URL)
+        .post(base_url)
         .header("x-api-key",        api_key)
         .header("anthropic-version", API_VERSION)
         .header("content-type",      "application/json")

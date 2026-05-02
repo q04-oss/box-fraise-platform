@@ -62,10 +62,14 @@ pub(crate) async fn ask(
             "ANTHROPIC_API_KEY not configured — Dorotka unavailable"
         )))?;
 
+    let base_url = state.cfg.anthropic_base_url.as_deref()
+        .unwrap_or(box_fraise_integrations::anthropic::DEFAULT_API_URL);
+
     let answer = service::ask_dorotka(
         &state.db,
         &state.http,
         api_key.expose_secret(),
+        base_url,
         &query,
         context,
         ip,

@@ -164,12 +164,14 @@ async fn magic_link_verify_missing_body_returns_400(pool: PgPool) {
     let state = common::build_state(pool, None);
     let app   = box_fraise_server::app::build(state);
 
-    let req = Request::builder()
+    let mut req = Request::builder()
         .method("POST")
         .uri("/api/auth/magic-link/verify")
         .header("content-type", "application/json")
         .body(Body::from(b"{}".to_vec()))
         .unwrap();
+    req.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
     // Missing token field → validation fails.
     let resp = app.oneshot(req).await.unwrap();
     assert!(
@@ -332,4 +334,58 @@ async fn dorotka_sliding_window_resets_after_window_elapses(pool: PgPool) {
     let resp = app.oneshot(dorotka_request("after window")).await.unwrap();
     assert_ne!(resp.status(), StatusCode::TOO_MANY_REQUESTS,
         "request after window elapses must not be rate-limited");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Businesses
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn business_body() -> serde_json::Value {
+    serde_json::json!({
+        "name":    "Test Café",
+        "address": "123 Main St, Edmonton, AB"
+    })
+}
+
+#[sqlx::test]
+async fn post_businesses_returns_403_for_unattested_user(pool: PgPool) {
+    let user  = common::create_user(&pool, "unattested@handler.test").await;
+    let token = common::valid_token(i32::from(user.id));
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req("POST", "/api/businesses", &token, business_body()))
+        .await
+        .unwrap();
+    // registered user (default) is not attested — must be Forbidden
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn post_businesses_returns_201_for_attested_user(pool: PgPool) {
+    let user  = common::create_attested_user(&pool, "attested@handler.test").await;
+    let token = common::valid_token(i32::from(user.id));
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req("POST", "/api/businesses", &token, business_body()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[sqlx::test]
+async fn get_businesses_me_returns_200(pool: PgPool) {
+    let user  = common::create_attested_user(&pool, "me@handler.test").await;
+    let token = common::valid_token(i32::from(user.id));
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/businesses/me", &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }

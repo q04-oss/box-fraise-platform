@@ -6,7 +6,9 @@ use deadpool_redis::Pool as RedisPool;
 use sqlx::PgPool;
 use tower_http::{
     compression::CompressionLayer,
+    cors::CorsLayer,
     set_header::SetResponseHeaderLayer,
+    timeout::TimeoutLayer,
 };
 
 use box_fraise_domain::{
@@ -84,6 +86,7 @@ impl AppState {
 
 // ── Router ────────────────────────────────────────────────────────────────────
 
+#[allow(deprecated)] // tower_http 0.6 deprecated TimeoutLayer::new; no non-deprecated replacement yet
 pub fn build(state: AppState) -> Router {
     Router::new()
         // ── OpenAPI docs ──────────────────────────────────────────────────────
@@ -91,6 +94,7 @@ pub fn build(state: AppState) -> Router {
         // ── Domain routes ─────────────────────────────────────────────────────
         .merge(meta::router())
         .merge(crate::domain::auth::routes::router())
+        .merge(crate::domain::businesses::routes::router())
         .merge(crate::domain::users::routes::router())
         .merge(crate::domain::dorotka::routes::router())
         // ── Security middleware (innermost — runs first) ───────────────────────
@@ -110,8 +114,24 @@ pub fn build(state: AppState) -> Router {
         // Correlation ID: wraps everything above so every log line from every
         // handler includes request_id, method, path in its span context.
         .layer(middleware::from_fn(correlation_id::track))
+        // Request timeout — returns 408 after 30 s. Inside correlation_id so
+        // the request_id is available in timeout logs. Configurable via
+        // TIMEOUT_SECS env var (default 30).
+        .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
         // ── Transport ─────────────────────────────────────────────────────────
         .layer(CompressionLayer::new())
+        // CORS posture — review before production launch
+        // Currently: permissive (allow all origins, no credentials)
+        // Allowed origins: wildcard (*) — iOS native app does not send Origin;
+        //   web clients (Swagger UI, future web app) use any origin
+        // Credentials: not allowed (wildcard origin is incompatible with credentials)
+        // Allowed methods: GET, POST, PATCH, PUT, DELETE, OPTIONS
+        // Exposed headers: X-Request-Id (correlation ID for client-side tracing)
+        // TODO: restrict to known iOS app origins before web app launch
+        .layer(
+            CorsLayer::permissive()
+                .expose_headers([axum::http::HeaderName::from_static("x-request-id")]),
+        )
         // ── Security headers ──────────────────────────────────────────────────
         .layer(SetResponseHeaderLayer::overriding(
             header::STRICT_TRANSPORT_SECURITY,
