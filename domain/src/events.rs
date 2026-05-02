@@ -48,6 +48,24 @@ pub enum DomainEvent {
         user_id: i32,
     },
 
+    // ── Presence ─────────────────────────────────────────────────────────────
+    /// A user's presence threshold was met (3 events on 3 days).
+    PresenceThresholdMet {
+        /// The user who met the threshold.
+        user_id: i32,
+        /// The business where presence was established.
+        business_id: i32,
+    },
+    /// A presence event was recorded (qualifying or non-qualifying).
+    PresenceEventRecorded {
+        /// The user the event belongs to.
+        user_id: i32,
+        /// "beacon_dwell" or "nfc_tap".
+        event_type: String,
+        /// Whether the event counts toward the threshold.
+        is_qualifying: bool,
+    },
+
     // ── Dorotka ───────────────────────────────────────────────────────────────
     /// A query was submitted to the Dorotka AI assistant.
     DorotkaQueried {

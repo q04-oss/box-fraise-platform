@@ -71,6 +71,32 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
             .await;
         }
 
+        DomainEvent::PresenceThresholdMet { user_id, business_id } => {
+            tracing::info!(user_id, business_id, "presence.threshold_met");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "presence.threshold_met",
+                serde_json::json!({ "business_id": business_id }),
+            )
+            .await;
+        }
+
+        DomainEvent::PresenceEventRecorded { user_id, ref event_type, is_qualifying } => {
+            if is_qualifying {
+                tracing::info!(user_id, event_type, "presence.event_recorded");
+            }
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "presence.event_recorded",
+                serde_json::json!({ "event_type": event_type, "is_qualifying": is_qualifying }),
+            )
+            .await;
+        }
+
         // Audit write already done inside service::ask_dorotka.
         DomainEvent::DorotkaQueried { .. } => {}
     }
