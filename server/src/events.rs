@@ -43,6 +43,34 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
             .await;
         }
 
+        DomainEvent::BeaconCreated { beacon_id, business_id, user_id } => {
+            tracing::info!(beacon_id, business_id, user_id, "beacon.created");
+            // The service writes the audit row directly at creation time.
+            // This event handler also writes one to maintain consistency
+            // with the event bus pattern — every DomainEvent produces
+            // an audit row in the handler regardless of service writes.
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "beacon.created",
+                serde_json::json!({ "beacon_id": beacon_id, "business_id": business_id }),
+            )
+            .await;
+        }
+
+        DomainEvent::BeaconKeyRotated { beacon_id, user_id } => {
+            tracing::info!(beacon_id, user_id, "beacon.key_rotated");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "beacon.key_rotated",
+                serde_json::json!({ "beacon_id": beacon_id }),
+            )
+            .await;
+        }
+
         // Audit write already done inside service::ask_dorotka.
         DomainEvent::DorotkaQueried { .. } => {}
     }

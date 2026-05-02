@@ -30,6 +30,24 @@ pub enum DomainEvent {
         user_id: i32,
     },
 
+    // ── Beacons ───────────────────────────────────────────────────────────────
+    /// A new beacon was registered at a business location.
+    BeaconCreated {
+        /// The newly created beacon's database ID.
+        beacon_id: i32,
+        /// The business this beacon belongs to.
+        business_id: i32,
+        /// The user who created the beacon.
+        user_id: i32,
+    },
+    /// A beacon's secret key was rotated.
+    BeaconKeyRotated {
+        /// The beacon whose key was rotated.
+        beacon_id: i32,
+        /// The user who triggered the rotation.
+        user_id: i32,
+    },
+
     // ── Dorotka ───────────────────────────────────────────────────────────────
     /// A query was submitted to the Dorotka AI assistant.
     DorotkaQueried {

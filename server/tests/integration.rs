@@ -383,3 +383,92 @@ async fn hmac_rejects_request_with_invalid_signature(pool: PgPool) {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "invalid HMAC must be rejected");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Beacons end-to-end
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Attested user creates a business and a beacon, fetches the daily UUID,
+/// confirms rotation log entry written, and confirms audit_event written.
+#[sqlx::test]
+async fn create_beacon_end_to_end(pool: PgPool) {
+    use box_fraise_domain::domain::beacons::service as beacon_service;
+    use box_fraise_domain::domain::beacons::types::CreateBeaconRequest;
+    use box_fraise_domain::domain::businesses::service as business_service;
+    use box_fraise_domain::domain::businesses::types::CreateBusinessRequest;
+    use box_fraise_domain::types::UserId;
+
+    // Create an attested user.
+    let (uid_raw,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('beacon_e2e@test.com', true, 'attested') RETURNING id"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let user_id = UserId::from(uid_raw);
+
+    // Create a business via the business service.
+    let bus      = EventBus::new();
+    let biz_resp = business_service::create_business(
+        &pool,
+        user_id,
+        CreateBusinessRequest {
+            name:          "E2E Beacon Café".to_owned(),
+            address:       "789 Beacon Rd, Edmonton, AB".to_owned(),
+            latitude:      None,
+            longitude:     None,
+            timezone:      None,
+            contact_email: None,
+            contact_phone: None,
+        },
+        &bus,
+    )
+    .await
+    .expect("business creation must succeed");
+
+    // Create a beacon via the beacon service.
+    let beacon_resp = beacon_service::create_beacon(
+        &pool,
+        user_id,
+        CreateBeaconRequest {
+            business_id:            biz_resp.id,
+            location_id:            biz_resp.location.id,
+            minimum_rssi_threshold: Some(-65),
+        },
+        &bus,
+    )
+    .await
+    .expect("beacon creation must succeed for business owner");
+
+    assert_eq!(beacon_resp.business_id, Some(biz_resp.id));
+    assert_eq!(beacon_resp.minimum_rssi_threshold, -65);
+    assert!(beacon_resp.is_active);
+
+    // Fetch the daily UUID.
+    let uuid_resp = beacon_service::get_daily_uuid(&pool, beacon_resp.id, user_id)
+        .await
+        .expect("owner must get daily UUID");
+
+    assert_eq!(uuid_resp.beacon_id, beacon_resp.id);
+    assert_eq!(uuid_resp.uuid.len(), 36, "UUID must be in 8-4-4-4-12 format");
+
+    // Confirm rotation log entry was written.
+    let rot_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM beacon_rotation_log WHERE beacon_id = $1"
+    )
+    .bind(beacon_resp.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(rot_count >= 1, "beacon_rotation_log entry must exist");
+
+    // Confirm audit_event was written.
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE event_kind = 'beacon.created'"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(audit_count >= 1, "beacon.created audit_event must be written");
+}

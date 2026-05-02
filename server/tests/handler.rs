@@ -389,3 +389,217 @@ async fn get_businesses_me_returns_200(pool: PgPool) {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Beacons
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn setup_beacon_fixtures(pool: &PgPool, email: &str) -> (i32, i32, i32) {
+    // Returns (user_id_raw, business_id, beacon_id)
+    let user  = common::create_attested_user(pool, email).await;
+    let uid   = i32::from(user.id);
+
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('Handler Test', 'partner_business', '1 Test Ave', 'America/Edmonton') \
+         RETURNING id"
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'Handler Biz', 'pending') RETURNING id"
+    )
+    .bind(loc_id)
+    .bind(uid)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    let (beacon_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO beacons (location_id, business_id, secret_key) \
+         VALUES ($1, $2, 'handler-test-secret-key') RETURNING id"
+    )
+    .bind(loc_id)
+    .bind(biz_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    (uid, biz_id, beacon_id)
+}
+
+#[sqlx::test]
+async fn post_beacons_returns_201_for_business_owner(pool: PgPool) {
+    let user  = common::create_attested_user(&pool, "beacon_owner@handler.test").await;
+    let uid   = i32::from(user.id);
+    let token = common::valid_token(uid);
+
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('Beacon Loc', 'partner_business', '1 Beacon St', 'America/Edmonton') \
+         RETURNING id"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'Beacon Biz', 'pending') RETURNING id"
+    )
+    .bind(loc_id)
+    .bind(uid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST",
+            "/api/beacons",
+            &token,
+            serde_json::json!({ "business_id": biz_id, "location_id": loc_id }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[sqlx::test]
+async fn post_beacons_returns_403_for_non_owner(pool: PgPool) {
+    let owner = common::create_attested_user(&pool, "beacon_owner2@handler.test").await;
+    let other = common::create_attested_user(&pool, "beacon_other@handler.test").await;
+    let token = common::valid_token(i32::from(other.id));
+
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('Beacon Loc2', 'partner_business', '2 Beacon St', 'America/Edmonton') \
+         RETURNING id"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'Owner Biz', 'pending') RETURNING id"
+    )
+    .bind(loc_id)
+    .bind(i32::from(owner.id))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST",
+            "/api/beacons",
+            &token,
+            serde_json::json!({ "business_id": biz_id, "location_id": loc_id }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn get_daily_uuid_returns_200_for_owner(pool: PgPool) {
+    let (uid, _biz_id, beacon_id) =
+        setup_beacon_fixtures(&pool, "daily_uuid@handler.test").await;
+    let token = common::valid_token(uid);
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req(
+            "GET",
+            &format!("/api/beacons/{beacon_id}/daily-uuid"),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[sqlx::test]
+async fn get_beacons_by_business_returns_200_for_owner(pool: PgPool) {
+    let (uid, biz_id, beacon_id) =
+        setup_beacon_fixtures(&pool, "list_beacons@handler.test").await;
+    let token = common::valid_token(uid);
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req(
+            "GET",
+            &format!("/api/beacons/business/{biz_id}"),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    let beacons = body.as_array().expect("response must be an array");
+    assert_eq!(beacons.len(), 1, "one beacon must be listed");
+    assert_eq!(beacons[0]["id"].as_i64().unwrap(), beacon_id as i64);
+    // secret_key must never appear in list response
+    assert!(beacons[0]["secret_key"].is_null(), "secret_key must not be in response");
+}
+
+#[sqlx::test]
+async fn rotate_beacon_key_returns_200_for_owner(pool: PgPool) {
+    let (uid, _biz_id, beacon_id) =
+        setup_beacon_fixtures(&pool, "rotate_key@handler.test").await;
+    let token      = common::valid_token(uid);
+    let pool_clone = pool.clone();
+
+    let original_key: String = sqlx::query_scalar(
+        "SELECT secret_key FROM beacons WHERE id = $1"
+    )
+    .bind(beacon_id)
+    .fetch_one(&pool_clone)
+    .await
+    .unwrap();
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req(
+            "POST",
+            &format!("/api/beacons/{beacon_id}/rotate-key"),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Verify key was actually rotated and previous_secret_key preserved.
+    let (new_key, prev_key): (String, Option<String>) = sqlx::query_as(
+        "SELECT secret_key, previous_secret_key FROM beacons WHERE id = $1"
+    )
+    .bind(beacon_id)
+    .fetch_one(&pool_clone)
+    .await
+    .unwrap();
+
+    assert_ne!(new_key, original_key, "key must change after rotation");
+    assert_eq!(
+        prev_key.as_deref(),
+        Some(original_key.as_str()),
+        "original key must be preserved as previous_secret_key"
+    );
+}
