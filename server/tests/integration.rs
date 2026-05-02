@@ -21,7 +21,7 @@ async fn redis_pool_from_env() -> Option<deadpool_redis::Pool> {
 
 async fn verified_user(pool: &PgPool, email: &str) -> box_fraise_domain::types::UserId {
     let (id,): (i32,) = sqlx::query_as(
-        "INSERT INTO users (email, verified) VALUES ($1, true) RETURNING id",
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
     )
     .bind(email)
     .fetch_one(pool)
@@ -102,100 +102,6 @@ async fn magic_link_flow_fires_user_logged_in_event(pool: PgPool) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Send message → MessageSent event
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Send message → MessageSent event fires.
-#[sqlx::test]
-async fn send_message_fires_message_sent_event(pool: PgPool) {
-    let alice = verified_user(&pool, "alice@flow.com").await;
-    let bob   = verified_user(&pool, "bob@flow.com").await;
-    let http  = reqwest::Client::new();
-    let bus   = EventBus::new();
-    let mut rx = bus.subscribe();
-
-    use box_fraise_domain::domain::messages::{service as msg_service, types::SendMessageBody};
-
-    let msg = msg_service::send_message(
-        &pool,
-        &http,
-        alice,
-        SendMessageBody {
-            recipient_id:        bob,
-            body:                "hello".to_owned(),
-            encrypted:           None,
-            ephemeral_key:       None,
-            sender_identity_key: None,
-            one_time_pre_key_id: None,
-        },
-        &bus,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(msg.sender_id, alice);
-    assert_eq!(msg.recipient_id, bob);
-
-    drop(bus);
-    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-    let has_sent = events.iter().any(|e| matches!(e, DomainEvent::MessageSent { .. }));
-    assert!(has_sent, "send_message must publish MessageSent event");
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Register keys → KeyBundleDepleted when last OTPK consumed
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[sqlx::test]
-async fn claim_key_bundle_depleted_fires_event(pool: PgPool) {
-    use box_fraise_domain::{
-        domain::keys::{service as key_service, types::RegisterKeysBody},
-        types::KeyId,
-    };
-
-    let user_id = verified_user(&pool, "keys@flow.com").await;
-
-    let bus = EventBus::new();
-
-    // Register keys with exactly one OTPK.
-    key_service::register_keys(
-        &pool,
-        user_id,
-        RegisterKeysBody {
-            identity_key:         "ik".to_owned(),
-            identity_signing_key: Some("isk".to_owned()),
-            signed_pre_key:       "spk".to_owned(),
-            signed_pre_key_sig:   "spk_sig".to_owned(),
-            one_time_pre_keys: vec![
-                box_fraise_domain::domain::keys::types::OneTimePreKeyItem {
-                    key_id:     KeyId::from(1),
-                    public_key: "opk1".to_owned(),
-                },
-            ],
-            challenge_sig: None,
-        },
-        &bus,
-    )
-    .await
-    .unwrap();
-
-    let mut rx = bus.subscribe();
-
-    // Claim the only OTPK — bundle becomes depleted.
-    let bundle = key_service::claim_key_bundle(&pool, user_id, &bus).await.unwrap();
-    assert!(bundle.one_time_pre_key.is_some(), "first claim must return the OTPK");
-
-    // Count remaining OTPKs — should be 0.
-    let remaining = key_service::get_otpk_count(&pool, user_id).await.unwrap();
-    assert_eq!(remaining, 0, "OTPK must be consumed after claim");
-
-    drop(bus);
-    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-    let depleted = events.iter().any(|e| matches!(e, DomainEvent::KeyBundleDepleted { .. }));
-    assert!(depleted, "claim_key_bundle must publish KeyBundleDepleted when OTPKs exhausted");
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Legacy DB-layer tests (preserved from previous integration suite)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -208,10 +114,10 @@ async fn magic_link_creates_new_user_on_first_call(pool: PgPool) {
     assert!(existing.is_none());
 
     let user_id: i32 =
-        sqlx::query_scalar("INSERT INTO users (email, verified) VALUES ($1, false) RETURNING id")
+        sqlx::query_scalar("INSERT INTO users (email, email_verified) VALUES ($1, false) RETURNING id")
             .bind(email).fetch_one(&pool).await.unwrap();
 
-    let verified: bool = sqlx::query_scalar("SELECT verified FROM users WHERE id = $1")
+    let verified: bool = sqlx::query_scalar("SELECT email_verified FROM users WHERE id = $1")
         .bind(user_id).fetch_one(&pool).await.unwrap();
     assert!(!verified);
 }
@@ -220,13 +126,13 @@ async fn magic_link_creates_new_user_on_first_call(pool: PgPool) {
 async fn magic_link_find_or_create_is_idempotent(pool: PgPool) {
     let email = "idempotent@test.com";
     let first: i32 = sqlx::query_scalar(
-        "INSERT INTO users (email, verified) VALUES ($1, false)
+        "INSERT INTO users (email, email_verified) VALUES ($1, false)
          ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id",
     )
     .bind(email).fetch_one(&pool).await.unwrap();
 
     let second: i32 = sqlx::query_scalar(
-        "INSERT INTO users (email, verified) VALUES ($1, false)
+        "INSERT INTO users (email, email_verified) VALUES ($1, false)
          ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id",
     )
     .bind(email).fetch_one(&pool).await.unwrap();
@@ -240,11 +146,11 @@ async fn magic_link_find_or_create_is_idempotent(pool: PgPool) {
 #[sqlx::test]
 async fn magic_link_banned_user_is_silently_skipped(pool: PgPool) {
     let user_id: i32 = sqlx::query_scalar(
-        "INSERT INTO users (email, verified, banned) VALUES ('banned@test.com', true, true) RETURNING id",
+        "INSERT INTO users (email, email_verified, is_banned) VALUES ('banned@test.com', true, true) RETURNING id",
     )
     .fetch_one(&pool).await.unwrap();
 
-    let banned: bool = sqlx::query_scalar("SELECT banned FROM users WHERE id = $1")
+    let banned: bool = sqlx::query_scalar("SELECT is_banned FROM users WHERE id = $1")
         .bind(user_id).fetch_one(&pool).await.unwrap();
     assert!(banned);
 }
@@ -252,14 +158,14 @@ async fn magic_link_banned_user_is_silently_skipped(pool: PgPool) {
 #[sqlx::test]
 async fn magic_link_verify_marks_user_verified(pool: PgPool) {
     let user_id: i32 = sqlx::query_scalar(
-        "INSERT INTO users (email, verified) VALUES ('toverify@test.com', false) RETURNING id",
+        "INSERT INTO users (email, email_verified) VALUES ('toverify@test.com', false) RETURNING id",
     )
     .fetch_one(&pool).await.unwrap();
 
-    sqlx::query("UPDATE users SET verified = true WHERE id = $1")
+    sqlx::query("UPDATE users SET email_verified = true WHERE id = $1")
         .bind(user_id).execute(&pool).await.unwrap();
 
-    let verified: bool = sqlx::query_scalar("SELECT verified FROM users WHERE id = $1")
+    let verified: bool = sqlx::query_scalar("SELECT email_verified FROM users WHERE id = $1")
         .bind(user_id).fetch_one(&pool).await.unwrap();
     assert!(verified);
 }

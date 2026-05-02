@@ -152,10 +152,10 @@ pub async fn create_user(pool: &PgPool, email: &str) -> Usr {
     Usr { id: UserId::from(id) }
 }
 
-/// Creates a user with `verified = true` — required for QR token issuance.
+/// Creates a user with `email_verified = true` — required for QR token issuance.
 pub async fn create_verified_user(pool: &PgPool, email: &str) -> Usr {
     let u = create_user(pool, email).await;
-    sqlx::query("UPDATE users SET verified = true WHERE id = $1")
+    sqlx::query("UPDATE users SET email_verified = true WHERE id = $1")
         .bind(i32::from(u.id))
         .execute(pool)
         .await

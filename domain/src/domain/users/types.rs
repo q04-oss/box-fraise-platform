@@ -8,32 +8,28 @@ use crate::types::UserId;
 #[derive(Debug, Serialize)]
 pub struct PublicProfile {
     /// User identifier.
-    pub id:           UserId,
+    pub id:                  UserId,
     /// Display name chosen by the user (may be absent).
-    pub display_name: Option<String>,
-    /// URL of the user's portrait image (may be absent).
-    pub portrait_url: Option<String>,
-    /// Whether this user has DJ privileges.
-    pub is_dj:        bool,
+    pub display_name:        Option<String>,
     /// Whether the user's email has been verified.
-    pub verified:     bool,
-    /// Short user code for QR-based key bundle lookup.
-    pub user_code:    Option<String>,
+    pub email_verified:      bool,
+    /// BFIP verification status (registered / identity_confirmed / presence_confirmed / attested).
+    pub verification_status: String,
+    /// Whether the user holds a soultoken.
+    pub soultoken_id:        Option<i32>,
 }
 
 /// Compact user result returned by the search endpoint.
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct UserSearchResult {
     /// User identifier.
-    pub id:           UserId,
+    pub id:                  UserId,
     /// Display name chosen by the user.
-    pub display_name: Option<String>,
-    /// URL of the user's portrait image.
-    pub portrait_url: Option<String>,
+    pub display_name:        Option<String>,
     /// Whether the user's email has been verified.
-    pub verified:     bool,
-    /// Short user code used for QR-based key bundle lookup.
-    pub user_code:    Option<String>,
+    pub email_verified:      bool,
+    /// BFIP verification status.
+    pub verification_status: String,
 }
 
 // ── Request bodies ────────────────────────────────────────────────────────────

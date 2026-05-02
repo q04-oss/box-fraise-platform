@@ -1,5 +1,4 @@
 #![allow(missing_docs)] // Repository layer — internal implementation, documented at service layer.
-use rand::Rng;
 use sqlx::PgPool;
 
 use crate::{error::{DomainError, AppResult}, types::UserId};
@@ -8,16 +7,19 @@ use super::types::{UserRow, USER_COLS};
 // ── Lookups ───────────────────────────────────────────────────────────────────
 
 pub async fn find_by_id(pool: &PgPool, id: UserId) -> AppResult<Option<UserRow>> {
-    sqlx::query_as(&format!("SELECT {USER_COLS} FROM users WHERE id = $1"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(DomainError::Db)
+    sqlx::query_as(&format!(
+        "SELECT {USER_COLS} FROM users WHERE id = $1 AND deleted_at IS NULL"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(DomainError::Db)
 }
 
 pub async fn find_by_email(pool: &PgPool, email: &str) -> AppResult<Option<UserRow>> {
     sqlx::query_as(&format!(
-        "SELECT {USER_COLS} FROM users WHERE LOWER(email) = LOWER($1)"
+        "SELECT {USER_COLS} FROM users \
+         WHERE LOWER(email) = LOWER($1) AND deleted_at IS NULL"
     ))
     .bind(email)
     .fetch_optional(pool)
@@ -37,9 +39,10 @@ pub async fn find_or_create_apple(
 ) -> AppResult<(UserRow, bool)> {
     let mut tx = pool.begin().await.map_err(DomainError::Db)?;
 
-    // 1. Look up by Apple user ID first — fastest path for returning users.
+    // 1. Look up by Apple ID first — fastest path for returning users.
     let existing: Option<UserRow> = sqlx::query_as(&format!(
-        "SELECT {USER_COLS} FROM users WHERE apple_user_id = $1 FOR UPDATE"
+        "SELECT {USER_COLS} FROM users \
+         WHERE apple_id = $1 AND deleted_at IS NULL FOR UPDATE"
     ))
     .bind(apple_id)
     .fetch_optional(&mut *tx)
@@ -57,19 +60,16 @@ pub async fn find_or_create_apple(
         .map(String::from)
         .unwrap_or_else(|| format!("{apple_id}@privaterelay.appleid.com"));
 
-    let user_code = generate_unique_code_tx(&mut tx).await?;
-
     let user: UserRow = sqlx::query_as(&format!(
-        "INSERT INTO users (apple_user_id, email, display_name, user_code)
-         VALUES ($1, $2, $3, $4)
+        "INSERT INTO users (apple_id, email, display_name)
+         VALUES ($1, $2, $3)
          ON CONFLICT (email) DO UPDATE
-         SET apple_user_id = EXCLUDED.apple_user_id
+         SET apple_id = EXCLUDED.apple_id
          RETURNING {USER_COLS}"
     ))
     .bind(apple_id)
     .bind(&email_str)
     .bind(display_name)
-    .bind(&user_code)
     .fetch_one(&mut *tx)
     .await
     .map_err(DomainError::Db)?;
@@ -88,15 +88,13 @@ pub async fn find_or_create_magic_link_user(
     if let Some(user) = find_by_email(pool, email).await? {
         return Ok((user, false));
     }
-    let user_code = generate_unique_code(pool).await?;
     let row: Option<UserRow> = sqlx::query_as(&format!(
-        "INSERT INTO users (email, user_code, verified)
-         VALUES ($1, $2, true)
+        "INSERT INTO users (email, email_verified)
+         VALUES ($1, true)
          ON CONFLICT (email) DO NOTHING
          RETURNING {USER_COLS}"
     ))
     .bind(email)
-    .bind(&user_code)
     .fetch_optional(pool)
     .await
     .map_err(DomainError::Db)?;
@@ -135,62 +133,11 @@ pub async fn set_display_name(pool: &PgPool, user_id: UserId, name: &str) -> App
     Ok(())
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
-/// Generate a unique 6-character user code, retrying on collision up to 10 times.
-async fn generate_unique_code(pool: &PgPool) -> AppResult<String> {
-    for _ in 0..10 {
-        let code = random_code();
-        let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE user_code = $1)")
-                .bind(&code)
-                .fetch_one(pool)
-                .await
-                .map_err(DomainError::Db)?;
-        if !exists {
-            return Ok(code);
-        }
-    }
-    Err(DomainError::Internal(anyhow::anyhow!(
-        "could not generate a unique user_code after 10 attempts"
-    )))
-}
-
-/// Same as `generate_unique_code` but operates inside an existing transaction.
-async fn generate_unique_code_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> AppResult<String> {
-    for _ in 0..10 {
-        let code = random_code();
-        let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE user_code = $1)")
-                .bind(&code)
-                .fetch_one(&mut **tx)
-                .await
-                .map_err(DomainError::Db)?;
-        if !exists {
-            return Ok(code);
-        }
-    }
-    Err(DomainError::Internal(anyhow::anyhow!(
-        "could not generate a unique user_code after 10 attempts"
-    )))
-}
-
 pub async fn set_verified(pool: &PgPool, user_id: UserId) -> AppResult<()> {
-    sqlx::query("UPDATE users SET verified = true WHERE id = $1")
+    sqlx::query("UPDATE users SET email_verified = true WHERE id = $1")
         .bind(user_id)
         .execute(pool)
         .await
         .map_err(DomainError::Db)?;
     Ok(())
-}
-
-/// Excludes visually ambiguous characters (0/O, 1/I/L).
-fn random_code() -> String {
-    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let mut rng = rand::thread_rng();
-    (0..6)
-        .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
-        .collect()
 }

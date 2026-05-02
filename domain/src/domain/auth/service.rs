@@ -42,7 +42,7 @@ pub async fn authenticate_apple(
     let (user, is_new) =
         repository::find_or_create_apple(pool, &claims.sub, email, display_name).await?;
 
-    if user.banned {
+    if user.is_banned {
         return Err(DomainError::Forbidden);
     }
 
@@ -55,7 +55,7 @@ pub async fn authenticate_apple(
     event_bus.publish(DomainEvent::UserLoggedIn { user_id: user.id });
 
     let token = auth::sign_token(user.id, cfg)?;
-    Ok(AuthResponse { user_id: user.id, token, is_new, verified: user.verified })
+    Ok(AuthResponse { user_id: user.id, token, is_new, verified: user.email_verified })
 }
 
 // ── Active user ───────────────────────────────────────────────────────────────
@@ -67,7 +67,7 @@ pub async fn get_active_user(pool: &PgPool, user_id: UserId) -> AppResult<UserRo
         .await?
         .ok_or(DomainError::Unauthorized)?;
 
-    if user.banned { return Err(DomainError::Forbidden); }
+    if user.is_banned { return Err(DomainError::Forbidden); }
     Ok(user)
 }
 
@@ -98,7 +98,7 @@ pub async fn request_magic_link(
     }
 
     let (user, _) = repository::find_or_create_magic_link_user(pool, email).await?;
-    if user.banned { return Ok(()); }
+    if user.is_banned { return Ok(()); }
 
     let Some(redis_pool) = redis else { return Ok(()); };
 
@@ -159,13 +159,13 @@ pub async fn verify_magic_link(
 
     let user = repository::find_by_id(pool, user_id).await?.ok_or(DomainError::Unauthorized)?;
 
-    if user.banned {
+    if user.is_banned {
         audit::write(pool, Some(user_id.into()), None, "auth.login_blocked",
             serde_json::json!({ "reason": "banned", "via": "magic_link" }), ip).await;
         return Err(DomainError::Forbidden);
     }
 
-    if !user.verified {
+    if !user.email_verified {
         repository::set_verified(pool, user_id).await?;
     }
 
@@ -246,7 +246,7 @@ mod tests {
 
     async fn insert_user(pool: &PgPool, email: &str) -> UserId {
         let (id,): (i32,) =
-            sqlx::query_as("INSERT INTO users (email, verified) VALUES ($1, true) RETURNING id")
+            sqlx::query_as("INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id")
                 .bind(email)
                 .fetch_one(pool)
                 .await

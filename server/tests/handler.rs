@@ -97,7 +97,7 @@ async fn auth_me_expired_token_returns_401(pool: PgPool) {
 #[sqlx::test]
 async fn auth_me_banned_user_returns_403(pool: PgPool) {
     let user = common::create_user(&pool, "banned@test.com").await;
-    sqlx::query("UPDATE users SET banned = true WHERE id = $1")
+    sqlx::query("UPDATE users SET is_banned = true WHERE id = $1")
         .bind(i32::from(user.id)).execute(&pool).await.unwrap();
     let token = common::valid_token(i32::from(user.id));
     let state = common::build_state(pool, None);
@@ -253,99 +253,6 @@ async fn display_name_authenticated_valid_returns_200(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Messages
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[sqlx::test]
-async fn messages_conversations_no_auth_returns_401(pool: PgPool) {
-    let state = common::build_state(pool, None);
-    let app   = box_fraise_server::app::build(state);
-
-    let req = Request::builder()
-        .method("GET")
-        .uri("/api/messages/conversations")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[sqlx::test]
-async fn messages_conversations_authenticated_returns_200(pool: PgPool) {
-    let user  = common::create_user(&pool, "convs@test.com").await;
-    let token = common::valid_token(i32::from(user.id));
-    let state = common::build_state(pool, None);
-    let app   = box_fraise_server::app::build(state);
-
-    let resp = app
-        .oneshot(authed_req("GET", "/api/messages/conversations", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-}
-
-#[sqlx::test]
-async fn messages_send_no_auth_returns_401(pool: PgPool) {
-    let state = common::build_state(pool, None);
-    let app   = box_fraise_server::app::build(state);
-
-    let req = Request::builder()
-        .method("POST")
-        .uri("/api/messages")
-        .header("content-type", "application/json")
-        .body(Body::from(br#"{"recipient_id":1,"body":"hi"}"#.to_vec()))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Keys
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[sqlx::test]
-async fn keys_challenge_no_auth_returns_401(pool: PgPool) {
-    let state = common::build_state(pool, None);
-    let app   = box_fraise_server::app::build(state);
-
-    let req = Request::builder()
-        .method("POST")
-        .uri("/api/keys/challenge")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[sqlx::test]
-async fn keys_otpk_count_authenticated_returns_200(pool: PgPool) {
-    let user  = common::create_user(&pool, "keys@test.com").await;
-    let token = common::valid_token(i32::from(user.id));
-    let state = common::build_state(pool, None);
-    let app   = box_fraise_server::app::build(state);
-
-    let resp = app
-        .oneshot(authed_req("GET", "/api/keys/one-time/count", &token))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-}
-
-#[sqlx::test]
-async fn keys_bundle_by_id_no_auth_returns_401(pool: PgPool) {
-    let state = common::build_state(pool, None);
-    let app   = box_fraise_server::app::build(state);
-
-    let req = Request::builder()
-        .method("GET")
-        .uri("/api/keys/bundle/42")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

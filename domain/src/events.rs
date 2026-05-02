@@ -1,4 +1,4 @@
-use crate::types::{MessageId, UserId};
+use crate::types::UserId;
 
 /// All significant state-change events that the platform can broadcast.
 ///
@@ -18,31 +18,6 @@ pub enum DomainEvent {
     /// A user successfully authenticated.
     UserLoggedIn {
         /// The authenticated user's identifier.
-        user_id: UserId,
-    },
-
-    // ── Messages ──────────────────────────────────────────────────────────────
-    /// A message was sent between two users.
-    MessageSent {
-        /// Identifier of the newly created message.
-        message_id:   MessageId,
-        /// User who sent the message.
-        sender_id:    UserId,
-        /// User who received the message.
-        recipient_id: UserId,
-    },
-
-    // ── Keys ──────────────────────────────────────────────────────────────────
-    /// A user registered or updated their X3DH key bundle.
-    KeyBundleRegistered {
-        /// The user whose keys were registered.
-        user_id: UserId,
-    },
-    /// A user's one-time pre-key supply has been exhausted.
-    ///
-    /// The key owner should upload new pre-keys immediately.
-    KeyBundleDepleted {
-        /// The user who needs to upload new pre-keys.
         user_id: UserId,
     },
 }

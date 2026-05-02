@@ -91,8 +91,6 @@ pub fn build(state: AppState) -> Router {
         // ── Domain routes ─────────────────────────────────────────────────────
         .merge(meta::router())
         .merge(crate::domain::auth::routes::router())
-        .merge(crate::domain::keys::routes::router())
-        .merge(crate::domain::messages::routes::router())
         .merge(crate::domain::users::routes::router())
         .merge(crate::domain::dorotka::routes::router())
         // ── Security middleware (innermost — runs first) ───────────────────────

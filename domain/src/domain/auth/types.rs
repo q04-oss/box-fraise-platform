@@ -1,7 +1,7 @@
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{StripeCustomerId, UserId};
+use crate::types::UserId;
 
 // ── Database row ──────────────────────────────────────────────────────────────
 
@@ -10,30 +10,33 @@ use crate::types::{StripeCustomerId, UserId};
 #[allow(missing_docs)] // Database row — field names are identical to column names.
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct UserRow {
-    pub id:                        UserId,
-    pub apple_user_id:             Option<String>,
-    pub email:                     String,
-    pub display_name:              Option<String>,
-    pub push_token:                Option<String>,
-    pub user_code:                 Option<String>,
-    pub verified:                  bool,
-    pub banned:                    bool,
-    pub table_verified:            bool,
-    pub is_dorotka:                bool,
-    pub stripe_customer_id:        Option<StripeCustomerId>,
-    pub social_time_bank_seconds:  i32,
-    pub identity_verified:         bool,
-    pub portrait_url:              Option<String>,
-    pub password_hash:             Option<String>,
-    pub created_at:                NaiveDateTime,
+    pub id:                           UserId,
+    pub email:                        String,
+    pub apple_id:                     Option<String>,
+    pub display_name:                 Option<String>,
+    pub push_token:                   Option<String>,
+    pub email_verified:               bool,
+    pub is_platform_admin:            bool,
+    pub is_banned:                    bool,
+    pub verification_status:          String,
+    pub attested_at:                  Option<DateTime<Utc>>,
+    pub soultoken_id:                 Option<i32>,
+    pub cleared_at:                   Option<DateTime<Utc>>,
+    pub cleared_soultoken_id:         Option<i32>,
+    pub platform_gift_eligible_after: Option<DateTime<Utc>>,
+    pub deleted_at:                   Option<DateTime<Utc>>,
+    pub last_active_at:               Option<DateTime<Utc>>,
+    pub updated_at:                   DateTime<Utc>,
+    pub created_at:                   DateTime<Utc>,
 }
 
 /// Columns to SELECT when fetching a full UserRow.
 pub const USER_COLS: &str =
-    "id, apple_user_id, email, display_name, push_token, user_code, \
-     verified, banned, table_verified, is_dorotka, stripe_customer_id, \
-     social_time_bank_seconds, identity_verified, \
-     portrait_url, password_hash, created_at";
+    "id, email, apple_id, display_name, push_token, \
+     email_verified, is_platform_admin, is_banned, verification_status, \
+     attested_at, soultoken_id, cleared_at, cleared_soultoken_id, \
+     platform_gift_eligible_after, deleted_at, last_active_at, \
+     updated_at, created_at";
 
 // ── Request bodies ────────────────────────────────────────────────────────────
 
