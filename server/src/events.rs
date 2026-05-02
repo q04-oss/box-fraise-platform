@@ -26,5 +26,8 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
             )
             .await;
         }
+
+        // Audit write already done inside service::ask_dorotka.
+        DomainEvent::DorotkaQueried { .. } => {}
     }
 }

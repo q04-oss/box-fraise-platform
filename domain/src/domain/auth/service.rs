@@ -1,5 +1,6 @@
 use deadpool_redis::redis;
 use secrecy::ExposeSecret;
+use sha2::{Sha256, Digest};
 use sqlx::PgPool;
 use std::{net::IpAddr, sync::Arc};
 use uuid::Uuid;
@@ -76,12 +77,17 @@ pub async fn get_active_user(pool: &PgPool, user_id: UserId) -> AppResult<UserRo
 /// Send a magic link email for `email`. Creates the user if they don't exist.
 /// Silently no-ops when rate-limited (avoids email enumeration).
 /// Returns `Ok` even when Redis is unavailable (token creation is skipped).
+///
+/// When Redis is available, also writes a row to `magic_link_tokens` as a
+/// durable audit record (BFIP Section 3.1). The row's `token_hash` is
+/// SHA-256 of the raw token — the plaintext is never stored.
 pub async fn request_magic_link(
     pool:  &PgPool,
     cfg:   &Arc<Config>,
     http:  &reqwest::Client,
     redis: Option<&deadpool_redis::Pool>,
     email: &str,
+    ip:    Option<IpAddr>,
 ) -> AppResult<()> {
     if let Some(pool_r) = redis {
         let key = format!("{MAGIC_RATE_PREFIX}{}", email.to_lowercase());
@@ -102,15 +108,39 @@ pub async fn request_magic_link(
 
     let Some(redis_pool) = redis else { return Ok(()); };
 
-    let token = Uuid::new_v4().to_string();
-    let key   = format!("{MAGIC_LINK_PREFIX}{token}");
-    let mut conn = redis_pool.get().await
+    let token     = Uuid::new_v4().to_string();
+    let redis_key = format!("{MAGIC_LINK_PREFIX}{token}");
+    let mut conn  = redis_pool.get().await
         .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis: {e}")))?;
     let _: () = redis::cmd("SET")
-        .arg(&key).arg(i32::from(user.id).to_string())
+        .arg(&redis_key).arg(i32::from(user.id).to_string())
         .arg("EX").arg(MAGIC_LINK_TTL).arg("NX")
         .query_async(&mut *conn).await
         .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis SET: {e}")))?;
+
+    // Durable audit trail — BFIP Section 3.1.
+    // Errors are logged and swallowed: Redis is the primary auth path.
+    let token_hash  = sha256_hex(token.as_bytes());
+    let expires_at  = chrono::Utc::now() + chrono::Duration::seconds(MAGIC_LINK_TTL as i64);
+    let rate_key    = format!("{MAGIC_RATE_PREFIX}{}", email.to_lowercase());
+    let ip_str      = ip.map(|a| a.to_string());
+
+    if let Err(e) = sqlx::query(
+        "INSERT INTO magic_link_tokens \
+         (user_id, email, token_hash, ip_address, rate_limit_key, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6)"
+    )
+    .bind(i32::from(user.id))
+    .bind(email)
+    .bind(&token_hash)
+    .bind(ip_str.as_deref())
+    .bind(&rate_key)
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    {
+        tracing::error!(error = %e, "magic_link_tokens insert failed — audit trail gap");
+    }
 
     if let Some(api_key) = cfg.resend_api_key.as_ref().map(|k| k.expose_secret().to_owned()) {
         let http     = http.clone();
@@ -160,6 +190,17 @@ pub async fn verify_magic_link(
         }
     });
 
+    // Mark token consumed in the DB audit trail — fire-and-forget.
+    // Redis GETDEL is the authoritative consumption; this is the BFIP record.
+    let token_hash = sha256_hex(token.as_bytes());
+    sqlx::query(
+        "UPDATE magic_link_tokens SET used_at = NOW() WHERE token_hash = $1"
+    )
+    .bind(&token_hash)
+    .execute(pool)
+    .await
+    .ok();
+
     let user = repository::find_by_id(pool, user_id).await?.ok_or(DomainError::Unauthorized)?;
 
     if user.is_banned {
@@ -180,6 +221,15 @@ pub async fn verify_magic_link(
 
     let jwt = auth::sign_token(user_id, cfg)?;
     Ok(AuthResponse { user_id, token: jwt, is_new: false, verified: true })
+}
+
+// ── Profile mutations ─────────────────────────────────────────────────────────
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// SHA-256 of `data` returned as a lowercase hex string.
+fn sha256_hex(data: &[u8]) -> String {
+    hex::encode(Sha256::digest(data))
 }
 
 // ── Profile mutations ─────────────────────────────────────────────────────────
@@ -336,7 +386,7 @@ mod tests {
             return;
         };
 
-        request_magic_link(&pool, &cfg, &http, Some(&redis), "newmagic@test.com")
+        request_magic_link(&pool, &cfg, &http, Some(&redis), "newmagic@test.com", None)
             .await
             .unwrap();
 
@@ -359,7 +409,7 @@ mod tests {
         };
 
         // First request — sets the rate counter.
-        request_magic_link(&pool, &cfg, &http, Some(&redis), "ratelimit@test.com")
+        request_magic_link(&pool, &cfg, &http, Some(&redis), "ratelimit@test.com", None)
             .await
             .unwrap();
 
@@ -371,7 +421,7 @@ mod tests {
         drop(conn);
 
         // Second request must be rate-limited (silently returns Ok but no token written).
-        request_magic_link(&pool, &cfg, &http, Some(&redis), "ratelimit@test.com")
+        request_magic_link(&pool, &cfg, &http, Some(&redis), "ratelimit@test.com", None)
             .await
             .unwrap(); // still Ok — rate limit is silent to avoid enumeration
     }
@@ -445,5 +495,68 @@ mod tests {
         // Second use must fail — token consumed by GETDEL.
         let result = verify_magic_link(&pool, &cfg, Some(&redis), token, None, &bus).await;
         assert!(matches!(result, Err(DomainError::Unauthorized)));
+    }
+
+    // ── magic_link_tokens DB writes (BFIP Section 3.1) ───────────────────────
+
+    /// request_magic_link must insert a row into magic_link_tokens,
+    /// and verify_magic_link must set used_at on that row.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn magic_link_tokens_written_and_consumed(pool: PgPool) {
+        let cfg  = test_cfg();
+        let http = reqwest::Client::new();
+        let Some(redis) = redis_pool_from_env().await else {
+            eprintln!("skipping: REDIS_URL not set");
+            return;
+        };
+
+        // Seed a user.
+        let email   = "ml_tokens@test.com";
+        let user_id = insert_user(&pool, email).await;
+
+        // Request a magic link — should write to magic_link_tokens.
+        request_magic_link(&pool, &cfg, &http, Some(&redis), email, None)
+            .await
+            .unwrap();
+
+        let row: (i32, Option<String>) = sqlx::query_as(
+            "SELECT user_id, used_at::text FROM magic_link_tokens WHERE email = $1"
+        )
+        .bind(email)
+        .fetch_one(&pool)
+        .await
+        .expect("magic_link_tokens row must exist after request_magic_link");
+
+        assert_eq!(row.0, i32::from(user_id), "token must belong to the requesting user");
+        assert!(row.1.is_none(), "used_at must be NULL before verification");
+
+        // Fetch the raw token from Redis to simulate verification.
+        let token_key_pattern = format!("fraise:magic:*");
+        let mut conn = redis.get().await.unwrap();
+        let keys: Vec<String> = deadpool_redis::redis::cmd("KEYS")
+            .arg(&token_key_pattern)
+            .query_async(&mut *conn)
+            .await
+            .unwrap();
+
+        assert!(!keys.is_empty(), "Redis must have a magic link key");
+        let raw_token = keys[0].trim_start_matches("fraise:magic:").to_owned();
+
+        // Verify the token — should set used_at.
+        let bus  = EventBus::new();
+        let resp = verify_magic_link(&pool, &cfg, Some(&redis), &raw_token, None, &bus)
+            .await
+            .unwrap();
+        assert_eq!(resp.user_id, user_id);
+
+        let used_at: Option<String> = sqlx::query_scalar(
+            "SELECT used_at::text FROM magic_link_tokens WHERE email = $1"
+        )
+        .bind(email)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert!(used_at.is_some(), "used_at must be set after verify_magic_link");
     }
 }

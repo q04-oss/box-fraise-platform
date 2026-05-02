@@ -37,6 +37,51 @@ Answer questions about Whisked's loyalty program, the app, how it connects \
 to box fraise, and what makes Whisked distinct. Keep answers to two or three \
 sentences unless depth is genuinely required.";
 
+use std::net::IpAddr;
+use sqlx::PgPool;
+use box_fraise_integrations::anthropic;
+
+use crate::{audit, error::AppResult, event_bus::EventBus, events::DomainEvent};
+
+/// Ask the Dorotka AI assistant and return the answer.
+///
+/// This is the service-layer entry point for the Dorotka domain. It:
+/// 1. Writes an audit event before the API call (records even if Anthropic fails)
+/// 2. Calls the Anthropic API
+/// 3. Publishes [`DomainEvent::DorotkaQueried`] so consumers can react
+pub async fn ask_dorotka(
+    pool:      &PgPool,
+    http:      &reqwest::Client,
+    api_key:   &str,
+    query:     &str,
+    context:   &str,
+    ip:        IpAddr,
+    event_bus: &EventBus,
+) -> AppResult<String> {
+    let system = get_system_prompt(context);
+
+    // Audit before the API call — records the attempt regardless of Anthropic outcome.
+    audit::write(
+        pool,
+        None,
+        None,
+        "dorotka.ask",
+        serde_json::json!({
+            "context":       context,
+            "query_preview": query.chars().take(80).collect::<String>(),
+            "ip":            ip.to_string(),
+        }),
+    ).await;
+
+    let answer = anthropic::ask(http, api_key, system, query).await?;
+
+    event_bus.publish(DomainEvent::DorotkaQueried {
+        context: context.to_owned(),
+    });
+
+    Ok(answer)
+}
+
 /// Returns the appropriate system prompt for the given context identifier.
 /// Unknown contexts fall back to the platform voice — never error on this.
 pub fn get_system_prompt(context: &str) -> &'static str {

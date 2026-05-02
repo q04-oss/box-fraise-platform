@@ -88,11 +88,14 @@ pub async fn logout(
 }
 
 pub async fn magic_link_request(
-    State(state): State<AppState>,
-    AppJson(body): AppJson<MagicLinkBody>,
+    State(state):      State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers:           HeaderMap,
+    AppJson(body):     AppJson<MagicLinkBody>,
 ) -> AppResult<Json<serde_json::Value>> {
+    let ip = client_ip(&headers, Some(&ConnectInfo(addr)));
     service::request_magic_link(
-        &state.db, &state.cfg, &state.http, state.redis.as_ref(), &body.email,
+        &state.db, &state.cfg, &state.http, state.redis.as_ref(), &body.email, Some(ip),
     ).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

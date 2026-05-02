@@ -89,6 +89,14 @@ impl Config {
             }
         }
 
+        let hmac_shared_key = optional_secret("FRAISE_HMAC_SHARED_KEY");
+        if hmac_shared_key.is_none() {
+            tracing::warn!(
+                "FRAISE_HMAC_SHARED_KEY not set — iOS HMAC request signing \
+                 will fail for all requests"
+            );
+        }
+
         Ok(Self {
             database_url:          require_secret("DATABASE_URL")?,
             jwt_secret:            jwt_secret_raw.into(),
@@ -101,7 +109,7 @@ impl Config {
             chocolatier_pin:       chocolatier_pin_raw.into(),
             supplier_pin:          supplier_pin_raw.into(),
             port:                  optional_parse("PORT", 3001)?,
-            hmac_shared_key:       optional_secret("FRAISE_HMAC_SHARED_KEY"),
+            hmac_shared_key,
             redis_url:             optional_secret("REDIS_URL"),
             review_pin:            optional_secret("REVIEW_PIN"),
             apple_private_key:     optional_secret("APPLE_PRIVATE_KEY"),

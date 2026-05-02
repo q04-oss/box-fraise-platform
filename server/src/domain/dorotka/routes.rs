@@ -8,11 +8,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
-use box_fraise_integrations::anthropic;
-
 use crate::{
     app::AppState,
-    audit,
     error::{AppError, AppResult},
     http::middleware::rate_limit::client_ip,
 };
@@ -58,32 +55,21 @@ pub(crate) async fn ask(
         .map_err(|e| AppError::bad_request(e.to_string()))?;
 
     let context = context_from_host(&headers);
-    let system  = service::get_system_prompt(context);
 
+    use secrecy::ExposeSecret;
     let api_key = state.cfg.anthropic_api_key.as_ref()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!(
             "ANTHROPIC_API_KEY not configured — Dorotka unavailable"
         )))?;
 
-    // Audit the attempt before the API call — records even if Anthropic fails
-    audit::write(
+    let answer = service::ask_dorotka(
         &state.db,
-        None,
-        None,
-        "dorotka.ask",
-        serde_json::json!({
-            "context":       context,
-            "query_preview": query.chars().take(80).collect::<String>(),
-            "ip":            ip.to_string(),
-        }),
-    ).await;
-
-    use secrecy::ExposeSecret;
-    let answer = anthropic::ask(
         &state.http,
         api_key.expose_secret(),
-        system,
         &query,
+        context,
+        ip,
+        &state.event_bus,
     ).await?;
 
     Ok(Json(AskResponse {

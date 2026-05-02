@@ -20,4 +20,11 @@ pub enum DomainEvent {
         /// The authenticated user's identifier.
         user_id: UserId,
     },
+
+    // ── Dorotka ───────────────────────────────────────────────────────────────
+    /// A query was submitted to the Dorotka AI assistant.
+    DorotkaQueried {
+        /// The platform context ("fraise" or "whisked").
+        context: String,
+    },
 }

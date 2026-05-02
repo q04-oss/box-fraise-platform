@@ -60,7 +60,7 @@ mod tests {
     #[sqlx::test(migrations = "../server/migrations")]
     async fn get_public_profile_returns_not_found_for_banned_user(pool: PgPool) {
         let user_id = insert_user(&pool, "banned@test.com").await;
-        sqlx::query("UPDATE users SET banned = true WHERE id = $1")
+        sqlx::query("UPDATE users SET is_banned = true WHERE id = $1")
             .bind(i32::from(user_id))
             .execute(&pool)
             .await
