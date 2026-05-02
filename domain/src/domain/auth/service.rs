@@ -152,7 +152,10 @@ pub async fn verify_magic_link(
         Some(s) => s.parse::<i32>().map_err(|_| DomainError::Unauthorized)?,
         None => {
             audit::write(pool, None, None, "auth.magic_link_invalid",
-                serde_json::json!({ "reason": "token_expired_or_consumed" }), ip).await;
+                serde_json::json!({
+                    "reason": "token_expired_or_consumed",
+                    "ip": ip.map(|a| a.to_string()),
+                })).await;
             return Err(DomainError::Unauthorized);
         }
     });
@@ -161,7 +164,11 @@ pub async fn verify_magic_link(
 
     if user.is_banned {
         audit::write(pool, Some(user_id.into()), None, "auth.login_blocked",
-            serde_json::json!({ "reason": "banned", "via": "magic_link" }), ip).await;
+            serde_json::json!({
+                "reason": "banned",
+                "via":    "magic_link",
+                "ip":     ip.map(|a| a.to_string()),
+            })).await;
         return Err(DomainError::Forbidden);
     }
 

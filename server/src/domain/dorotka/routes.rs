@@ -76,7 +76,6 @@ pub(crate) async fn ask(
             "query_preview": query.chars().take(80).collect::<String>(),
             "ip":            ip.to_string(),
         }),
-        Some(ip),
     ).await;
 
     use secrecy::ExposeSecret;

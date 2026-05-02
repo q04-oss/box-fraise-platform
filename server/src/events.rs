@@ -12,7 +12,6 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
                 None,
                 "user.registered",
                 serde_json::Value::Null,
-                None,
             )
             .await;
         }
@@ -24,7 +23,6 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
                 None,
                 "user.login",
                 serde_json::Value::Null,
-                None,
             )
             .await;
         }
