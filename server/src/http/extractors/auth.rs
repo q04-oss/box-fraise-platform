@@ -65,7 +65,25 @@ where
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, AppError> {
-        let RequireClaims(claims) = RequireClaims::from_request_parts(parts, state).await?;
+        let app                    = AppState::from_ref(state);
+        let RequireClaims(claims)  = RequireClaims::from_request_parts(parts, state).await?;
+
+        // Check ban status on every protected request so banned users cannot
+        // access any route that uses RequireUser — not just the auth endpoints.
+        let is_banned: Option<bool> = sqlx::query_scalar(
+            "SELECT is_banned FROM users WHERE id = $1 AND deleted_at IS NULL"
+        )
+        .bind(i32::from(claims.user_id))
+        .fetch_optional(&app.db)
+        .await
+        .map_err(AppError::Db)?;
+
+        match is_banned {
+            Some(true) => return Err(AppError::Forbidden),
+            None       => return Err(AppError::Unauthorized), // deleted or missing
+            Some(false) => {}
+        }
+
         Ok(RequireUser(claims.user_id))
     }
 }

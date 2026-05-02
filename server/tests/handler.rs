@@ -603,3 +603,107 @@ async fn rotate_beacon_key_returns_200_for_owner(pool: PgPool) {
         "original key must be preserved as previous_secret_key"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Adversarial auth — Section 2 test 5
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A banned user must be blocked on every protected route regardless of having
+/// a valid JWT. Confirms the ban check runs inside each extractor, not just at login.
+#[sqlx::test]
+async fn banned_user_is_blocked_on_all_protected_routes(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let email: String = SafeEmail().fake();
+    let user  = common::create_user(&pool, &email).await;
+    let uid   = i32::from(user.id);
+    let token = common::valid_token(uid);
+
+    // Ban the user after their token was issued.
+    sqlx::query("UPDATE users SET is_banned = true WHERE id = $1")
+        .bind(uid).execute(&pool).await.unwrap();
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    // GET /api/auth/me
+    let me_resp = app.clone()
+        .oneshot(authed_req("GET", "/api/auth/me", &token))
+        .await.unwrap();
+    assert!(
+        me_resp.status() == StatusCode::FORBIDDEN || me_resp.status() == StatusCode::UNAUTHORIZED,
+        "banned user must get 401/403 on /api/auth/me, got {}",
+        me_resp.status()
+    );
+
+    // GET /api/businesses/me
+    let biz_resp = app.clone()
+        .oneshot(authed_req("GET", "/api/businesses/me", &token))
+        .await.unwrap();
+    assert!(
+        biz_resp.status() == StatusCode::FORBIDDEN || biz_resp.status() == StatusCode::UNAUTHORIZED,
+        "banned user must get 401/403 on /api/businesses/me, got {}",
+        biz_resp.status()
+    );
+
+    // POST /api/businesses
+    let create_resp = app
+        .oneshot(authed_json_req(
+            "POST", "/api/businesses", &token,
+            serde_json::json!({ "name": "Test", "address": "123 Test St" }),
+        ))
+        .await.unwrap();
+    assert!(
+        create_resp.status() == StatusCode::FORBIDDEN
+            || create_resp.status() == StatusCode::UNAUTHORIZED,
+        "banned user must get 401/403 on POST /api/businesses, got {}",
+        create_resp.status()
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Adversarial business — Section 3 test 10
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Business profiles are publicly accessible to any authenticated user —
+/// the design is intentionally permissive for GET (businesses are public partner
+/// profiles). Only write operations (create, delete, update) are owner-gated.
+/// This test documents and asserts that permissive design.
+#[sqlx::test]
+async fn authenticated_user_can_view_any_business_profile(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let owner   = common::create_attested_user(&pool, SafeEmail().fake::<String>().as_str()).await;
+    let visitor = common::create_user(&pool, SafeEmail().fake::<String>().as_str()).await;
+
+    // Owner creates a business.
+    let bus = box_fraise_domain::event_bus::EventBus::new();
+    let biz = box_fraise_domain::domain::businesses::service::create_business(
+        &pool,
+        owner.id,
+        box_fraise_domain::domain::businesses::types::CreateBusinessRequest {
+            name:          "Public Café".to_owned(),
+            address:       "1 Main St, Edmonton, AB".to_owned(),
+            latitude:      None,
+            longitude:     None,
+            timezone:      None,
+            contact_email: None,
+            contact_phone: None,
+        },
+        &bus,
+    )
+    .await
+    .unwrap();
+
+    // Visitor (different user, not owner) can view the business.
+    let visitor_token = common::valid_token(i32::from(visitor.id));
+    let state         = common::build_state(pool, None);
+    let app           = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", &format!("/api/businesses/{}", biz.id), &visitor_token))
+        .await.unwrap();
+
+    // Businesses are public profiles — any authenticated user may read them.
+    assert_eq!(resp.status(), StatusCode::OK,
+        "any authenticated user must be able to view a business profile (public design)");
+}

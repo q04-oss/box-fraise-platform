@@ -582,4 +582,89 @@ mod tests {
         let b    = derive_witness_hmac("test-secret-key", 42, date, 99);
         assert_eq!(a, b);
     }
+
+    // ── Adversarial beacon tests ──────────────────────────────────────────────
+
+    /// User B must not be able to create a beacon on behalf of User A's business.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn adversary_cannot_create_beacon_for_another_users_business(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let owner_id             = create_attested_user(&pool, SafeEmail().fake::<String>().as_str()).await;
+        let attacker_id          = create_attested_user(&pool, SafeEmail().fake::<String>().as_str()).await;
+        let (biz_id, loc_id) = create_business_with_location(&pool, owner_id).await;
+        let bus                  = EventBus::new();
+
+        let err = create_beacon(&pool, attacker_id, beacon_req(biz_id, loc_id), &bus)
+            .await.expect_err("attacker must not create beacon on another user's business");
+        assert!(matches!(err, DomainError::Forbidden));
+    }
+
+    /// User B must not be able to retrieve the daily UUID for User A's beacon.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn adversary_cannot_retrieve_daily_uuid_for_another_users_beacon(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let owner_id             = create_attested_user(&pool, SafeEmail().fake::<String>().as_str()).await;
+        let attacker_id          = create_attested_user(&pool, SafeEmail().fake::<String>().as_str()).await;
+        let (biz_id, loc_id) = create_business_with_location(&pool, owner_id).await;
+        let bus                  = EventBus::new();
+
+        let beacon = create_beacon(&pool, owner_id, beacon_req(biz_id, loc_id), &bus)
+            .await.unwrap();
+
+        let err = get_daily_uuid(&pool, beacon.id, attacker_id)
+            .await.expect_err("attacker must not get daily UUID for another user's beacon");
+        assert!(matches!(err, DomainError::Forbidden));
+    }
+
+    /// User B must not be able to rotate the secret key for User A's beacon.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn adversary_cannot_rotate_another_users_beacon_key(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let owner_id             = create_attested_user(&pool, SafeEmail().fake::<String>().as_str()).await;
+        let attacker_id          = create_attested_user(&pool, SafeEmail().fake::<String>().as_str()).await;
+        let (biz_id, loc_id) = create_business_with_location(&pool, owner_id).await;
+        let bus                  = EventBus::new();
+
+        let beacon = create_beacon(&pool, owner_id, beacon_req(biz_id, loc_id), &bus)
+            .await.unwrap();
+
+        let err = rotate_key(&pool, beacon.id, attacker_id, &bus)
+            .await.expect_err("attacker must not rotate another user's beacon key");
+        assert!(matches!(err, DomainError::Forbidden));
+    }
+
+    /// The list_beacons response must never contain secret_key or previous_secret_key.
+    /// This is both a type-level guarantee (BeaconResponse has no secret fields)
+    /// and a serialization-level guarantee tested here.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn secret_key_never_appears_in_list_response(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let owner_id             = create_attested_user(&pool, SafeEmail().fake::<String>().as_str()).await;
+        let (biz_id, loc_id) = create_business_with_location(&pool, owner_id).await;
+        let bus                  = EventBus::new();
+
+        // Create beacon — get back BeaconResponse (no secret field).
+        let beacon = create_beacon(&pool, owner_id, beacon_req(biz_id, loc_id), &bus)
+            .await.unwrap();
+
+        // Fetch the actual secret_key from the DB for the "does the value appear?" check.
+        let actual_secret: String = sqlx::query_scalar(
+            "SELECT secret_key FROM beacons WHERE id = $1"
+        )
+        .bind(beacon.id)
+        .fetch_one(&pool).await.unwrap();
+
+        // List beacons — returns Vec<BeaconResponse>.
+        let list = list_beacons(&pool, biz_id, owner_id).await.unwrap();
+        let json = serde_json::to_string(&list).unwrap();
+
+        assert!(
+            !json.contains("secret_key"),
+            "JSON must not contain the field name 'secret_key'"
+        );
+        assert!(
+            !json.contains(&actual_secret),
+            "JSON must not contain the actual secret key value"
+        );
+    }
 }

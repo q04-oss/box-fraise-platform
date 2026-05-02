@@ -472,3 +472,120 @@ async fn create_beacon_end_to_end(pool: PgPool) {
     .unwrap();
     assert!(audit_count >= 1, "beacon.created audit_event must be written");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Concurrent simulation tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Five users each fire 10 requests from distinct IPs simultaneously.
+/// The per-IP rate limiter tracks each IP independently — no cross-contamination.
+/// All 50 requests must succeed since each IP is well below the 120 req/60s limit.
+#[sqlx::test]
+async fn concurrent_users_get_independent_rate_limits(pool: PgPool) {
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let mut set = tokio::task::JoinSet::new();
+
+    for user_index in 0u8..5 {
+        for _req_index in 0u8..10 {
+            let app     = app.clone();
+            let user_ip = format!("10.0.0.{}", user_index + 1);
+            set.spawn(async move {
+                let req = Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .header("x-forwarded-for", user_ip)
+                    .body(Body::empty())
+                    .unwrap();
+                app.oneshot(req).await.unwrap().status()
+            });
+        }
+    }
+
+    let mut statuses = Vec::new();
+    while let Some(res) = set.join_next().await {
+        statuses.push(res.unwrap());
+    }
+
+    assert_eq!(statuses.len(), 50, "all 50 requests must complete");
+    let rate_limited = statuses.iter().filter(|&&s| s == StatusCode::TOO_MANY_REQUESTS).count();
+    assert_eq!(
+        rate_limited, 0,
+        "no request must be rate-limited — each IP has its own independent counter (10 << 120)"
+    );
+}
+
+/// Ten concurrent requests with the SAME HMAC nonce must result in exactly one
+/// success and nine 409 CONFLICT rejections. Verifies the nonce cache is
+/// thread-safe and correctly deduplicates under concurrency.
+#[sqlx::test]
+async fn concurrent_beacon_nonce_deduplication(pool: PgPool) {
+    use ring::hmac as ring_hmac;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    // Build a user and a valid JWT so the request can pass auth after HMAC.
+    let user  = common::create_user(&pool, "nonce-test@concurrent.test").await;
+    let token = common::valid_token(i32::from(user.id));
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    // Compute a valid HMAC signature for all 10 requests.
+    // Key matches test_config().hmac_shared_key.
+    let key_bytes = b"test-hmac-key-32-bytes-exactly!!";
+    let method    = "GET";
+    let path      = "/api/businesses/me";
+    let ts        = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let nonce     = uuid::Uuid::new_v4().to_string(); // same nonce for all 10 requests
+
+    // message = method + path + ts + nonce + body (body is empty for GET)
+    let msg = format!("{method}{path}{ts}{nonce}");
+    let key = ring_hmac::Key::new(ring_hmac::HMAC_SHA256, key_bytes);
+    let sig = STANDARD.encode(ring_hmac::sign(&key, msg.as_bytes()).as_ref());
+
+    // Spawn 10 concurrent tasks, each sending the same nonce.
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..10 {
+        let app    = app.clone();
+        let token  = token.clone();
+        let sig    = sig.clone();
+        let nonce  = nonce.clone();
+        let ts_str = ts.to_string();
+        set.spawn(async move {
+            let req = Request::builder()
+                .method("GET")
+                .uri("/api/businesses/me")
+                .header("x-fraise-client", "ios")
+                .header("x-fraise-ts",     &ts_str)
+                .header("x-fraise-nonce",  &nonce)
+                .header("x-fraise-sig",    &sig)
+                .header("authorization",   format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap();
+            app.oneshot(req).await.unwrap().status()
+        });
+    }
+
+    let mut statuses = Vec::new();
+    while let Some(res) = set.join_next().await {
+        statuses.push(res.unwrap());
+    }
+
+    assert_eq!(statuses.len(), 10);
+
+    let conflict_count = statuses.iter().filter(|&&s| s == StatusCode::CONFLICT).count();
+    let passed_count   = statuses.iter().filter(|&&s| s != StatusCode::CONFLICT).count();
+
+    assert_eq!(
+        conflict_count, 9,
+        "9 of 10 concurrent requests with the same nonce must be rejected (409), got: {statuses:?}"
+    );
+    assert_eq!(
+        passed_count, 1,
+        "exactly 1 request must pass nonce dedup and proceed to handler"
+    );
+}

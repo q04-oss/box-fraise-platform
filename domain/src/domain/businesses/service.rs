@@ -293,4 +293,88 @@ mod tests {
         let result  = list_my_businesses(&pool, user_id).await.unwrap();
         assert!(result.is_empty(), "new user must have no businesses");
     }
+
+    // ── Adversarial business tests ────────────────────────────────────────────
+
+    async fn create_user_with_status(pool: &PgPool, email: &str, status: &str) -> UserId {
+        let (id,): (i32,) = sqlx::query_as(
+            "INSERT INTO users (email, email_verified, verification_status) \
+             VALUES ($1, true, $2) RETURNING id"
+        )
+        .bind(email).bind(status)
+        .fetch_one(pool).await.unwrap();
+        UserId::from(id)
+    }
+
+    /// Only 'attested' users may create businesses. Every preceding status must
+    /// be rejected — verifying the full BFIP Section 12 attestation gate.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn adversary_cannot_create_business_without_attestation(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let email: String = SafeEmail().fake();
+        let user_id       = create_user_with_status(&pool, &email, "registered").await;
+        let bus           = EventBus::new();
+
+        let err = create_business(&pool, user_id, test_req("Should Fail"), &bus)
+            .await.expect_err("registered user must not create a business");
+        assert!(matches!(err, DomainError::Forbidden));
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn adversary_cannot_create_business_as_identity_confirmed_user(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let email: String = SafeEmail().fake();
+        let user_id       = create_user_with_status(&pool, &email, "identity_confirmed").await;
+        let bus           = EventBus::new();
+
+        let err = create_business(&pool, user_id, test_req("Should Fail"), &bus)
+            .await.expect_err("identity_confirmed user must not create a business");
+        assert!(matches!(err, DomainError::Forbidden));
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn adversary_cannot_create_business_as_presence_confirmed_user(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let email: String = SafeEmail().fake();
+        let user_id       = create_user_with_status(&pool, &email, "presence_confirmed").await;
+        let bus           = EventBus::new();
+
+        let err = create_business(&pool, user_id, test_req("Should Fail"), &bus)
+            .await.expect_err("presence_confirmed user must not create a business");
+        assert!(matches!(err, DomainError::Forbidden));
+    }
+
+    /// An attested user is hard-capped at 5 active businesses. The 6th attempt
+    /// must be rejected regardless of valid credentials.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn adversary_cannot_exceed_business_limit(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail, faker::company::en::CompanyName,
+                   faker::address::en::StreetName};
+        let email: String   = SafeEmail().fake();
+        let user_id         = create_attested_user(&pool, &email).await;
+        let bus             = EventBus::new();
+
+        for i in 0..5 {
+            let name    = format!("{} {i}", CompanyName().fake::<String>());
+            let address = format!("{} {}, Edmonton, AB",
+                (i + 1) * 100,
+                StreetName().fake::<String>());
+            create_business(&pool, user_id, CreateBusinessRequest {
+                name, address,
+                latitude: None, longitude: None, timezone: None,
+                contact_email: None, contact_phone: None,
+            }, &bus)
+            .await
+            .unwrap_or_else(|e| panic!("business {i} creation failed: {e:?}"));
+        }
+
+        // 6th attempt must fail.
+        let err = create_business(&pool, user_id, test_req("Sixth Business"), &bus)
+            .await.expect_err("6th business must be rejected");
+        // The limit error is a Conflict with a capacity message.
+        assert!(
+            matches!(err, DomainError::Conflict(_)),
+            "expected Conflict for business limit, got: {err:?}"
+        );
+    }
 }

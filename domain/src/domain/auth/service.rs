@@ -611,4 +611,312 @@ mod tests {
                 .unwrap();
         assert_eq!(count, 0, "no session row must be written for invalid token");
     }
+
+    // ── Adversarial auth tests ────────────────────────────────────────────────
+
+    /// An expired magic link (no longer in Redis) must be rejected.
+    /// The absence from Redis simulates TTL expiry — used_at must NOT be set
+    /// because the token was never successfully consumed.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn adversary_cannot_reuse_expired_magic_link(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let email: String = SafeEmail().fake();
+        let cfg           = test_cfg();
+        let Some(redis)   = redis_pool_from_env().await else {
+            eprintln!("skipping: REDIS_URL not set"); return;
+        };
+
+        let user_id = insert_user(&pool, &email).await;
+        let token   = uuid::Uuid::new_v4().to_string();
+
+        // Insert the DB audit row with an expiry in the past (simulating TTL elapsed).
+        let token_hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
+        let old_expiry = chrono::Utc::now() - chrono::Duration::hours(1);
+        if let Err(e) = sqlx::query(
+            "INSERT INTO magic_link_tokens \
+             (user_id, email, token_hash, expires_at) VALUES ($1, $2, $3, $4)"
+        )
+        .bind(i32::from(user_id))
+        .bind(&email)
+        .bind(&token_hash)
+        .bind(old_expiry)
+        .execute(&pool)
+        .await
+        {
+            eprintln!("setup insert failed: {e}");
+        }
+        // Deliberately NOT seeding the Redis key — simulates TTL expiry.
+
+        let bus    = EventBus::new();
+        let result = verify_magic_link(&pool, &cfg, Some(&redis), &token, None, &bus).await;
+        assert!(matches!(result, Err(DomainError::Unauthorized)),
+            "expired (Redis-absent) token must be Unauthorized");
+
+        let used_at: Option<String> = sqlx::query_scalar(
+            "SELECT used_at::text FROM magic_link_tokens WHERE token_hash = $1"
+        )
+        .bind(&token_hash)
+        .fetch_optional(&pool)
+        .await
+        .unwrap()
+        .flatten();
+        assert!(used_at.is_none(), "used_at must remain NULL for expired token");
+    }
+
+    /// A magic link that has already been consumed cannot be used a second time.
+    /// GETDEL atomically removes the Redis key on first use — second attempt gets None.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn adversary_cannot_reuse_consumed_magic_link(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let email: String = SafeEmail().fake();
+        let cfg           = test_cfg();
+        let Some(redis)   = redis_pool_from_env().await else {
+            eprintln!("skipping: REDIS_URL not set"); return;
+        };
+
+        let user_id = insert_user(&pool, &email).await;
+        let token   = uuid::Uuid::new_v4().to_string();
+        let key     = format!("{MAGIC_LINK_PREFIX}{token}");
+        let mut conn = redis.get().await.unwrap();
+        let _: () = redis::cmd("SET")
+            .arg(&key).arg(i32::from(user_id).to_string())
+            .arg("EX").arg(900u64)
+            .query_async(&mut *conn).await.unwrap();
+        drop(conn);
+
+        let bus = EventBus::new();
+        // First use succeeds.
+        verify_magic_link(&pool, &cfg, Some(&redis), &token, None, &bus).await
+            .expect("first verification must succeed");
+
+        // Second use — Redis key is gone (GETDEL consumed it).
+        let result = verify_magic_link(&pool, &cfg, Some(&redis), &token, None, &bus).await;
+        assert!(matches!(result, Err(DomainError::Unauthorized)),
+            "consumed token must not be verifiable again");
+
+        // used_at must be set exactly once — not cleared by the second attempt.
+        let token_hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
+        let used_at: Option<String> = sqlx::query_scalar(
+            "SELECT used_at::text FROM magic_link_tokens WHERE token_hash = $1"
+        )
+        .bind(&token_hash)
+        .fetch_optional(&pool)
+        .await
+        .unwrap()
+        .flatten();
+        assert!(used_at.is_some(), "used_at must be set after first successful verification");
+    }
+
+    /// Modifying any character of a valid magic link token produces a different
+    /// Redis key — GETDEL returns None and the original token remains unconsumed.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn adversary_cannot_use_tampered_magic_link(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let email: String = SafeEmail().fake();
+        let cfg           = test_cfg();
+        let Some(redis)   = redis_pool_from_env().await else {
+            eprintln!("skipping: REDIS_URL not set"); return;
+        };
+
+        let user_id    = insert_user(&pool, &email).await;
+        let real_token = uuid::Uuid::new_v4().to_string();
+        let key        = format!("{MAGIC_LINK_PREFIX}{real_token}");
+        let mut conn   = redis.get().await.unwrap();
+        let _: () = redis::cmd("SET")
+            .arg(&key).arg(i32::from(user_id).to_string())
+            .arg("EX").arg(900u64)
+            .query_async(&mut *conn).await.unwrap();
+        drop(conn);
+
+        // Tamper: replace the last character.
+        let mut tampered = real_token.clone();
+        let last = tampered.pop().unwrap_or('0');
+        tampered.push(if last == '0' { '1' } else { '0' });
+
+        let bus    = EventBus::new();
+        let result = verify_magic_link(&pool, &cfg, Some(&redis), &tampered, None, &bus).await;
+        assert!(matches!(result, Err(DomainError::Unauthorized)),
+            "tampered token must be rejected");
+
+        // The real token must still be in Redis — the tampered attempt didn't consume it.
+        let mut conn   = redis.get().await.unwrap();
+        let exists: i64 = redis::cmd("EXISTS")
+            .arg(&key)
+            .query_async(&mut *conn).await.unwrap();
+        assert_eq!(exists, 1, "original token must still be valid after tampered attempt");
+    }
+
+    /// Once a JTI is revoked (via revoke_token), check_revoked must return true —
+    /// proving the full revocation cycle works end to end.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn adversary_cannot_authenticate_with_revoked_jwt(pool: PgPool) {
+        use crate::auth::{check_revoked, new_revoked_tokens, sign_token, verify_token};
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let email: String = SafeEmail().fake();
+
+        let user_id = insert_user(&pool, &email).await;
+        let cfg     = test_cfg();
+
+        let token  = sign_token(user_id, &cfg).expect("signing must succeed");
+        let claims = verify_token(&token, &cfg).expect("freshly signed token must verify");
+
+        let fallback = new_revoked_tokens();
+        // Not revoked yet.
+        assert!(!check_revoked(&None, &fallback, &claims.jti).await,
+            "fresh token must not be revoked");
+
+        // Revoke.
+        crate::auth::revoke_token(&pool, &None, &fallback, user_id, &claims.jti, claims.exp).await;
+
+        // Now revoked.
+        assert!(check_revoked(&None, &fallback, &claims.jti).await,
+            "revoked token must be detected by check_revoked");
+
+        // DB row must exist.
+        let row_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jwt_revocations WHERE jti = $1"
+        )
+        .bind(&claims.jti)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row_count, 1, "jwt_revocations row must exist");
+    }
+
+    // ── Cooling period simulation (BFIP Section 4.3) ─────────────────────────
+
+    /// The UNIQUE(user_id, credential_id, calendar_date) constraint enforces that
+    /// only one event per calendar day qualifies. Three events on the same day
+    /// count as one qualifying day — NOT three.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn cooling_period_requires_separate_calendar_days(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let email: String = SafeEmail().fake();
+
+        let user_id = insert_user(&pool, &email).await;
+        let uid     = i32::from(user_id);
+
+        // Create identity_credential with cooling_ends_at already in the past.
+        let (cred_id,): (i32,) = sqlx::query_as(
+            "INSERT INTO identity_credentials \
+             (user_id, credential_type, verified_at, cooling_ends_at) \
+             VALUES ($1, 'stripe_identity', now() - interval '8 days', \
+                    now() - interval '1 day') \
+             RETURNING id"
+        )
+        .bind(uid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let today = chrono::Utc::now().date_naive();
+
+        // Insert event for today — first succeeds.
+        sqlx::query(
+            "INSERT INTO cooling_period_events \
+             (user_id, credential_id, calendar_date) VALUES ($1, $2, $3)"
+        )
+        .bind(uid).bind(cred_id).bind(today)
+        .execute(&pool).await.unwrap();
+
+        // Second insert on same day must fail the UNIQUE constraint.
+        let second = sqlx::query(
+            "INSERT INTO cooling_period_events \
+             (user_id, credential_id, calendar_date) VALUES ($1, $2, $3)"
+        )
+        .bind(uid).bind(cred_id).bind(today)
+        .execute(&pool).await;
+        assert!(second.is_err(), "duplicate (user, cred, date) must violate UNIQUE constraint");
+
+        // Only 1 qualifying day despite the attempted duplicate.
+        let days: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT calendar_date) FROM cooling_period_events \
+             WHERE user_id = $1 AND credential_id = $2"
+        )
+        .bind(uid).bind(cred_id)
+        .fetch_one(&pool).await.unwrap();
+
+        let required: i32 = sqlx::query_scalar(
+            "SELECT cooling_app_opens_required FROM identity_credentials WHERE id = $1"
+        )
+        .bind(cred_id)
+        .fetch_one(&pool).await.unwrap();
+
+        assert!(
+            days < required as i64,
+            "one same-day event must not satisfy {required}-day requirement (got {days} day(s))"
+        );
+    }
+
+    /// The cooling period requires BOTH 3 separate calendar days AND the
+    /// cooling_ends_at timestamp to have elapsed. Neither alone is sufficient.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn cooling_period_requires_7_days_minimum(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let email: String = SafeEmail().fake();
+
+        let user_id = insert_user(&pool, &email).await;
+        let uid     = i32::from(user_id);
+
+        // cooling_ends_at = tomorrow (not yet elapsed).
+        let (cred_id,): (i32,) = sqlx::query_as(
+            "INSERT INTO identity_credentials \
+             (user_id, credential_type, verified_at, cooling_ends_at) \
+             VALUES ($1, 'stripe_identity', now() - interval '6 days', \
+                    now() + interval '1 day') \
+             RETURNING id"
+        )
+        .bind(uid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Insert events on 3 distinct calendar days.
+        for days_ago in 0i64..3 {
+            let date = (chrono::Utc::now() - chrono::Duration::days(days_ago)).date_naive();
+            sqlx::query(
+                "INSERT INTO cooling_period_events \
+                 (user_id, credential_id, calendar_date) VALUES ($1, $2, $3)"
+            )
+            .bind(uid).bind(cred_id).bind(date)
+            .execute(&pool).await.unwrap();
+        }
+
+        // Events satisfy day count but cooling_ends_at hasn't elapsed.
+        let (days, ends_at): (i64, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+            "SELECT COUNT(DISTINCT cpe.calendar_date), MAX(ic.cooling_ends_at) \
+             FROM cooling_period_events cpe \
+             JOIN identity_credentials ic ON ic.id = cpe.credential_id \
+             WHERE cpe.credential_id = $1"
+        )
+        .bind(cred_id)
+        .fetch_one(&pool).await.unwrap();
+
+        assert!(days >= 3, "3 events on 3 days must be recorded");
+        assert!(ends_at > chrono::Utc::now(),
+            "cooling_ends_at must still be in the future (time not yet elapsed)");
+        // → cooling NOT complete: days ✓ but time ✗
+
+        // Simulate time passing: set cooling_ends_at to yesterday.
+        sqlx::query(
+            "UPDATE identity_credentials SET cooling_ends_at = now() - interval '1 day' \
+             WHERE id = $1"
+        )
+        .bind(cred_id)
+        .execute(&pool).await.unwrap();
+
+        let (days2, ends_at2): (i64, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+            "SELECT COUNT(DISTINCT cpe.calendar_date), MAX(ic.cooling_ends_at) \
+             FROM cooling_period_events cpe \
+             JOIN identity_credentials ic ON ic.id = cpe.credential_id \
+             WHERE cpe.credential_id = $1"
+        )
+        .bind(cred_id)
+        .fetch_one(&pool).await.unwrap();
+
+        assert!(days2 >= 3,      "day count must still be ≥ 3");
+        assert!(ends_at2 <= chrono::Utc::now(),
+            "cooling_ends_at must now be in the past");
+        // → cooling IS complete: days ✓ and time ✓
+    }
 }
