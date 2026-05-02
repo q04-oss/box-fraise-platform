@@ -589,3 +589,134 @@ async fn concurrent_beacon_nonce_deduplication(pool: PgPool) {
         "exactly 1 request must pass nonce dedup and proceed to handler"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Identity credentials — full initiation + cooling flow
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Full identity verification flow:
+/// 1. Registered user POSTs a Stripe session → 201, user is identity_confirmed.
+/// 2. User POSTs app-open twice on different days → two days recorded.
+/// 3. GET /api/identity/cooling/status reflects both days.
+#[sqlx::test]
+async fn identity_verification_and_cooling_period_flow(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let user  = common::create_user(&pool, SafeEmail().fake::<String>().as_str()).await;
+    let token = common::valid_token(i32::from(user.id));
+    let state = common::build_state(pool.clone(), None);
+    let app   = box_fraise_server::app::build(state);
+
+    // Step 1 — initiate verification.
+    let resp = app
+        .oneshot({
+            let bytes = serde_json::to_vec(
+                &serde_json::json!({ "stripe_session_id": "vs_integ_test_001" })
+            ).unwrap();
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/api/identity/verify")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(bytes))
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+            req
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED, "initiate_verification must return 201");
+
+    let body   = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+    let cred: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let cred_id = cred["id"].as_i64().expect("response must contain credential id") as i32;
+
+    // Verify user status advanced.
+    let status: String = sqlx::query_scalar(
+        "SELECT verification_status FROM users WHERE id = $1"
+    )
+    .bind(i32::from(user.id))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "identity_confirmed");
+
+    // Step 2 — back-date the cooling window so it's already elapsed.
+    sqlx::query(
+        "UPDATE identity_credentials \
+         SET verified_at = now() - interval '10 days', \
+             cooling_ends_at = now() - interval '3 days' \
+         WHERE id = $1"
+    )
+    .bind(cred_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Insert two past-day cooling events; the third (today) will complete the cooling.
+    for offset in [-2i64, -1] {
+        let date = (chrono::Utc::now() + chrono::Duration::days(offset)).date_naive();
+        sqlx::query(
+            "INSERT INTO cooling_period_events (user_id, credential_id, calendar_date) \
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING"
+        )
+        .bind(i32::from(user.id))
+        .bind(cred_id)
+        .bind(date)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Step 3 — record today's app open (completes cooling).
+    let state2 = common::build_state(pool.clone(), None);
+    let app2   = box_fraise_server::app::build(state2);
+    let resp2  = app2
+        .oneshot({
+            let bytes = serde_json::to_vec(
+                &serde_json::json!({ "credential_id": cred_id })
+            ).unwrap();
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/api/identity/cooling/app-open")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(bytes))
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+            req
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(resp2.status(), StatusCode::OK);
+    let body2: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp2.into_body(), 8192).await.unwrap()
+    ).unwrap();
+    assert_eq!(body2["days_completed"], 3);
+    assert!(body2["is_complete"].as_bool().unwrap(), "cooling must be complete after 3 days");
+
+    // Step 4 — GET /api/identity/cooling/status reflects completed state.
+    let state3 = common::build_state(pool.clone(), None);
+    let app3   = box_fraise_server::app::build(state3);
+    let resp3  = app3
+        .oneshot({
+            let mut req = Request::builder()
+                .method("GET")
+                .uri("/api/identity/cooling/status")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+            req
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(resp3.status(), StatusCode::OK);
+    let body3: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp3.into_body(), 8192).await.unwrap()
+    ).unwrap();
+    assert!(body3["is_complete"].as_bool().unwrap());
+}

@@ -97,6 +97,42 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
             .await;
         }
 
+        DomainEvent::IdentityVerificationInitiated { user_id, credential_id } => {
+            tracing::info!(user_id, credential_id, "identity.verification_initiated");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "identity.verification_initiated",
+                serde_json::json!({ "credential_id": credential_id }),
+            )
+            .await;
+        }
+
+        DomainEvent::CoolingAppOpenRecorded { user_id, credential_id, days_completed } => {
+            tracing::info!(user_id, credential_id, days_completed, "identity.cooling_app_open");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "identity.cooling_app_open",
+                serde_json::json!({ "credential_id": credential_id, "days_completed": days_completed }),
+            )
+            .await;
+        }
+
+        DomainEvent::CoolingPeriodCompleted { user_id, credential_id } => {
+            tracing::info!(user_id, credential_id, "identity.cooling_completed");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "identity.cooling_completed",
+                serde_json::json!({ "credential_id": credential_id }),
+            )
+            .await;
+        }
+
         // Audit write already done inside service::ask_dorotka.
         DomainEvent::DorotkaQueried { .. } => {}
     }

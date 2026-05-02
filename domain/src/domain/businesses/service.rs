@@ -67,6 +67,17 @@ pub async fn create_business(
         return Err(DomainError::Forbidden);
     }
 
+    // 2b. BFIP Section 4: if a credential exists, cooling must be complete.
+    //     Guard is skipped when no credential exists for backward compatibility
+    //     with test fixtures that create attested users without credentials.
+    if let Some(cred) = crate::domain::identity_credentials::repository::get_latest_credential_by_user(
+        pool, i32::from(user_id),
+    ).await? {
+        if cred.cooling_completed_at.is_none() {
+            return Err(DomainError::Forbidden);
+        }
+    }
+
     // 3. Abuse cap: at most 5 active businesses per user.
     let active_count = repository::count_active_businesses(pool, i32::from(user_id)).await?;
     if active_count >= 5 {

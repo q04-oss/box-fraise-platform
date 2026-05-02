@@ -707,3 +707,91 @@ async fn authenticated_user_can_view_any_business_profile(pool: PgPool) {
     assert_eq!(resp.status(), StatusCode::OK,
         "any authenticated user must be able to view a business profile (public design)");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Identity credentials — BFIP Sections 3, 3b, 4
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn identity_verify_registered_user_returns_201(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let user  = common::create_user(&pool, SafeEmail().fake::<String>().as_str()).await;
+    let token = common::valid_token(i32::from(user.id));
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST",
+            "/api/identity/verify",
+            &token,
+            serde_json::json!({ "stripe_session_id": "vs_test_handler_001" }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[sqlx::test]
+async fn identity_cooling_app_open_returns_200(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let user  = common::create_user(&pool, SafeEmail().fake::<String>().as_str()).await;
+    // Advance to identity_confirmed and insert a past-window credential directly.
+    sqlx::query(
+        "UPDATE users SET verification_status = 'identity_confirmed' WHERE id = $1"
+    )
+    .bind(i32::from(user.id))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let verified_at     = chrono::Utc::now() - chrono::Duration::days(10);
+    let cooling_ends_at = verified_at + chrono::Duration::days(7);
+    let (cred_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO identity_credentials \
+         (user_id, credential_type, verified_at, cooling_ends_at) \
+         VALUES ($1, 'stripe_identity', $2, $3) RETURNING id"
+    )
+    .bind(i32::from(user.id))
+    .bind(verified_at)
+    .bind(cooling_ends_at)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let token = common::valid_token(i32::from(user.id));
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST",
+            "/api/identity/cooling/app-open",
+            &token,
+            serde_json::json!({ "credential_id": cred_id }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[sqlx::test]
+async fn identity_cooling_status_returns_404_without_credential(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let user  = common::create_user(&pool, SafeEmail().fake::<String>().as_str()).await;
+    let token = common::valid_token(i32::from(user.id));
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/identity/cooling/status", &token))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

@@ -66,6 +66,31 @@ pub enum DomainEvent {
         is_qualifying: bool,
     },
 
+    // ── Identity credentials ─────────────────────────────────────────────────
+    /// A Stripe Identity verification was recorded and cooling period started.
+    IdentityVerificationInitiated {
+        /// The user who initiated verification.
+        user_id: i32,
+        /// The newly created credential's database ID.
+        credential_id: i32,
+    },
+    /// A qualifying app open was recorded during the cooling period.
+    CoolingAppOpenRecorded {
+        /// The user who opened the app.
+        user_id: i32,
+        /// The credential the open was recorded against.
+        credential_id: i32,
+        /// Number of distinct qualifying days so far.
+        days_completed: i64,
+    },
+    /// The cooling period completed (all day + time requirements met).
+    CoolingPeriodCompleted {
+        /// The user whose cooling period completed.
+        user_id: i32,
+        /// The credential that was completed.
+        credential_id: i32,
+    },
+
     // ── Dorotka ───────────────────────────────────────────────────────────────
     /// A query was submitted to the Dorotka AI assistant.
     DorotkaQueried {

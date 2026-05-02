@@ -6,6 +6,8 @@ pub mod beacons;
 pub mod presence;
 /// Partner businesses — registration, status, and location.
 pub mod businesses;
+/// Identity verification (Stripe Identity) and cooling period tracking.
+pub mod identity_credentials;
 /// Dorotka AI assistant: system prompts and input sanitisation.
 pub mod dorotka;
 /// User profiles and search.
