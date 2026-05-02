@@ -12,10 +12,10 @@
 /// All components are concatenated as raw bytes with no separator. This matches
 /// the iOS client: `"\(method)\(fullPath)\(timestamp)\(nonce)".data(using:.utf8)! + bodyData`
 ///
-/// Key resolution (most specific wins):
-///   1. Per-device key from device_attestations.hmac_key  (App Attest registered)
-///   2. Shared key from FRAISE_HMAC_SHARED_KEY env var   (fallback for non-attested)
-///   3. No shared key → 500 (fail closed, never silently degrade)
+/// Key resolution:
+///   Shared key from FRAISE_HMAC_SHARED_KEY env var.
+///   No shared key → 500 (fail closed, never silently degrade).
+///   Per-device keys via BFIP identity_credentials are reserved for phase 2.
 ///
 /// Replay prevention (ordered cheapest → most expensive):
 ///   1. Timestamp check: reject requests outside 5-minute window (no I/O)
@@ -54,7 +54,7 @@ use ring::hmac as ring_hmac;
 use serde_json::json;
 use secrecy::ExposeSecret;
 
-use crate::{app::AppState, auth::apple_attest};
+use crate::app::AppState;
 
 /// Replay window in seconds. Must match the iOS client's timestamp tolerance.
 /// Also used as the Redis TTL for nonce entries and the in-process cache expiry.
@@ -115,7 +115,7 @@ pub async fn validate(
     let ts_str = owned_header(&req, "x-fraise-ts");
     let sig    = owned_header(&req, "x-fraise-sig");
     let nonce  = owned_header(&req, "x-fraise-nonce");
-    let kid    = opt_header(&req, "x-fraise-attest-key");
+    let kid    = opt_header(&req, "x-fraise-attest-key"); // reserved; per-device key path is phase 2
 
     // Structural check — before any I/O.
     if ts_str.is_empty() || sig.is_empty() {
@@ -145,15 +145,10 @@ pub async fn validate(
     };
 
     // ── Key resolution ────────────────────────────────────────────────────────
-    let key_bytes: Vec<u8> = match kid {
-        Some(ref kid) => match resolve_device_key(kid, &state).await {
-            Ok(k)  => k,
-            Err(r) => return r,
-        },
-        None => match shared_key(&state) {
-            Some(k) => k,
-            None    => return reject(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-        },
+    // Phase 2: per-device key from BFIP identity store. For now, shared key only.
+    let key_bytes: Vec<u8> = match shared_key(&state) {
+        Some(k) => k,
+        None    => return reject(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
     };
 
     // ── HMAC verification — method + path_and_query + ts + nonce + body ───────
@@ -176,30 +171,10 @@ pub async fn validate(
         return reject(StatusCode::UNAUTHORIZED, "invalid signature");
     }
 
-    // ── App Attest assertion verification ─────────────────────────────────────
-    // X-Fraise-Assertion is generated on the iOS side over the same `message`
-    // bytes that include the nonce. We reuse `msg` computed above.
-    if let Some(kid) = &kid {
-        let assertion_header = parts
-            .headers
-            .get("x-fraise-assertion")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-
-        if let Some(assertion) = assertion_header {
-            match resolve_public_key(kid, &state).await {
-                Some(pub_key_der) => {
-                    if apple_attest::verify_assertion(&assertion, &pub_key_der, &msg).is_err() {
-                        return reject(StatusCode::UNAUTHORIZED, "assertion_invalid");
-                    }
-                }
-                None => {
-                    // No public key stored yet — allow through, HMAC provides integrity.
-                    tracing::debug!(kid, "no public key for device — skipping assertion check");
-                }
-            }
-        }
-    }
+    // ── App Attest assertion verification (phase 2) ───────────────────────────
+    // Assertion header accepted but not enforced until BFIP identity_credentials
+    // are populated with device public keys. HMAC provides integrity in the interim.
+    let _ = &kid; // suppress unused warning — phase 2 will use this
 
     // ── Nonce deduplication ───────────────────────────────────────────────────
     // HMAC is verified — now commit the nonce. This order (HMAC before Redis) means
@@ -304,43 +279,10 @@ fn shared_key(state: &AppState) -> Option<Vec<u8>> {
     state.cfg.hmac_shared_key.as_ref().map(|k| k.expose_secret().as_bytes().to_vec())
 }
 
-async fn resolve_device_key(kid: &str, state: &AppState) -> Result<Vec<u8>, Response> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT hmac_key FROM device_attestations \
-         WHERE key_id = $1 AND hmac_key IS NOT NULL \
-         LIMIT 1",
-    )
-    .bind(kid)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|_| reject(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))?;
-
-    match row {
-        Some((key_b64,)) => STANDARD.decode(&key_b64)
-            .map_err(|_| reject(StatusCode::INTERNAL_SERVER_ERROR, "internal error")),
-        None => Err(reject(StatusCode::UNAUTHORIZED, "unknown device")),
-    }
-}
-
 /// Constant-time byte comparison — prevents timing oracle on HMAC tags.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() { return false; }
     a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-async fn resolve_public_key(kid: &str, state: &AppState) -> Option<Vec<u8>> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT public_key FROM device_attestations \
-         WHERE key_id = $1 AND public_key IS NOT NULL \
-         LIMIT 1",
-    )
-    .bind(kid)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
-
-    row.and_then(|(b64,)| STANDARD.decode(&b64).ok())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

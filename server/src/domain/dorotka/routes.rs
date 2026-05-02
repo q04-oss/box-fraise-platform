@@ -28,19 +28,19 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Deserialize)]
-struct AskBody {
+pub(crate) struct AskBody {
     query: String,
     // context is intentionally absent — derived server-side from the Host header
     // so callers cannot select a system prompt that doesn't belong to their surface.
 }
 
 #[derive(Serialize)]
-struct AskResponse {
+pub(crate) struct AskResponse {
     answer:  String,
     context: String,
 }
 
-pub async fn ask(
+pub(crate) async fn ask(
     State(state):      State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers:           HeaderMap,
