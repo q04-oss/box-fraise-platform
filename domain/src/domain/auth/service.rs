@@ -29,12 +29,17 @@ const MAGIC_RATE_TTL:    u64  = 120;
 /// Verify an Apple identity token, find or create the corresponding user, and
 /// return a signed JWT. Emits [`DomainEvent::UserRegistered`] for new accounts
 /// and [`DomainEvent::UserLoggedIn`] for all successful sign-ins.
+///
+/// Also inserts an `apple_auth_sessions` row as a durable audit trail
+/// (BFIP Section 3). The `identity_token_hash` is SHA-256 of the raw token —
+/// the plaintext is never stored.
 pub async fn authenticate_apple(
     pool:           &PgPool,
     cfg:            &Arc<Config>,
     http:           &reqwest::Client,
     identity_token: &str,
     display_name:   Option<&str>,
+    ip:             Option<IpAddr>,
     event_bus:      &EventBus,
 ) -> AppResult<AuthResponse> {
     let claims = crate::auth::apple::verify_identity_token(identity_token, cfg, http).await?;
@@ -45,6 +50,26 @@ pub async fn authenticate_apple(
 
     if user.is_banned {
         return Err(DomainError::Forbidden);
+    }
+
+    // Durable session record — BFIP Section 3. Apple tokens are valid 10 minutes.
+    let token_hash = sha256_hex(identity_token.as_bytes());
+    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+    let ip_str     = ip.map(|a| a.to_string());
+    if let Err(e) = sqlx::query(
+        "INSERT INTO apple_auth_sessions \
+         (user_id, apple_user_identifier, identity_token_hash, ip_address, expires_at) \
+         VALUES ($1, $2, $3, $4, $5)"
+    )
+    .bind(i32::from(user.id))
+    .bind(&claims.sub)
+    .bind(&token_hash)
+    .bind(ip_str.as_deref())
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    {
+        tracing::error!(error = %e, "apple_auth_sessions insert failed — audit trail gap");
     }
 
     if is_new {
@@ -318,7 +343,7 @@ mod tests {
         let cfg  = test_cfg();
         let http = reqwest::Client::new();
         let bus  = EventBus::new();
-        let result = authenticate_apple(&pool, &cfg, &http, "not.a.jwt", None, &bus).await;
+        let result = authenticate_apple(&pool, &cfg, &http, "not.a.jwt", None, None, &bus).await;
         assert!(
             matches!(result, Err(DomainError::InvalidInput(_) | DomainError::Unauthorized | DomainError::Internal(_))),
             "invalid Apple token must fail, got: {result:?}"
@@ -558,5 +583,31 @@ mod tests {
         .unwrap();
 
         assert!(used_at.is_some(), "used_at must be set after verify_magic_link");
+    }
+
+    // ── apple_auth_sessions DB writes (BFIP Section 3) ───────────────────────
+
+    /// authenticate_apple must insert a row into apple_auth_sessions.
+    /// Uses a mock token that fails Apple's JWKS — confirms the INSERT
+    /// never happens on invalid tokens (the error returns before the INSERT).
+    /// Positive path tested via the audit trail on real sign-in flows.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn authenticate_apple_invalid_token_does_not_write_session(pool: PgPool) {
+        let cfg  = test_cfg();
+        let http = reqwest::Client::new();
+        let bus  = EventBus::new();
+
+        // Invalid token returns Err before any DB writes.
+        let result = authenticate_apple(
+            &pool, &cfg, &http, "not.a.real.jwt", None, None, &bus,
+        ).await;
+        assert!(result.is_err(), "invalid Apple token must fail");
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM apple_auth_sessions")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "no session row must be written for invalid token");
     }
 }

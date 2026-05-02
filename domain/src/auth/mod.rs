@@ -9,6 +9,7 @@ use chrono::Utc;
 use deadpool_redis::Pool as RedisPool;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -99,7 +100,11 @@ fn is_revoked_local(list: &RevokedTokens, jti: &str) -> bool {
 }
 
 /// Revoke a token by JTI. Uses Redis when available (cross-instance), falls
-/// back to in-process store for single-instance deployments.
+/// back to in-process store for single-instance deployments. Always writes a
+/// row to `jwt_revocations` as a durable audit trail (BFIP Section 1).
+///
+/// The `jwt_revocations` table can be pruned daily:
+///   `DELETE FROM jwt_revocations WHERE expires_at < now()`
 ///
 /// Events that MUST call this function (extend as features are added):
 ///   - Explicit logout                             ✓ implemented
@@ -108,12 +113,36 @@ fn is_revoked_local(list: &RevokedTokens, jti: &str) -> bool {
 ///   - Account deletion                            (future)
 ///   - Suspicious activity / security incident     (future)
 ///   - Staff token invalidation mid-shift          (future, same function, staff JTI)
-pub async fn revoke_token(redis: &Option<RedisPool>, fallback: &RevokedTokens, jti: &str, exp: usize) {
+pub async fn revoke_token(
+    pool:     &PgPool,
+    redis:    &Option<RedisPool>,
+    fallback: &RevokedTokens,
+    user_id:  UserId,
+    jti:      &str,
+    exp:      usize,
+) {
     let ttl = (exp as i64).saturating_sub(Utc::now().timestamp());
     if ttl <= 0 { return; } // already expired — JWT validation will reject it anyway
 
-    if let Some(pool) = redis {
-        match pool.get().await {
+    // Durable audit trail — BFIP Section 1.
+    // Fire-and-forget: Redis/in-process remains the primary revocation check path.
+    let expires_at = chrono::DateTime::from_timestamp(exp as i64, 0)
+        .unwrap_or_else(|| Utc::now() + chrono::Duration::seconds(ttl));
+    if let Err(e) = sqlx::query(
+        "INSERT INTO jwt_revocations (jti, user_id, expires_at) VALUES ($1, $2, $3)
+         ON CONFLICT (jti) DO NOTHING"
+    )
+    .bind(jti)
+    .bind(i32::from(user_id))
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    {
+        tracing::error!(jti, error = %e, "jwt_revocations insert failed — audit trail gap");
+    }
+
+    if let Some(redis_pool) = redis {
+        match redis_pool.get().await {
             Ok(mut conn) => {
                 let key = format!("{REVOKED_KEY_PREFIX}{jti}");
                 if let Err(e) = deadpool_redis::redis::cmd("SET")
@@ -251,5 +280,40 @@ mod proptest_tests {
                 "expired token must not verify"
             );
         }
+    }
+
+    // ── jwt_revocations DB writes (BFIP Section 1) ────────────────────────────
+
+    /// revoke_token must insert a row into jwt_revocations with the correct
+    /// jti, user_id, and expires_at.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn revoke_token_writes_jwt_revocations_row(pool: sqlx::PgPool) {
+        // Seed a user so the FK resolves.
+        let (user_id_raw,): (i32,) = sqlx::query_as(
+            "INSERT INTO users (email, email_verified) VALUES ('logout@test.com', true) RETURNING id"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let user_id = UserId::from(user_id_raw);
+
+        let cfg   = test_cfg();
+        let token = sign_token(user_id, &cfg).unwrap();
+        let claims = verify_token(&token, &cfg).expect("freshly signed token must verify");
+
+        // Revoke without Redis — DB write must still happen.
+        let fallback = new_revoked_tokens();
+        revoke_token(&pool, &None, &fallback, user_id, &claims.jti, claims.exp).await;
+
+        let row: (String, i32) = sqlx::query_as(
+            "SELECT jti, user_id FROM jwt_revocations WHERE jti = $1"
+        )
+        .bind(&claims.jti)
+        .fetch_one(&pool)
+        .await
+        .expect("jwt_revocations row must exist after revoke_token");
+
+        assert_eq!(row.0, claims.jti);
+        assert_eq!(row.1, user_id_raw);
     }
 }

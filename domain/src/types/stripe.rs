@@ -80,14 +80,3 @@ stripe_id!(
     "cus_"
 );
 
-stripe_id!(
-    /// Stripe subscription ID — `sub_...`.
-    StripeSubscriptionId,
-    "sub_"
-);
-
-stripe_id!(
-    /// Stripe payment intent ID — `pi_...`.
-    StripePaymentIntentId,
-    "pi_"
-);

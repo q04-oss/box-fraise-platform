@@ -67,13 +67,3 @@ int_id!(
     /// Identifies a row in the `orders` table.
     OrderId
 );
-
-int_id!(
-    /// Identifies a row in the `messages` table.
-    MessageId
-);
-
-int_id!(
-    /// Identifies a one-time pre-key (`one_time_pre_keys.key_id`).
-    KeyId
-);

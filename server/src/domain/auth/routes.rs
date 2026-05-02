@@ -37,13 +37,16 @@ pub fn router() -> Router<AppState> {
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 pub async fn apple(
-    State(state): State<AppState>,
-    AppJson(body): AppJson<AppleAuthBody>,
+    State(state):      State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers:           HeaderMap,
+    AppJson(body):     AppJson<AppleAuthBody>,
 ) -> AppResult<Json<AuthResponse>> {
+    let ip   = client_ip(&headers, Some(&ConnectInfo(addr)));
     let resp = service::authenticate_apple(
         &state.db, &state.cfg, &state.http,
         &body.identity_token, body.display_name.as_deref(),
-        &state.event_bus,
+        Some(ip), &state.event_bus,
     ).await?;
     Ok(Json(resp))
 }
@@ -83,7 +86,7 @@ pub async fn logout(
     State(state): State<AppState>,
     RequireClaims(claims): RequireClaims,
 ) -> AppResult<Json<serde_json::Value>> {
-    auth::revoke_token(&state.redis, &state.revoked, &claims.jti, claims.exp).await;
+    auth::revoke_token(&state.db, &state.redis, &state.revoked, claims.user_id, &claims.jti, claims.exp).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
