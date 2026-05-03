@@ -183,3 +183,53 @@ Four domains landed in a single session (239/239 tests, 0 failures):
 
 ### Summary
 The four-domain session moved Protocol Conformance from 3.5 to 6.2 (+2.7) and Product Completeness from 3.0 to 5.0 (+2.0) — the complete BFIP identity verification chain runs end-to-end for the first time. The weighted score crossed 7.0 (6.99). The remaining ceiling is the commerce layer: a verified user can prove their identity but cannot yet purchase a box, which keeps Product Completeness at 5.0 and is the highest-leverage work remaining.
+
+---
+## [2026-05-03 late] Scorecard — post orders (BFIP Section 9)
+
+| Dimension | Score | Weight | Weighted | Δ |
+|-----------|-------|--------|---------|---|
+| Security | 8.3/10 | 1.5x | 12.45 | +0.1 |
+| Architecture | 7.9/10 | 1.0x | 7.9 | +0.1 |
+| Engineer Usability | 8.0/10 | 1.0x | 8.0 | — |
+| Protocol Conformance | 7.0/10 | 1.5x | 10.5 | +0.8 |
+| Operational Readiness | 6.5/10 | 1.0x | 6.5 | — |
+| Product Completeness | 6.5/10 | 1.0x | 6.5 | +1.5 |
+| **Overall (straight)** | **7.37/10** | | | **+0.42** |
+| **Overall (weighted)** | **7.41/10** | | | **+0.42** |
+| **Grade** | **B-** | | | |
+
+### What changed
+
+**orders** (BFIP Section 9) — 258 tests (19 added), 0 failures.
+
+Full strawberry commerce layer: `POST /api/orders` places an order; `POST /api/orders/collect` performs the atomic NFC tap-to-collect via `UPDATE visit_boxes … WHERE tapped_at IS NULL RETURNING …`; `POST /api/orders/{id}/cancel`; `POST /api/staff/visits/{visit_id}/boxes/activate`; `GET /api/staff/visits/{visit_id}/boxes`.
+
+**Clone detection** — dual-path: pre-check on `box_row.tapped_at IS NOT NULL` handles the obvious case; the `WHERE tapped_at IS NULL` atomic CAS handles the race-condition case and calls `record_clone_detected(box_id)` + audit event before returning `Conflict`.
+
+**Order collection without pre-assignment** — when `visit_boxes.assigned_order_id IS NULL`, service traverses `staff_visits.location_id → businesses.location_id → orders.business_id` to find the user's pending order at the business at the visit location.
+
+### Justifications
+
+**Security 8.3:** Atomic `WHERE tapped_at IS NULL` enforces single-use collection at the DB level — impossible to double-collect even under concurrent requests. `record_clone_detected` creates an immutable audit record on second tap; audit trail includes `box_id`, `user_id`, `visit_id`. Stops at 8.3 because App Attest assertion verification is still deferred and soultoken signing uses HMAC-SHA256 rather than Ed25519.
+
+**Architecture 7.9:** Orders follows routes → service → repository strictly; cross-domain visit_boxes join traverses only public repository functions. Clone detection separation of concerns is clean (pre-check in service, atomic guard in repository). Stops at 7.9 because dead `KeyId`/`MessageId` exports remain in `types/mod.rs` and `renew_soultoken` still skips re-signing after `expires_at` extension.
+
+**Engineer Usability 8.0:** 258 tests total (164 domain + 14 server-lib + 47 handler + 18 integration + 15 misc). Orders adds 11 service tests, 4 adversarial, 4 handler tests, 1 integration test. `full_order_and_collection_journey` proves the create → activate_box → collect → cancel chain end-to-end. Unchanged because OpenAPI annotations still missing on all new routes.
+
+**Protocol Conformance 7.0:** Section 9 (orders + visit_boxes + NFC collection) now fully implemented. Platform now covers Sections 1, 3, 3b, 4, 5, 6, 7, 7b, 8, 9, 10, 12.3 (12 of 19 BFIP sections). Stops at 7.0 because Sections 11 (support_bookings) and 12.1–12.2 (business-side commerce reporting) are still schema-only.
+
+**Operational Readiness 6.5:** Unchanged. No metrics, no Retry-After on 429, health check doesn't distinguish degraded from critical.
+
+**Product Completeness 6.5:** The full platform loop is now closeable in code: register → verify identity → background checks → presence → attestation → soultoken → order box → NFC tap → collect. A real verified user can complete the entire intended journey. Stops at 6.5 because support bookings (Section 11) and business reporting dashboards are absent, and the Dorotka usage-gating by soultoken status is not enforced.
+
+### Top 6 improvements
+1. **Support bookings** (Section 11) → Product +0.5, Protocol +0.3, **+0.14 weighted**
+2. **Renew re-signs soultoken** (update signature after `expires_at` change) → Security +0.2, Architecture +0.1, **+0.04 weighted**
+3. **Ed25519 PKI for soultoken signing** (replace HMAC-SHA256) → Security +0.4, **+0.09 weighted**
+4. **OpenAPI annotations** on all routes (utoipa or aide) → Usability +0.5, **+0.07 overall**
+5. **Retry-After header on 429** in `rate_limit.rs` → Operational +0.2, **+0.03 overall**
+6. **CSP nonce middleware** (deferred security debt from `project_server_security_debt.md`) → Security +0.2, **+0.04 weighted**
+
+### Summary
+The orders domain moved the grade from C+ to B- in a single session — Protocol Conformance +0.8 (Section 9 now implemented) and Product Completeness +1.5 (the full platform loop is closeable for the first time). Weighted score: 7.41. The platform now has 12 of 19 BFIP sections implemented and a verified user can complete every step from registration to box collection. The remaining high-leverage work is support bookings (Section 11) and soultoken re-signing on renewal.
