@@ -133,6 +133,36 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
             .await;
         }
 
+        DomainEvent::OrderCreated { order_id, user_id, business_id } => {
+            tracing::info!(order_id, user_id, business_id, "order.created");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "order.created",
+                serde_json::json!({
+                    "order_id":    order_id,
+                    "business_id": business_id,
+                }),
+            )
+            .await;
+        }
+
+        DomainEvent::OrderCollected { order_id, user_id, box_id } => {
+            tracing::info!(order_id, user_id, box_id, "order.collected");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "order.collected",
+                serde_json::json!({
+                    "order_id": order_id,
+                    "box_id":   box_id,
+                }),
+            )
+            .await;
+        }
+
         DomainEvent::SoultokenIssued { soultoken_id, user_id, ref token_type } => {
             tracing::info!(soultoken_id, user_id, token_type, "soultoken.issued");
             audit::write(

@@ -1414,3 +1414,154 @@ async fn full_soultoken_lifecycle(pool: PgPool) {
         );
     }
 }
+
+/// Full order and NFC collection journey (BFIP Section 9):
+/// create order → activate box → collect via NFC tap
+/// Assert order.status = 'collected', tapped_at set, clone_detected = false,
+/// audit events written.
+#[sqlx::test]
+async fn full_order_and_collection_journey(pool: PgPool) {
+    use box_fraise_domain::domain::orders::{
+        service as ord_svc,
+        types::{ActivateBoxRequest, CollectOrderRequest, CreateOrderRequest},
+    };
+    use box_fraise_domain::domain::staff::{
+        service as staff_svc,
+        types::{ArriveAtVisitRequest, GrantRoleRequest, ScheduleVisitRequest},
+    };
+    use box_fraise_domain::types::UserId;
+
+    // ── Setup ─────────────────────────────────────────────────────────────────
+    let bus = EventBus::new();
+
+    let (admin_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, is_platform_admin) \
+         VALUES ('order-admin@journey.test', true, true) RETURNING id",
+    )
+    .fetch_one(&pool).await.unwrap();
+    let admin = UserId::from(admin_id);
+
+    let (staff_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('order-staff@journey.test', true) RETURNING id",
+    )
+    .fetch_one(&pool).await.unwrap();
+    let staff = UserId::from(staff_id);
+
+    let (user_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('order-buyer@journey.test', true) RETURNING id",
+    )
+    .fetch_one(&pool).await.unwrap();
+    let user = UserId::from(user_id);
+
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('Order Journey Store', 'box_fraise_store', '1 OJ St', 'America/Edmonton') \
+         RETURNING id",
+    )
+    .fetch_one(&pool).await.unwrap();
+
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses \
+         (location_id, primary_holder_id, name, verification_status, is_active) \
+         VALUES ($1, $2, 'OJ Biz', 'active', true) RETURNING id",
+    )
+    .bind(loc_id).bind(admin_id).fetch_one(&pool).await.unwrap();
+
+    // ── Step 1: Create order ──────────────────────────────────────────────────
+    let order = ord_svc::create_order(
+        &pool, user,
+        CreateOrderRequest {
+            business_id:         biz_id,
+            variety_description: Some("Albion".to_owned()),
+            box_count:           1,
+            amount_cents:        1500,
+        },
+        &bus,
+    ).await.expect("create_order must succeed");
+
+    assert_eq!(order.status, "pending");
+    assert!(order.pickup_deadline.is_some(), "pickup_deadline must be set (food safety)");
+
+    // ── Step 2: Grant delivery_staff role ─────────────────────────────────────
+    staff_svc::grant_staff_role(
+        &pool, admin,
+        GrantRoleRequest {
+            user_id: staff_id, role: "delivery_staff".to_owned(),
+            location_id: Some(loc_id), expires_at: None, confirmed_by: None,
+        },
+        &bus,
+    ).await.expect("grant_staff_role must succeed");
+
+    // ── Step 3: Schedule + arrive at visit ────────────────────────────────────
+    let visit = staff_svc::schedule_visit(
+        &pool, staff,
+        ScheduleVisitRequest {
+            location_id:              loc_id,
+            visit_type:               "delivery".to_owned(),
+            scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
+            window_hours:             Some(4),
+            support_booking_capacity: Some(0),
+            expected_box_count:       Some(5),
+        },
+        &bus,
+    ).await.expect("schedule_visit must succeed");
+
+    staff_svc::arrive_at_visit(
+        &pool, visit.id, staff,
+        ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+    ).await.expect("arrive must succeed");
+
+    // ── Step 4: Activate NFC box ──────────────────────────────────────────────
+    let nfc_uid = "NFC-JOURNEY-001";
+
+    ord_svc::activate_box(
+        &pool, visit.id, staff,
+        ActivateBoxRequest {
+            nfc_chip_uid:       nfc_uid.to_owned(),
+            delivery_signature: "staff-sig-journey".to_owned(),
+            expires_at:         chrono::Utc::now() + chrono::Duration::hours(4),
+        },
+    ).await.expect("activate_box must succeed");
+
+    // ── Step 5: Collect order via NFC tap ─────────────────────────────────────
+    let collected = ord_svc::collect_order(
+        &pool, user,
+        CollectOrderRequest { nfc_chip_uid: nfc_uid.to_owned() },
+        &bus,
+    ).await.expect("collect_order must succeed");
+
+    // ── Step 6: Assertions ────────────────────────────────────────────────────
+
+    assert_eq!(collected.status, "collected");
+    assert!(collected.collected_via_box_id.is_some(), "collected_via_box_id must be set");
+
+    // visit_box.tapped_at set.
+    let tapped_at: Option<String> = sqlx::query_scalar(
+        "SELECT tapped_at::text FROM visit_boxes WHERE nfc_chip_uid = $1"
+    )
+    .bind(nfc_uid).fetch_one(&pool).await.unwrap();
+    assert!(tapped_at.is_some(), "tapped_at must be set on the visit_box");
+
+    // clone_detected = false (legitimate single tap).
+    let clone_detected: bool = sqlx::query_scalar(
+        "SELECT clone_detected FROM visit_boxes WHERE nfc_chip_uid = $1"
+    )
+    .bind(nfc_uid).fetch_one(&pool).await.unwrap();
+    assert!(!clone_detected, "clone_detected must be false for a legitimate tap");
+
+    // Audit events written.
+    let ae_kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT event_kind FROM audit_events \
+         WHERE event_kind LIKE 'order.%' ORDER BY created_at"
+    )
+    .fetch_all(&pool).await.unwrap();
+
+    for expected in &["order.created", "order.box_activated", "order.collected"] {
+        assert!(
+            ae_kinds.iter().any(|k| k == expected),
+            "audit_event '{}' must be written; got: {:?}", expected, ae_kinds
+        );
+    }
+}

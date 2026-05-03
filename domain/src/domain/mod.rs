@@ -1,3 +1,5 @@
+/// Orders — strawberry purchase orders and NFC box collection (BFIP Section 9).
+pub mod orders;
 /// Soultokens — non-transferable verified identity credentials (BFIP Section 7).
 pub mod soultokens;
 /// Staff attestations — initiation, co-signing, approval, and rejection (BFIP Section 6).

@@ -1415,3 +1415,194 @@ async fn get_soultokens_me_response_contains_no_uuid(pool: PgPool) {
         "uuid must NOT appear anywhere in /api/soultokens/me response: {json_str}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Orders domain
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn create_active_business(pool: &PgPool) -> (i32, String) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let (admin_id, admin_token) = create_platform_admin_user(pool).await;
+    let loc_id = create_location_for_tests(pool).await;
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses \
+         (location_id, primary_holder_id, name, verification_status, is_active) \
+         VALUES ($1, $2, 'Handler Test Biz', 'active', true) RETURNING id",
+    )
+    .bind(loc_id).bind(admin_id).fetch_one(pool).await.unwrap();
+    (biz_id, admin_token)
+}
+
+#[sqlx::test]
+async fn post_orders_returns_201(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let (biz_id, token) = create_active_business(&pool).await;
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST", "/api/orders", &token,
+            serde_json::json!({
+                "business_id":         biz_id,
+                "variety_description": "Albion",
+                "box_count":           1,
+                "amount_cents":        1500,
+            }),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[sqlx::test]
+async fn get_orders_me_returns_200(pool: PgPool) {
+    let (_, token) = create_platform_admin_user(&pool).await;
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app.oneshot(authed_req("GET", "/api/orders", &token)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[sqlx::test]
+async fn post_orders_cancel_returns_403_for_wrong_user(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    use box_fraise_domain::domain::orders::{service as ord_svc, types::CreateOrderRequest};
+    use box_fraise_domain::event_bus::EventBus;
+    use box_fraise_domain::types::UserId;
+
+    let (biz_id, _owner_token) = create_active_business(&pool).await;
+
+    // Create order owned by admin (the same user that created the business).
+    let (owner_id,): (i32,) = sqlx::query_as(
+        "SELECT id FROM users WHERE is_platform_admin = true ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&pool).await.unwrap();
+
+    let bus = EventBus::new();
+    let state_setup = common::build_state(pool.clone(), None);
+    let order = ord_svc::create_order(
+        &state_setup.db, UserId::from(owner_id),
+        CreateOrderRequest {
+            business_id: biz_id, variety_description: None,
+            box_count: 1, amount_cents: 1000,
+        },
+        &bus,
+    ).await.unwrap();
+
+    // A different user tries to cancel.
+    let (attacker_id, attacker_token) = create_platform_admin_user(&pool).await;
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST",
+            &format!("/api/orders/{}/cancel", order.id),
+            &attacker_token,
+            serde_json::json!({}),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn post_orders_collect_returns_409_for_double_tap(pool: PgPool) {
+    use box_fraise_domain::domain::orders::{
+        service as ord_svc,
+        types::{ActivateBoxRequest, CollectOrderRequest, CreateOrderRequest},
+    };
+    use box_fraise_domain::domain::staff::{
+        service as staff_svc,
+        types::{ArriveAtVisitRequest, GrantRoleRequest, ScheduleVisitRequest},
+    };
+    use box_fraise_domain::event_bus::EventBus;
+    use box_fraise_domain::types::UserId;
+
+    let bus = EventBus::new();
+    let state_setup = common::build_state(pool.clone(), None);
+
+    // Setup: admin, staff + role, business, visit.
+    let (admin_id, _)    = create_platform_admin_user(&pool).await;
+    let (staff_id, _)    = create_platform_admin_user(&pool).await;
+    let loc_id           = create_location_for_tests(&pool).await;
+    let admin            = UserId::from(admin_id);
+    let staff            = UserId::from(staff_id);
+
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses \
+         (location_id, primary_holder_id, name, verification_status, is_active) \
+         VALUES ($1, $2, 'DT Biz', 'active', true) RETURNING id",
+    )
+    .bind(loc_id).bind(admin_id).fetch_one(&pool).await.unwrap();
+
+    staff_svc::grant_staff_role(
+        &state_setup.db, admin,
+        GrantRoleRequest {
+            user_id: staff_id, role: "delivery_staff".to_owned(),
+            location_id: Some(loc_id), expires_at: None, confirmed_by: None,
+        },
+        &bus,
+    ).await.unwrap();
+
+    let visit = staff_svc::schedule_visit(
+        &state_setup.db, staff,
+        ScheduleVisitRequest {
+            location_id: loc_id, visit_type: "delivery".to_owned(),
+            scheduled_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            window_hours: Some(4), support_booking_capacity: Some(0), expected_box_count: Some(5),
+        },
+        &bus,
+    ).await.unwrap();
+
+    staff_svc::arrive_at_visit(
+        &state_setup.db, visit.id, staff,
+        ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+    ).await.unwrap();
+
+    // Create order for user.
+    let (user_id, user_token) = create_platform_admin_user(&pool).await;
+    let user = UserId::from(user_id);
+
+    ord_svc::create_order(
+        &state_setup.db, user,
+        CreateOrderRequest {
+            business_id: biz_id, variety_description: None,
+            box_count: 1, amount_cents: 1000,
+        },
+        &bus,
+    ).await.unwrap();
+
+    // Activate a box.
+    ord_svc::activate_box(
+        &state_setup.db, visit.id, staff,
+        ActivateBoxRequest {
+            nfc_chip_uid:       "NFC-HANDLER-DT".to_owned(),
+            delivery_signature: "sig".to_owned(),
+            expires_at:         chrono::Utc::now() + chrono::Duration::hours(4),
+        },
+    ).await.unwrap();
+
+    // First collect via service (succeeds).
+    ord_svc::collect_order(
+        &state_setup.db, user,
+        CollectOrderRequest { nfc_chip_uid: "NFC-HANDLER-DT".to_owned() },
+        &bus,
+    ).await.unwrap();
+
+    // Second collect via HTTP (should be 409).
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST", "/api/orders/collect", &user_token,
+            serde_json::json!({ "nfc_chip_uid": "NFC-HANDLER-DT" }),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}

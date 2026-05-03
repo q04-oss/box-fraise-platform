@@ -91,6 +91,20 @@ pub enum DomainEvent {
         credential_id: i32,
     },
 
+    // ── Orders ───────────────────────────────────────────────────────────────
+    /// A strawberry order was placed.
+    OrderCreated {
+        order_id:    i32,
+        user_id:     i32,
+        business_id: i32,
+    },
+    /// An order was collected via NFC box tap.
+    OrderCollected {
+        order_id: i32,
+        user_id:  i32,
+        box_id:   i32,
+    },
+
     // ── Soultokens ────────────────────────────────────────────────────────────
     /// A soultoken was issued to an attested user.
     SoultokenIssued {
