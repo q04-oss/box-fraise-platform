@@ -334,6 +334,8 @@ mod tests {
             platform_fee_bips: 500,
             square_order_webhook_signing_key: None,
             square_order_notification_url:    None,
+            soultoken_hmac_key:    s("test-soultoken-hmac-key-32bytes!!"),
+            soultoken_signing_key: s("test-soultoken-sign-key-32bytes!!"),
         })
     }
 

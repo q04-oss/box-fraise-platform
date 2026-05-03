@@ -94,6 +94,7 @@ pub fn build(state: AppState) -> Router {
         // ── Domain routes ─────────────────────────────────────────────────────
         .merge(meta::router())
         .merge(crate::domain::attestations::routes::router())
+        .merge(crate::domain::soultokens::routes::router())
         .merge(crate::domain::auth::routes::router())
         .merge(crate::domain::background_checks::routes::router())
         .merge(crate::domain::beacons::routes::router())

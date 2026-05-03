@@ -1,4 +1,5 @@
 pub mod attestations;
+pub mod soultokens;
 pub mod auth;
 pub mod background_checks;
 pub mod beacons;

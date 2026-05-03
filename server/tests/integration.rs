@@ -74,6 +74,8 @@ async fn magic_link_flow_fires_user_logged_in_event(pool: PgPool) {
         api_base_url: "http://localhost:3001".to_owned(),
         app_store_id: None, platform_fee_bips: 500,
         square_order_webhook_signing_key: None, square_order_notification_url: None,
+        soultoken_hmac_key:    "test-soultoken-hmac-key-32bytes!!".to_string().into(),
+        soultoken_signing_key: "test-soultoken-sign-key-32bytes!!".to_string().into(),
     });
     let _http = reqwest::Client::new();
 
@@ -1219,6 +1221,196 @@ async fn full_attestation_journey(pool: PgPool) {
         assert!(
             ae_kinds.iter().any(|k| k == kind),
             "audit_event '{}' must be written; got: {:?}", kind, ae_kinds
+        );
+    }
+}
+
+/// Full soultoken lifecycle (BFIP Section 7):
+/// issue → assert display_code + no uuid in responses → renew → revoke
+/// Assert verification_events in correct order, user.soultoken_id managed, audit trail complete.
+#[sqlx::test]
+async fn full_soultoken_lifecycle(pool: PgPool) {
+    use box_fraise_domain::domain::soultokens::{
+        service as st_svc,
+        types::{IssueSoultokenRequest, RenewSoultokenRequest, RevokeSoultokenRequest},
+    };
+    use box_fraise_domain::types::UserId;
+    use secrecy::ExposeSecret;
+
+    // ── Setup: attested user with approved attestation ────────────────────────
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('soultoken-lifecycle@test.test', true, 'presence_confirmed') RETURNING id",
+    )
+    .fetch_one(&pool).await.unwrap();
+
+    let (admin_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, is_platform_admin) \
+         VALUES ('admin-lifecycle@test.test', true, true) RETURNING id",
+    )
+    .fetch_one(&pool).await.unwrap();
+
+    let (staff_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ('staff-lifecycle@test.test', true) RETURNING id",
+    )
+    .fetch_one(&pool).await.unwrap();
+
+    let (r1,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ('r1-lifecycle@test.test', true) RETURNING id",
+    )
+    .fetch_one(&pool).await.unwrap();
+
+    let (r2,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ('r2-lifecycle@test.test', true) RETURNING id",
+    )
+    .fetch_one(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO identity_credentials \
+         (user_id, credential_type, verified_at, cooling_ends_at, cooling_completed_at) \
+         VALUES ($1, 'stripe_identity', now(), now() + interval '7 days', now())",
+    )
+    .bind(uid).execute(&pool).await.unwrap();
+
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('Lifecycle Store', 'box_fraise_store', '1 LC St', 'America/Edmonton') \
+         RETURNING id",
+    )
+    .fetch_one(&pool).await.unwrap();
+
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'LC Biz', 'active') RETURNING id",
+    )
+    .bind(loc_id).bind(uid).fetch_one(&pool).await.unwrap();
+
+    let (thresh_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO presence_thresholds \
+         (user_id, business_id, event_count, days_count, threshold_met_at) \
+         VALUES ($1, $2, 3, 3, now()) RETURNING id",
+    )
+    .bind(uid).bind(biz_id).fetch_one(&pool).await.unwrap();
+
+    let (visit_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO staff_visits (location_id, staff_id, visit_type, status, scheduled_at) \
+         VALUES ($1, $2, 'combined', 'completed', now()) RETURNING id",
+    )
+    .bind(loc_id).bind(staff_id).fetch_one(&pool).await.unwrap();
+
+    let (attest_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO visit_attestations \
+         (visit_id, user_id, staff_id, presence_threshold_id, \
+          assigned_reviewer_1_id, assigned_reviewer_2_id, status) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'approved') RETURNING id",
+    )
+    .bind(visit_id).bind(uid).bind(staff_id)
+    .bind(thresh_id).bind(r1).bind(r2)
+    .fetch_one(&pool).await.unwrap();
+
+    sqlx::query(
+        "UPDATE users SET verification_status = 'attested', attested_at = now() WHERE id = $1",
+    )
+    .bind(uid).execute(&pool).await.unwrap();
+
+    let state = common::build_state(pool.clone(), None);
+    let hmac_key    = state.cfg.soultoken_hmac_key.expose_secret().as_bytes().to_vec();
+    let signing_key = state.cfg.soultoken_signing_key.expose_secret().as_bytes().to_vec();
+    let bus = state.event_bus.clone();
+
+    // ── Step 1: Issue soultoken ───────────────────────────────────────────────
+    let token = st_svc::issue_soultoken(
+        &state.db, UserId::from(uid),
+        IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+        &hmac_key, &signing_key, &bus,
+    ).await.expect("issue_soultoken must succeed");
+
+    // Display code format
+    let code_re = regex::Regex::new(r"^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$").unwrap();
+    assert!(code_re.is_match(&token.display_code),
+        "display_code must match XXXX-XXXX-XXXX: {}", token.display_code);
+
+    // No uuid in response JSON
+    let token_json = serde_json::to_string(&token).unwrap();
+    let uuid_re = regex::Regex::new(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    ).unwrap();
+    assert!(!uuid_re.is_match(&token_json),
+        "uuid must NOT appear in issued soultoken response: {token_json}");
+
+    // users.soultoken_id is set
+    let st_id: Option<i32> = sqlx::query_scalar(
+        "SELECT soultoken_id FROM users WHERE id = $1"
+    )
+    .bind(uid).fetch_one(&pool).await.unwrap();
+    assert_eq!(st_id, Some(token.id), "users.soultoken_id must be set after issuance");
+
+    // ── Step 2: Renew ─────────────────────────────────────────────────────────
+    let before_renewal = token.expires_at;
+    let renewal = st_svc::renew_soultoken(
+        &state.db, UserId::from(uid),
+        RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
+        &bus,
+    ).await.expect("renew_soultoken must succeed");
+
+    assert!(renewal.new_expires_at > before_renewal,
+        "renewal must extend expires_at");
+
+    // ── Step 3: Revoke ────────────────────────────────────────────────────────
+    st_svc::revoke_soultoken(
+        &state.db, token.id, UserId::from(admin_id),
+        RevokeSoultokenRequest {
+            revocation_reason:   "staff_rescission".to_owned(),
+            revocation_visit_id: None,
+        },
+    ).await.expect("revoke_soultoken must succeed");
+
+    // user.verification_status reset to 'registered'
+    let status: String = sqlx::query_scalar(
+        "SELECT verification_status FROM users WHERE id = $1"
+    )
+    .bind(uid).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "registered");
+
+    // users.soultoken_id is NULL
+    let st_id_after: Option<i32> = sqlx::query_scalar(
+        "SELECT soultoken_id FROM users WHERE id = $1"
+    )
+    .bind(uid).fetch_one(&pool).await.unwrap();
+    assert!(st_id_after.is_none(), "soultoken_id must be NULL after revocation");
+
+    // soultoken.revoked_at is set
+    let revoked_at: Option<String> = sqlx::query_scalar(
+        "SELECT revoked_at::text FROM soultokens WHERE id = $1"
+    )
+    .bind(token.id).fetch_one(&pool).await.unwrap();
+    assert!(revoked_at.is_some(), "soultoken.revoked_at must be set");
+
+    // ── Step 4: Verify verification_events in order ───────────────────────────
+    let ve_types: Vec<String> = sqlx::query_scalar(
+        "SELECT event_type FROM verification_events \
+         WHERE user_id = $1 ORDER BY created_at"
+    )
+    .bind(uid).fetch_all(&pool).await.unwrap();
+
+    for expected in &["soultoken_issued", "soultoken_renewed", "soultoken_revoked"] {
+        assert!(
+            ve_types.iter().any(|t| t == expected),
+            "verification_event '{}' must exist; got: {:?}", expected, ve_types
+        );
+    }
+
+    // ── Step 5: Audit trail ───────────────────────────────────────────────────
+    let ae_kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT event_kind FROM audit_events \
+         WHERE event_kind LIKE 'soultoken.%' ORDER BY created_at"
+    )
+    .fetch_all(&pool).await.unwrap();
+
+    for expected in &["soultoken.issued", "soultoken.renewed", "soultoken.revoked"] {
+        assert!(
+            ae_kinds.iter().any(|k| k == expected),
+            "audit_event '{}' must exist; got: {:?}", expected, ae_kinds
         );
     }
 }

@@ -1218,3 +1218,200 @@ async fn post_attestations_staff_sign_returns_200(pool: PgPool) {
 
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Soultokens domain
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Seed an attested user with an approved attestation — minimum state for
+/// soultoken issuance. Returns (user_id, token, attestation_id).
+async fn setup_attested_user_for_handler(pool: &PgPool) -> (i32, String, i32) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ($1, true, 'presence_confirmed') RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(pool).await.unwrap();
+
+    let (staff_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(pool).await.unwrap();
+
+    let (r1,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(pool).await.unwrap();
+
+    let (r2,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO identity_credentials \
+         (user_id, credential_type, verified_at, cooling_ends_at, cooling_completed_at) \
+         VALUES ($1, 'stripe_identity', now(), now() + interval '7 days', now())",
+    )
+    .bind(uid).execute(pool).await.unwrap();
+
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('Handler ST Store', 'box_fraise_store', '1 H St', 'America/Edmonton') \
+         RETURNING id",
+    )
+    .fetch_one(pool).await.unwrap();
+
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'H Biz', 'active') RETURNING id",
+    )
+    .bind(loc_id).bind(uid).fetch_one(pool).await.unwrap();
+
+    let (thresh_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO presence_thresholds \
+         (user_id, business_id, event_count, days_count, threshold_met_at) \
+         VALUES ($1, $2, 3, 3, now()) RETURNING id",
+    )
+    .bind(uid).bind(biz_id).fetch_one(pool).await.unwrap();
+
+    let (visit_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO staff_visits (location_id, staff_id, visit_type, status, scheduled_at) \
+         VALUES ($1, $2, 'combined', 'completed', now()) RETURNING id",
+    )
+    .bind(loc_id).bind(staff_id).fetch_one(pool).await.unwrap();
+
+    let (attest_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO visit_attestations \
+         (visit_id, user_id, staff_id, presence_threshold_id, \
+          assigned_reviewer_1_id, assigned_reviewer_2_id, status) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'approved') RETURNING id",
+    )
+    .bind(visit_id).bind(uid).bind(staff_id)
+    .bind(thresh_id).bind(r1).bind(r2)
+    .fetch_one(pool).await.unwrap();
+
+    sqlx::query(
+        "UPDATE users SET verification_status = 'attested', attested_at = now() WHERE id = $1",
+    )
+    .bind(uid).execute(pool).await.unwrap();
+
+    let token = common::valid_token(uid);
+    (uid, token, attest_id)
+}
+
+#[sqlx::test]
+async fn post_soultokens_issue_returns_201_for_attested_user(pool: PgPool) {
+    let (_, token, attest_id) = setup_attested_user_for_handler(&pool).await;
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST", "/api/soultokens/issue", &token,
+            serde_json::json!({
+                "attestation_id": attest_id,
+                "token_type":     "user",
+            }),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[sqlx::test]
+async fn get_soultokens_me_returns_200_with_display_code(pool: PgPool) {
+    use box_fraise_domain::domain::soultokens::{service as st_svc, types::IssueSoultokenRequest};
+    use box_fraise_domain::event_bus::EventBus;
+    use box_fraise_domain::types::UserId;
+
+    let (uid, token, attest_id) = setup_attested_user_for_handler(&pool).await;
+
+    let state_setup = common::build_state(pool.clone(), None);
+    let bus = EventBus::new();
+    use secrecy::ExposeSecret;
+    let hmac_key    = state_setup.cfg.soultoken_hmac_key.expose_secret().as_bytes().to_vec();
+    let signing_key = state_setup.cfg.soultoken_signing_key.expose_secret().as_bytes().to_vec();
+    st_svc::issue_soultoken(
+        &state_setup.db, UserId::from(uid),
+        IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+        &hmac_key, &signing_key, &bus,
+    ).await.expect("issue must succeed for handler test setup");
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app.oneshot(authed_req("GET", "/api/soultokens/me", &token)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[sqlx::test]
+async fn post_soultokens_revoke_returns_403_for_non_admin(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let (id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+    let token = common::valid_token(id);
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST", "/api/soultokens/1/revoke", &token,
+            serde_json::json!({
+                "revocation_reason":   "stripe_flag",
+                "revocation_visit_id": null,
+            }),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn get_soultokens_me_response_contains_no_uuid(pool: PgPool) {
+    use box_fraise_domain::domain::soultokens::{service as st_svc, types::IssueSoultokenRequest};
+    use box_fraise_domain::event_bus::EventBus;
+    use box_fraise_domain::types::UserId;
+    use axum::body::to_bytes;
+
+    let (uid, token, attest_id) = setup_attested_user_for_handler(&pool).await;
+
+    let state_setup = common::build_state(pool.clone(), None);
+    let bus = EventBus::new();
+    use secrecy::ExposeSecret;
+    let hmac_key    = state_setup.cfg.soultoken_hmac_key.expose_secret().as_bytes().to_vec();
+    let signing_key = state_setup.cfg.soultoken_signing_key.expose_secret().as_bytes().to_vec();
+    st_svc::issue_soultoken(
+        &state_setup.db, UserId::from(uid),
+        IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+        &hmac_key, &signing_key, &bus,
+    ).await.unwrap();
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app.oneshot(authed_req("GET", "/api/soultokens/me", &token)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = to_bytes(resp.into_body(), 1024 * 64).await.unwrap();
+    let json_str = std::str::from_utf8(&body).unwrap();
+
+    let uuid_re = regex::Regex::new(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    ).unwrap();
+    assert!(
+        !uuid_re.is_match(json_str),
+        "uuid must NOT appear anywhere in /api/soultokens/me response: {json_str}"
+    );
+}

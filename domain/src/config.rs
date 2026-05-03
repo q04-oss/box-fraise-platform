@@ -50,6 +50,10 @@ pub struct Config {
     pub platform_fee_bips:        i64,
     pub square_order_webhook_signing_key: Option<SecretString>,
     pub square_order_notification_url:    Option<String>,
+    /// HMAC key for soultoken display code derivation (BFIP Section 7 / cryptography.md Section 3).
+    pub soultoken_hmac_key:    SecretString,
+    /// Signing key for soultoken payload HMAC-SHA256 (BFIP cryptography.md Section 4).
+    pub soultoken_signing_key: SecretString,
 }
 
 impl Config {
@@ -88,6 +92,15 @@ impl Config {
                     "SQUARE_ORDER_NOTIFICATION_URL is required when SQUARE_APP_ID is set"
                 );
             }
+        }
+
+        let soultoken_hmac_key_raw = require("SOULTOKEN_HMAC_KEY")?;
+        if soultoken_hmac_key_raw.len() < 32 {
+            anyhow::bail!("SOULTOKEN_HMAC_KEY must be at least 32 characters");
+        }
+        let soultoken_signing_key_raw = require("SOULTOKEN_SIGNING_KEY")?;
+        if soultoken_signing_key_raw.len() < 32 {
+            anyhow::bail!("SOULTOKEN_SIGNING_KEY must be at least 32 characters");
         }
 
         let hmac_shared_key = optional_secret("FRAISE_HMAC_SHARED_KEY");
@@ -134,6 +147,8 @@ impl Config {
             square_app_secret:         optional_secret("SQUARE_APP_SECRET"),
             square_oauth_redirect_url: optional("SQUARE_OAUTH_REDIRECT_URL"),
             square_token_encryption_key: optional_secret("SQUARE_TOKEN_ENCRYPTION_KEY"),
+            soultoken_hmac_key:    soultoken_hmac_key_raw.into(),
+            soultoken_signing_key: soultoken_signing_key_raw.into(),
         })
     }
 }

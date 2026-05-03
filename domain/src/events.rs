@@ -91,6 +91,25 @@ pub enum DomainEvent {
         credential_id: i32,
     },
 
+    // ── Soultokens ────────────────────────────────────────────────────────────
+    /// A soultoken was issued to an attested user.
+    SoultokenIssued {
+        soultoken_id: i32,
+        user_id:      i32,
+        token_type:   String,
+    },
+    /// A soultoken was revoked (by staff or platform) or voluntarily surrendered.
+    SoultokenRevoked {
+        soultoken_id: i32,
+        user_id:      i32,
+        reason:       String,
+    },
+    /// A soultoken was renewed for another 12 months.
+    SoultokenRenewed {
+        soultoken_id: i32,
+        user_id:      i32,
+    },
+
     // ── Attestations ─────────────────────────────────────────────────────────
     /// A staff attestation was initiated for a user.
     AttestationInitiated {

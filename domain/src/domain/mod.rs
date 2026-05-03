@@ -1,3 +1,5 @@
+/// Soultokens — non-transferable verified identity credentials (BFIP Section 7).
+pub mod soultokens;
 /// Staff attestations — initiation, co-signing, approval, and rejection (BFIP Section 6).
 pub mod attestations;
 /// Authentication: Apple Sign In, magic link, JWT management.

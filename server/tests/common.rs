@@ -62,6 +62,8 @@ pub fn test_config() -> Config {
         square_order_webhook_signing_key: None,
         square_order_notification_url:    None,
         app_store_id:                     None,
+        soultoken_hmac_key:    SecretString::from("test-soultoken-hmac-key-32bytes!!".to_string()),
+        soultoken_signing_key: SecretString::from("test-soultoken-sign-key-32bytes!!".to_string()),
     }
 }
 

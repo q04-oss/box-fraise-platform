@@ -133,6 +133,48 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
             .await;
         }
 
+        DomainEvent::SoultokenIssued { soultoken_id, user_id, ref token_type } => {
+            tracing::info!(soultoken_id, user_id, token_type, "soultoken.issued");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "soultoken.issued",
+                serde_json::json!({
+                    "soultoken_id": soultoken_id,
+                    "token_type":   token_type,
+                }),
+            )
+            .await;
+        }
+
+        DomainEvent::SoultokenRevoked { soultoken_id, user_id, ref reason } => {
+            tracing::info!(soultoken_id, user_id, reason, "soultoken.revoked");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "soultoken.revoked",
+                serde_json::json!({
+                    "soultoken_id": soultoken_id,
+                    "reason":       reason,
+                }),
+            )
+            .await;
+        }
+
+        DomainEvent::SoultokenRenewed { soultoken_id, user_id } => {
+            tracing::info!(soultoken_id, user_id, "soultoken.renewed");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "soultoken.renewed",
+                serde_json::json!({ "soultoken_id": soultoken_id }),
+            )
+            .await;
+        }
+
         DomainEvent::AttestationInitiated { attestation_id, user_id, visit_id } => {
             tracing::info!(attestation_id, user_id, visit_id, "attestation.initiated");
             audit::write(
