@@ -1606,3 +1606,203 @@ async fn post_orders_collect_returns_409_for_double_tap(pool: PgPool) {
 
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Support domain
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Set up a delivery_staff user + a support visit with capacity.
+/// Returns (staff_id, staff_token, visit_id).
+async fn setup_support_visit_for_handler(pool: &PgPool, capacity: i32) -> (i32, String, i32) {
+    use box_fraise_domain::{
+        domain::staff::{
+            service as staff_svc,
+            types::{ArriveAtVisitRequest, GrantRoleRequest, ScheduleVisitRequest},
+        },
+        event_bus::EventBus,
+        types::UserId,
+    };
+    let bus = EventBus::new();
+
+    let (admin_id, _) = create_platform_admin_user(pool).await;
+    let loc_id        = create_location_for_tests(pool).await;
+
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let staff_email: String = SafeEmail().fake();
+    let (staff_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    ).bind(&staff_email).fetch_one(pool).await.unwrap();
+    let staff_token = common::valid_token(staff_id);
+
+    staff_svc::grant_staff_role(pool, UserId::from(admin_id),
+        GrantRoleRequest {
+            user_id:      staff_id,
+            role:         "delivery_staff".to_owned(),
+            location_id:  Some(loc_id),
+            expires_at:   None,
+            confirmed_by: None,
+        }, &bus,
+    ).await.unwrap();
+
+    let visit = staff_svc::schedule_visit(pool, UserId::from(staff_id),
+        ScheduleVisitRequest {
+            location_id:              loc_id,
+            visit_type:               "support".to_owned(),
+            scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
+            window_hours:             Some(4),
+            support_booking_capacity: Some(capacity),
+            expected_box_count:       Some(0),
+        }, &bus,
+    ).await.unwrap();
+
+    staff_svc::arrive_at_visit(pool, visit.id, UserId::from(staff_id),
+        ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+    ).await.unwrap();
+
+    (staff_id, staff_token, visit.id)
+}
+
+#[sqlx::test]
+async fn post_support_bookings_returns_201(pool: PgPool) {
+    let (_, _, visit_id) = setup_support_visit_for_handler(&pool, 5).await;
+
+    // Create a regular user.
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let email: String = SafeEmail().fake();
+    let (user_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    ).bind(&email).fetch_one(&pool).await.unwrap();
+    let user_token = common::valid_token(user_id);
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST", "/api/support/bookings", &user_token,
+            serde_json::json!({ "visit_id": visit_id }),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[sqlx::test]
+async fn post_support_bookings_returns_409_for_duplicate(pool: PgPool) {
+    use box_fraise_domain::{
+        domain::support::{service as sup_svc, types::CreateBookingRequest},
+        event_bus::EventBus, types::UserId,
+    };
+    let bus = EventBus::new();
+    let (_, _, visit_id) = setup_support_visit_for_handler(&pool, 5).await;
+
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let email: String = SafeEmail().fake();
+    let (user_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    ).bind(&email).fetch_one(&pool).await.unwrap();
+    let user_token = common::valid_token(user_id);
+
+    // Book via service first.
+    sup_svc::create_booking(
+        &pool, UserId::from(user_id),
+        CreateBookingRequest { visit_id, issue_description: None, priority: None },
+        &bus,
+    ).await.unwrap();
+
+    // Second booking via HTTP should conflict.
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST", "/api/support/bookings", &user_token,
+            serde_json::json!({ "visit_id": visit_id }),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[sqlx::test]
+async fn post_support_bookings_resolve_returns_403_for_non_staff(pool: PgPool) {
+    use box_fraise_domain::{
+        domain::support::{service as sup_svc, types::{CreateBookingRequest, ResolveBookingRequest}},
+        event_bus::EventBus, types::UserId,
+    };
+    let bus = EventBus::new();
+    let (staff_id, _, visit_id) = setup_support_visit_for_handler(&pool, 5).await;
+
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let email: String = SafeEmail().fake();
+    let (user_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    ).bind(&email).fetch_one(&pool).await.unwrap();
+
+    let booking = sup_svc::create_booking(
+        &pool, UserId::from(user_id),
+        CreateBookingRequest { visit_id, issue_description: None, priority: None },
+        &bus,
+    ).await.unwrap();
+
+    // Mark attended via staff.
+    sup_svc::attend_booking(&pool, booking.id, UserId::from(staff_id)).await.unwrap();
+
+    // A random non-staff user tries to resolve.
+    let attacker_email: String = SafeEmail().fake();
+    let (attacker_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    ).bind(&attacker_email).fetch_one(&pool).await.unwrap();
+    let attacker_token = common::valid_token(attacker_id);
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST",
+            &format!("/api/support/bookings/{}/resolve", booking.id),
+            &attacker_token,
+            serde_json::json!({
+                "resolution_description": "Fake resolve",
+                "resolution_signature":   "fake-sig",
+                "gift_box_provided":      false,
+            }),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn get_support_bookings_me_returns_200(pool: PgPool) {
+    let (_, _, visit_id) = setup_support_visit_for_handler(&pool, 5).await;
+
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let email: String = SafeEmail().fake();
+    let (user_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    ).bind(&email).fetch_one(&pool).await.unwrap();
+    let user_token = common::valid_token(user_id);
+
+    // Create a booking first.
+    use box_fraise_domain::{
+        domain::support::{service as sup_svc, types::CreateBookingRequest},
+        event_bus::EventBus, types::UserId,
+    };
+    let bus = EventBus::new();
+    sup_svc::create_booking(
+        &pool, UserId::from(user_id),
+        CreateBookingRequest { visit_id, issue_description: None, priority: None },
+        &bus,
+    ).await.unwrap();
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/support/bookings/me", &user_token))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}

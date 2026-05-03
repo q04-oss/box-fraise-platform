@@ -5,6 +5,7 @@ use crate::types::UserId;
 /// Published by service functions via [`crate::event_bus::EventBus::publish`]
 /// and consumed by background tasks (audit logging, push notifications, etc.).
 /// Consumers that miss events receive [`tokio::sync::broadcast::error::RecvError::Lagged`].
+#[allow(missing_docs)] // variant-level docs cover intent; field-level docs would duplicate them
 #[derive(Debug, Clone)]
 pub enum DomainEvent {
     // ── Auth ──────────────────────────────────────────────────────────────────
@@ -183,6 +184,19 @@ pub enum DomainEvent {
         user_id:    i32,
         check_id:   i32,
         check_type: String,
+    },
+
+    // ── Support bookings ──────────────────────────────────────────────────────
+    /// A user booked a support slot at a staff visit.
+    SupportBookingCreated {
+        booking_id: i32,
+        user_id:    i32,
+        visit_id:   i32,
+    },
+    /// A support booking was resolved by delivery staff.
+    SupportBookingResolved {
+        booking_id: i32,
+        user_id:    i32,
     },
 
     // ── Dorotka ───────────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 pub mod attestations;
 pub mod orders;
+pub mod support;
 pub mod soultokens;
 pub mod auth;
 pub mod background_checks;

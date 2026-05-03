@@ -1565,3 +1565,198 @@ async fn full_order_and_collection_journey(pool: PgPool) {
         );
     }
 }
+
+// ── full_support_booking_journey ──────────────────────────────────────────────
+
+#[sqlx::test]
+async fn full_support_booking_journey(pool: PgPool) {
+    use box_fraise_domain::{
+        domain::staff::{
+            service as staff_svc,
+            types::{ArriveAtVisitRequest, GrantRoleRequest, ScheduleVisitRequest},
+        },
+        domain::support::{
+            service as sup_svc,
+            types::{CancelBookingRequest, CreateBookingRequest, ResolveBookingRequest},
+        },
+        types::UserId,
+    };
+
+    let bus = EventBus::new();
+
+    // ── Setup: admin, staff, location, visit with capacity = 2 ───────────────
+
+    let (admin_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, is_platform_admin) \
+         VALUES ('admin@integration.test', true, true) RETURNING id"
+    ).fetch_one(&pool).await.unwrap();
+    let admin = UserId::from(admin_id);
+
+    let (staff_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('staff@integration.test', true) RETURNING id"
+    ).fetch_one(&pool).await.unwrap();
+    let staff = UserId::from(staff_id);
+
+    let (user_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('user@integration.test', true) RETURNING id"
+    ).fetch_one(&pool).await.unwrap();
+    let user = UserId::from(user_id);
+
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('Integration Support', 'box_fraise_store', '1 Test', 'America/Edmonton') \
+         RETURNING id"
+    ).fetch_one(&pool).await.unwrap();
+
+    staff_svc::grant_staff_role(&pool, admin,
+        GrantRoleRequest {
+            user_id:      staff_id,
+            role:         "delivery_staff".to_owned(),
+            location_id:  Some(loc_id),
+            expires_at:   None,
+            confirmed_by: None,
+        }, &bus,
+    ).await.expect("grant_staff_role must succeed");
+
+    let visit = staff_svc::schedule_visit(&pool, staff,
+        ScheduleVisitRequest {
+            location_id:              loc_id,
+            visit_type:               "support".to_owned(),
+            scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
+            window_hours:             Some(4),
+            support_booking_capacity: Some(2),
+            expected_box_count:       Some(0),
+        }, &bus,
+    ).await.expect("schedule_visit must succeed");
+
+    staff_svc::arrive_at_visit(&pool, visit.id, staff,
+        ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+    ).await.expect("arrive_at_visit must succeed");
+
+    // ── Step 1: User creates support booking ─────────────────────────────────
+
+    let booking = sup_svc::create_booking(&pool, user,
+        CreateBookingRequest {
+            visit_id:          visit.id,
+            issue_description: Some("Need help with identity verification".to_owned()),
+            priority:          Some("urgent".to_owned()),
+        }, &bus,
+    ).await.expect("create_booking must succeed");
+
+    assert_eq!(booking.status, "booked");
+    assert_eq!(booking.priority, "urgent");
+    assert_eq!(booking.visit_id, visit.id);
+
+    // ── Step 2: Staff marks user as attended ─────────────────────────────────
+
+    let attended = sup_svc::attend_booking(&pool, booking.id, staff)
+        .await.expect("attend_booking must succeed");
+
+    assert_eq!(attended.status, "attended");
+    assert!(attended.attended_at.is_some());
+
+    // ── Step 3: Staff resolves with platform gift box ─────────────────────────
+
+    let resolved = sup_svc::resolve_booking(
+        &pool, booking.id, staff,
+        ResolveBookingRequest {
+            resolution_description: "Helped user complete identity verification".to_owned(),
+            resolution_signature:   "staff-resolve-sig".to_owned(),
+            gift_box_provided:      true,
+            gift_box_id:            None,
+        }, &bus,
+    ).await.expect("resolve_booking must succeed");
+
+    assert_eq!(resolved.status, "resolved");
+    assert!(resolved.resolved_at.is_some());
+    assert!(resolved.gift_box_provided);
+
+    // ── Assert gift_box_history record created ────────────────────────────────
+
+    let (gift_covered_by, gift_reason): (String, String) = sqlx::query_as(
+        "SELECT covered_by, gift_reason FROM gift_box_history WHERE user_id = $1"
+    ).bind(user_id).fetch_one(&pool).await.expect("gift_box_history row must exist");
+    assert_eq!(gift_covered_by, "platform", "first gift must be platform-covered");
+    assert_eq!(gift_reason, "support_interaction");
+
+    // ── Assert users.platform_gift_eligible_after set ─────────────────────────
+
+    let eligible_after: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "SELECT platform_gift_eligible_after FROM users WHERE id = $1"
+    ).bind(user_id).fetch_one(&pool).await.unwrap();
+    assert!(eligible_after > chrono::Utc::now() + chrono::Duration::days(150),
+        "platform_gift_eligible_after must be ~6 months in future");
+
+    // ── Assert audit_events contain all expected entries ─────────────────────
+
+    let ae_kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT event_kind FROM audit_events WHERE event_kind LIKE 'support.%' ORDER BY created_at"
+    ).fetch_all(&pool).await.unwrap();
+
+    for expected in &[
+        "support.booking_created",
+        "support.booking_attended",
+        "support.booking_resolved",
+        "support.platform_gift_issued",
+    ] {
+        assert!(
+            ae_kinds.iter().any(|k| k == expected),
+            "audit_event '{}' must be written; got: {:?}", expected, ae_kinds
+        );
+    }
+
+    // ── Step 4: Second booking — second platform gift within 6 months ─────────
+    //    should be recorded as user-covered, not platform-covered.
+
+    let (user2_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('user2@integration.test', true) RETURNING id"
+    ).fetch_one(&pool).await.unwrap();
+    // Reuse the same user as user2 to test the 6-month limit.
+    // Give the first user a second booking at a new visit.
+
+    let visit2 = staff_svc::schedule_visit(&pool, staff,
+        ScheduleVisitRequest {
+            location_id:              loc_id,
+            visit_type:               "support".to_owned(),
+            scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(2),
+            window_hours:             Some(4),
+            support_booking_capacity: Some(2),
+            expected_box_count:       Some(0),
+        }, &bus,
+    ).await.unwrap();
+
+    staff_svc::arrive_at_visit(&pool, visit2.id, staff,
+        ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+    ).await.unwrap();
+
+    let booking2 = sup_svc::create_booking(&pool, user,
+        CreateBookingRequest { visit_id: visit2.id, issue_description: None, priority: None },
+        &bus,
+    ).await.expect("second booking must succeed");
+
+    sup_svc::attend_booking(&pool, booking2.id, staff).await.unwrap();
+
+    sup_svc::resolve_booking(
+        &pool, booking2.id, staff,
+        ResolveBookingRequest {
+            resolution_description: "Resolved second visit".to_owned(),
+            resolution_signature:   "staff-sig-2".to_owned(),
+            gift_box_provided:      true,
+            gift_box_id:            None,
+        }, &bus,
+    ).await.unwrap();
+
+    // Second gift within 6 months must be user-covered.
+    let gift_rows: Vec<String> = sqlx::query_scalar(
+        "SELECT covered_by FROM gift_box_history WHERE user_id = $1 ORDER BY gifted_at"
+    ).bind(user_id).fetch_all(&pool).await.unwrap();
+
+    assert_eq!(gift_rows.len(), 2, "must have 2 gift_box_history rows");
+    assert_eq!(gift_rows[0], "platform", "first gift must be platform-covered");
+    assert_eq!(gift_rows[1], "user", "second gift within 6 months must be user-covered");
+
+    let _ = user2_id; // created but unused; suppresses lint
+}

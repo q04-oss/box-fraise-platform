@@ -22,3 +22,5 @@ pub mod dorotka;
 pub mod staff;
 /// User profiles and search.
 pub mod users;
+/// Support bookings — in-person support interactions and gift box fulfilment (BFIP Section 10).
+pub mod support;

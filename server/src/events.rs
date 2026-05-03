@@ -335,6 +335,30 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
             .await;
         }
 
+        DomainEvent::SupportBookingCreated { booking_id, user_id, visit_id } => {
+            tracing::info!(booking_id, user_id, visit_id, "support.booking_created");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "support.booking_created",
+                serde_json::json!({ "booking_id": booking_id, "visit_id": visit_id }),
+            )
+            .await;
+        }
+
+        DomainEvent::SupportBookingResolved { booking_id, user_id } => {
+            tracing::info!(booking_id, user_id, "support.booking_resolved");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "support.booking_resolved",
+                serde_json::json!({ "booking_id": booking_id }),
+            )
+            .await;
+        }
+
         // Audit write already done inside service::ask_dorotka.
         DomainEvent::DorotkaQueried { .. } => {}
     }
