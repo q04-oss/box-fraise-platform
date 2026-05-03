@@ -795,3 +795,426 @@ async fn identity_cooling_status_returns_404_without_credential(pool: PgPool) {
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Background checks
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Create an identity_confirmed user with a completed cooling credential.
+async fn create_eligible_check_user(pool: &PgPool) -> (common::Usr, String) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let email: String = SafeEmail().fake();
+    let (id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ($1, true, 'identity_confirmed') RETURNING id"
+    )
+    .bind(&email).fetch_one(pool).await.unwrap();
+
+    // Cooling credential — already completed.
+    let verified_at     = chrono::Utc::now() - chrono::Duration::days(10);
+    let cooling_ends_at = verified_at + chrono::Duration::days(7);
+    sqlx::query(
+        "INSERT INTO identity_credentials \
+         (user_id, credential_type, verified_at, cooling_ends_at, cooling_completed_at) \
+         VALUES ($1, 'stripe_identity', $2, $3, now())"
+    )
+    .bind(id).bind(verified_at).bind(cooling_ends_at)
+    .execute(pool).await.unwrap();
+
+    let token = common::valid_token(id);
+    (common::Usr { id: box_fraise_domain::types::UserId::from(id) }, token)
+}
+
+#[sqlx::test]
+async fn post_initiate_returns_201_for_eligible_user(pool: PgPool) {
+    let (_, token) = create_eligible_check_user(&pool).await;
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST",
+            "/api/background-checks/initiate",
+            &token,
+            serde_json::json!({ "check_type": "sanctions", "provider": "comply_advantage" }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[sqlx::test]
+async fn post_initiate_returns_403_if_cooling_incomplete(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let email: String = SafeEmail().fake();
+    let (id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ($1, true, 'identity_confirmed') RETURNING id"
+    )
+    .bind(&email).fetch_one(&pool).await.unwrap();
+
+    // Credential without cooling_completed_at.
+    let verified_at     = chrono::Utc::now() - chrono::Duration::days(2);
+    let cooling_ends_at = verified_at + chrono::Duration::days(7);
+    sqlx::query(
+        "INSERT INTO identity_credentials \
+         (user_id, credential_type, verified_at, cooling_ends_at) \
+         VALUES ($1, 'stripe_identity', $2, $3)"
+    )
+    .bind(id).bind(verified_at).bind(cooling_ends_at)
+    .execute(&pool).await.unwrap();
+
+    let token = common::valid_token(id);
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST",
+            "/api/background-checks/initiate",
+            &token,
+            serde_json::json!({ "check_type": "sanctions", "provider": "comply_advantage" }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn get_status_returns_200_with_check_summary(pool: PgPool) {
+    let (_, token) = create_eligible_check_user(&pool).await;
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/background-checks/status", &token))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Staff domain
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn create_platform_admin_user(pool: &PgPool) -> (i32, String) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let email: String = SafeEmail().fake();
+    let (id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, is_platform_admin) \
+         VALUES ($1, true, true) RETURNING id"
+    )
+    .bind(&email).fetch_one(pool).await.unwrap();
+    (id, common::valid_token(id))
+}
+
+async fn create_location_for_tests(pool: &PgPool) -> i32 {
+    let (id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('Handler Test Store', 'box_fraise_store', '1 Test St', 'America/Edmonton') \
+         RETURNING id"
+    )
+    .fetch_one(pool).await.unwrap();
+    id
+}
+
+#[sqlx::test]
+async fn post_staff_roles_returns_201_for_admin(pool: PgPool) {
+    let (admin_id, token) = create_platform_admin_user(&pool).await;
+    let loc_id = create_location_for_tests(&pool).await;
+    let (target_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ('target@staff.test', true) RETURNING id"
+    )
+    .fetch_one(&pool).await.unwrap();
+    let _ = (admin_id, loc_id);
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST", "/api/staff/roles", &token,
+            serde_json::json!({ "user_id": target_id, "role": "attestation_reviewer", "location_id": null }),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[sqlx::test]
+async fn post_staff_roles_returns_403_for_non_admin(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let email: String = SafeEmail().fake();
+    let (id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    )
+    .bind(&email).fetch_one(&pool).await.unwrap();
+    let token = common::valid_token(id);
+
+    let (target_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ('target2@staff.test', true) RETURNING id"
+    )
+    .fetch_one(&pool).await.unwrap();
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST", "/api/staff/roles", &token,
+            serde_json::json!({ "user_id": target_id, "role": "attestation_reviewer", "location_id": null }),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn post_staff_visits_returns_201_for_delivery_staff(pool: PgPool) {
+    let (_, admin_token) = create_platform_admin_user(&pool).await;
+    let loc_id = create_location_for_tests(&pool).await;
+    let scheduled_at = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST", "/api/staff/visits", &admin_token,
+            serde_json::json!({
+                "location_id": loc_id,
+                "visit_type":  "delivery",
+                "scheduled_at": scheduled_at,
+            }),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[sqlx::test]
+async fn get_staff_visits_returns_200(pool: PgPool) {
+    let (_, token) = create_platform_admin_user(&pool).await;
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app.oneshot(authed_req("GET", "/api/staff/visits", &token)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Attestations domain
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Sets up the full attestation context via direct SQL and service calls.
+///
+/// Returns `(staff_token, visit_id, target_user_id, threshold_id, r1_id, r2_id)`.
+async fn setup_attestation_handler_context(pool: &PgPool) -> (String, i32, i32, i32, i32, i32) {
+    use box_fraise_domain::domain::staff::{
+        service as staff_svc,
+        types::{ArriveAtVisitRequest, GrantRoleRequest, ScheduleVisitRequest},
+    };
+    use box_fraise_domain::event_bus::EventBus;
+    use box_fraise_domain::types::UserId;
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let bus = EventBus::new();
+
+    let (admin_id, _) = create_platform_admin_user(pool).await;
+    let admin = UserId::from(admin_id);
+
+    let (staff_id, staff_token) = create_platform_admin_user(pool).await;
+    let staff = UserId::from(staff_id);
+
+    let loc_id = create_location_for_tests(pool).await;
+
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'Attest Handler Biz', 'active') RETURNING id",
+    )
+    .bind(loc_id)
+    .bind(admin_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    // Grant staff delivery_staff role (admin grants to staff).
+    staff_svc::grant_staff_role(
+        pool, admin,
+        GrantRoleRequest {
+            user_id: staff_id, role: "delivery_staff".to_owned(),
+            location_id: Some(loc_id), expires_at: None, confirmed_by: None,
+        },
+        &bus,
+    ).await.unwrap();
+
+    let visit = staff_svc::schedule_visit(
+        pool, staff,
+        ScheduleVisitRequest {
+            location_id: loc_id, visit_type: "combined".to_owned(),
+            scheduled_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            window_hours: Some(4), support_booking_capacity: Some(0), expected_box_count: Some(0),
+        },
+        &bus,
+    ).await.unwrap();
+
+    staff_svc::arrive_at_visit(
+        pool, visit.id, staff,
+        ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+    ).await.unwrap();
+
+    // Two attestation reviewers (no location).
+    let (r1_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    let (r2_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    for rid in [r1_id, r2_id] {
+        staff_svc::grant_staff_role(
+            pool, admin,
+            GrantRoleRequest {
+                user_id: rid, role: "attestation_reviewer".to_owned(),
+                location_id: None, expires_at: None, confirmed_by: None,
+            },
+            &bus,
+        ).await.unwrap();
+    }
+
+    // Target user: presence_confirmed + met threshold.
+    let (target_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ($1, true, 'presence_confirmed') RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    let (threshold_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO presence_thresholds \
+         (user_id, business_id, event_count, days_count, threshold_met_at) \
+         VALUES ($1, $2, 3, 3, now()) RETURNING id",
+    )
+    .bind(target_id)
+    .bind(biz_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    (staff_token, visit.id, target_id, threshold_id, r1_id, r2_id)
+}
+
+#[sqlx::test]
+async fn get_attestations_me_returns_200(pool: PgPool) {
+    let (_, token) = create_platform_admin_user(&pool).await;
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app.oneshot(authed_req("GET", "/api/attestations", &token)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[sqlx::test]
+async fn get_attestations_pending_returns_200(pool: PgPool) {
+    let (_, token) = create_platform_admin_user(&pool).await;
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app.oneshot(authed_req("GET", "/api/attestations/pending", &token)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[sqlx::test]
+async fn post_attestations_returns_201_for_staff(pool: PgPool) {
+    let (staff_token, visit_id, target_id, threshold_id, _, _) =
+        setup_attestation_handler_context(&pool).await;
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST", "/api/attestations", &staff_token,
+            serde_json::json!({
+                "visit_id":              visit_id,
+                "user_id":               target_id,
+                "presence_threshold_id": threshold_id,
+                "photo_hash":            null,
+                "photo_storage_uri":     null,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[sqlx::test]
+async fn post_attestations_staff_sign_returns_200(pool: PgPool) {
+    use box_fraise_domain::domain::attestations::{service as attest_svc, types::InitiateAttestationRequest};
+    use box_fraise_domain::event_bus::EventBus;
+    use box_fraise_domain::types::UserId;
+
+    let (staff_token, visit_id, target_id, threshold_id, _, _) =
+        setup_attestation_handler_context(&pool).await;
+
+    // Get staff user_id from token to call service directly.
+    let (staff_id,): (i32,) = sqlx::query_as(
+        "SELECT id FROM users WHERE is_platform_admin = true ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let bus = EventBus::new();
+    let state_for_setup = common::build_state(pool.clone(), None);
+
+    let attest = attest_svc::initiate_attestation(
+        &state_for_setup.db,
+        UserId::from(staff_id),
+        InitiateAttestationRequest {
+            visit_id,
+            user_id:               target_id,
+            presence_threshold_id: threshold_id,
+            photo_hash:            None,
+            photo_storage_uri:     None,
+        },
+        &bus,
+    )
+    .await
+    .expect("initiate must succeed for handler test setup");
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST",
+            &format!("/api/attestations/{}/staff-sign", attest.id),
+            &staff_token,
+            serde_json::json!({
+                "staff_signature":        "staff-sig-handler-test",
+                "photo_hash":             null,
+                "location_confirmed":     true,
+                "user_present_confirmed": true,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}

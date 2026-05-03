@@ -133,6 +133,136 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
             .await;
         }
 
+        DomainEvent::AttestationInitiated { attestation_id, user_id, visit_id } => {
+            tracing::info!(attestation_id, user_id, visit_id, "attestation.initiated");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "attestation.initiated",
+                serde_json::json!({
+                    "attestation_id": attestation_id,
+                    "visit_id":       visit_id,
+                }),
+            )
+            .await;
+        }
+
+        DomainEvent::AttestationApproved { attestation_id, user_id } => {
+            tracing::info!(attestation_id, user_id, "attestation.approved");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "attestation.approved",
+                serde_json::json!({ "attestation_id": attestation_id }),
+            )
+            .await;
+        }
+
+        DomainEvent::AttestationRejected { attestation_id, user_id, rejection_reviewer_id } => {
+            tracing::info!(attestation_id, user_id, rejection_reviewer_id, "attestation.rejected");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "attestation.rejected",
+                serde_json::json!({
+                    "attestation_id":        attestation_id,
+                    "rejection_reviewer_id": rejection_reviewer_id,
+                }),
+            )
+            .await;
+        }
+
+        DomainEvent::StaffRoleGranted { user_id, ref role } => {
+            tracing::info!(user_id, role, "staff.role_granted");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "staff.role_granted",
+                serde_json::json!({ "role": role }),
+            )
+            .await;
+        }
+
+        DomainEvent::VisitScheduled { visit_id, location_id } => {
+            tracing::info!(visit_id, location_id, "staff.visit_scheduled");
+            audit::write(
+                pool,
+                None,
+                None,
+                "staff.visit_scheduled",
+                serde_json::json!({ "visit_id": visit_id, "location_id": location_id }),
+            )
+            .await;
+        }
+
+        DomainEvent::VisitCompleted { visit_id } => {
+            tracing::info!(visit_id, "staff.visit_completed");
+            audit::write(
+                pool,
+                None,
+                None,
+                "staff.visit_completed",
+                serde_json::json!({ "visit_id": visit_id }),
+            )
+            .await;
+        }
+
+        DomainEvent::QualityAssessmentSubmitted { visit_id, business_id, overall_pass } => {
+            tracing::info!(visit_id, business_id, overall_pass, "staff.quality_assessment_submitted");
+            audit::write(
+                pool,
+                None,
+                None,
+                "staff.quality_assessment_submitted",
+                serde_json::json!({
+                    "visit_id": visit_id,
+                    "business_id": business_id,
+                    "overall_pass": overall_pass,
+                }),
+            )
+            .await;
+        }
+
+        DomainEvent::BackgroundCheckInitiated { user_id, check_id, ref check_type } => {
+            tracing::info!(user_id, check_id, check_type, "background_check.initiated");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "background_check.initiated",
+                serde_json::json!({ "check_id": check_id, "check_type": check_type }),
+            )
+            .await;
+        }
+
+        DomainEvent::BackgroundCheckPassed { user_id, check_id, ref check_type } => {
+            tracing::info!(user_id, check_id, check_type, "background_check.passed");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "background_check.passed",
+                serde_json::json!({ "check_id": check_id, "check_type": check_type }),
+            )
+            .await;
+        }
+
+        DomainEvent::BackgroundCheckFailed { user_id, check_id, ref check_type } => {
+            tracing::info!(user_id, check_id, check_type, "background_check.failed");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "background_check.failed",
+                serde_json::json!({ "check_id": check_id, "check_type": check_type }),
+            )
+            .await;
+        }
+
         // Audit write already done inside service::ask_dorotka.
         DomainEvent::DorotkaQueried { .. } => {}
     }

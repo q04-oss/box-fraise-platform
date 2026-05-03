@@ -183,8 +183,11 @@ pub async fn request_magic_link(
 
 /// Consume a magic link `token` and return a signed JWT on success.
 ///
-/// The token is consumed atomically (GETDEL) — a second call with the same
-/// token always returns `Unauthorized`. Emits [`DomainEvent::UserLoggedIn`].
+/// The DB is the source of truth: the `magic_link_tokens` row is atomically
+/// claimed (used_at stamped) via a single UPDATE … WHERE used_at IS NULL.
+/// Any concurrent attempt for the same token loses the UPDATE race and gets
+/// `Unauthorized`. Redis is cleaned up afterwards but plays no role in the
+/// security decision. Emits [`DomainEvent::UserLoggedIn`] on success.
 pub async fn verify_magic_link(
     pool:      &PgPool,
     cfg:       &Arc<Config>,
@@ -193,38 +196,44 @@ pub async fn verify_magic_link(
     ip:        Option<IpAddr>,
     event_bus: &EventBus,
 ) -> AppResult<AuthResponse> {
-    let redis_pool = redis.ok_or(DomainError::Unauthorized)?;
+    let token_hash = sha256_hex(token.as_bytes());
 
-    let key = format!("{MAGIC_LINK_PREFIX}{token}");
-    let mut conn = redis_pool.get().await
-        .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis: {e}")))?;
+    // Atomically claim the token. The WHERE clause enforces:
+    //   • correct token (hash match)
+    //   • not yet expired
+    //   • not already used
+    let claimed: Option<(i32,)> = sqlx::query_as(
+        "UPDATE magic_link_tokens \
+         SET used_at = NOW() \
+         WHERE token_hash = $1 \
+           AND expires_at > NOW() \
+           AND used_at IS NULL \
+         RETURNING user_id"
+    )
+    .bind(&token_hash)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| DomainError::Internal(anyhow::anyhow!("magic_link_tokens claim: {e}")))?;
 
-    let raw: Option<String> = redis::cmd("GETDEL").arg(&key)
-        .query_async(&mut *conn).await
-        .map_err(|e| DomainError::Internal(anyhow::anyhow!("Redis GETDEL: {e}")))?;
-
-    let user_id = UserId::from(match raw {
-        Some(s) => s.parse::<i32>().map_err(|_| DomainError::Unauthorized)?,
+    let user_id = UserId::from(match claimed {
+        Some((id,)) => id,
         None => {
             audit::write(pool, None, None, "auth.magic_link_invalid",
                 serde_json::json!({
-                    "reason": "token_expired_or_consumed",
+                    "reason": "token_expired_consumed_or_unknown",
                     "ip": ip.map(|a| a.to_string()),
                 })).await;
             return Err(DomainError::Unauthorized);
         }
     });
 
-    // Mark token consumed in the DB audit trail — fire-and-forget.
-    // Redis GETDEL is the authoritative consumption; this is the BFIP record.
-    let token_hash = sha256_hex(token.as_bytes());
-    sqlx::query(
-        "UPDATE magic_link_tokens SET used_at = NOW() WHERE token_hash = $1"
-    )
-    .bind(&token_hash)
-    .execute(pool)
-    .await
-    .ok();
+    // Clean up Redis — fire-and-forget, no longer on the critical path.
+    if let Some(redis_pool) = redis {
+        let key = format!("{MAGIC_LINK_PREFIX}{token}");
+        if let Ok(mut conn) = redis_pool.get().await {
+            let _: Result<(), _> = redis::cmd("DEL").arg(&key).query_async(&mut *conn).await;
+        }
+    }
 
     let user = repository::find_by_id(pool, user_id).await?.ok_or(DomainError::Unauthorized)?;
 
@@ -462,16 +471,30 @@ mod tests {
             return;
         };
 
-        // Seed a user and a token directly into Redis.
         let user_id = insert_user(&pool, "magicverify@test.com").await;
         let token   = "test-magic-token-abc";
-        let key     = format!("fraise:magic:{token}");
+
+        // Seed Redis.
+        let key = format!("fraise:magic:{token}");
         let mut conn = redis.get().await.unwrap();
         let _: () = redis::cmd("SET")
             .arg(&key).arg(i32::from(user_id).to_string())
             .arg("EX").arg(900u64)
             .query_async(&mut *conn).await.unwrap();
         drop(conn);
+
+        // Seed DB row — required by DB-first verify_magic_link.
+        let token_hash = sha256_hex(token.as_bytes());
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(900);
+        sqlx::query(
+            "INSERT INTO magic_link_tokens (user_id, email, token_hash, expires_at) \
+             VALUES ($1, $2, $3, $4)"
+        )
+        .bind(i32::from(user_id))
+        .bind("magicverify@test.com")
+        .bind(&token_hash)
+        .bind(expires_at)
+        .execute(&pool).await.unwrap();
 
         let bus  = EventBus::new();
         let resp = verify_magic_link(&pool, &cfg, Some(&redis), token, None, &bus)
@@ -506,7 +529,9 @@ mod tests {
 
         let user_id = insert_user(&pool, "magicused@test.com").await;
         let token   = "single-use-magic-token";
-        let key     = format!("fraise:magic:{token}");
+
+        // Seed Redis.
+        let key = format!("fraise:magic:{token}");
         let mut conn = redis.get().await.unwrap();
         let _: () = redis::cmd("SET")
             .arg(&key).arg(i32::from(user_id).to_string())
@@ -514,11 +539,24 @@ mod tests {
             .query_async(&mut *conn).await.unwrap();
         drop(conn);
 
+        // Seed DB row — required by DB-first verify_magic_link.
+        let token_hash = sha256_hex(token.as_bytes());
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(900);
+        sqlx::query(
+            "INSERT INTO magic_link_tokens (user_id, email, token_hash, expires_at) \
+             VALUES ($1, $2, $3, $4)"
+        )
+        .bind(i32::from(user_id))
+        .bind("magicused@test.com")
+        .bind(&token_hash)
+        .bind(expires_at)
+        .execute(&pool).await.unwrap();
+
         let bus = EventBus::new();
         // First use succeeds.
         verify_magic_link(&pool, &cfg, Some(&redis), token, None, &bus).await.unwrap();
 
-        // Second use must fail — token consumed by GETDEL.
+        // Second use must fail — used_at is now set (DB-first single-use guarantee).
         let result = verify_magic_link(&pool, &cfg, Some(&redis), token, None, &bus).await;
         assert!(matches!(result, Err(DomainError::Unauthorized)));
     }
@@ -536,11 +574,10 @@ mod tests {
             return;
         };
 
-        // Seed a user.
         let email   = "ml_tokens@test.com";
         let user_id = insert_user(&pool, email).await;
 
-        // Request a magic link — should write to magic_link_tokens.
+        // ── Part 1: request_magic_link writes the DB row ──────────────────────
         request_magic_link(&pool, &cfg, &http, Some(&redis), email, None)
             .await
             .unwrap();
@@ -556,29 +593,39 @@ mod tests {
         assert_eq!(row.0, i32::from(user_id), "token must belong to the requesting user");
         assert!(row.1.is_none(), "used_at must be NULL before verification");
 
-        // Fetch the raw token from Redis to simulate verification.
-        let token_key_pattern = format!("fraise:magic:*");
+        // ── Part 2: verify_magic_link stamps used_at ──────────────────────────
+        // Seed a known token directly in both DB and Redis — avoids KEYS-scan
+        // race on shared Redis where leftover keys from other test runs could
+        // be returned instead of this test's token.
+        let verify_token = format!("verify-{}", uuid::Uuid::new_v4());
+        let verify_hash  = sha256_hex(verify_token.as_bytes());
+        let expires_at   = chrono::Utc::now() + chrono::Duration::seconds(900);
+
+        sqlx::query(
+            "INSERT INTO magic_link_tokens (user_id, email, token_hash, expires_at) \
+             VALUES ($1, $2, $3, $4)"
+        )
+        .bind(i32::from(user_id)).bind(email).bind(&verify_hash).bind(expires_at)
+        .execute(&pool).await.unwrap();
+
+        let redis_key = format!("fraise:magic:{verify_token}");
         let mut conn = redis.get().await.unwrap();
-        let keys: Vec<String> = deadpool_redis::redis::cmd("KEYS")
-            .arg(&token_key_pattern)
-            .query_async(&mut *conn)
-            .await
-            .unwrap();
+        let _: () = deadpool_redis::redis::cmd("SET")
+            .arg(&redis_key).arg(i32::from(user_id).to_string())
+            .arg("EX").arg(900u64)
+            .query_async(&mut *conn).await.unwrap();
+        drop(conn);
 
-        assert!(!keys.is_empty(), "Redis must have a magic link key");
-        let raw_token = keys[0].trim_start_matches("fraise:magic:").to_owned();
-
-        // Verify the token — should set used_at.
         let bus  = EventBus::new();
-        let resp = verify_magic_link(&pool, &cfg, Some(&redis), &raw_token, None, &bus)
+        let resp = verify_magic_link(&pool, &cfg, Some(&redis), &verify_token, None, &bus)
             .await
             .unwrap();
         assert_eq!(resp.user_id, user_id);
 
         let used_at: Option<String> = sqlx::query_scalar(
-            "SELECT used_at::text FROM magic_link_tokens WHERE email = $1"
+            "SELECT used_at::text FROM magic_link_tokens WHERE token_hash = $1"
         )
-        .bind(email)
+        .bind(&verify_hash)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -664,7 +711,8 @@ mod tests {
     }
 
     /// A magic link that has already been consumed cannot be used a second time.
-    /// GETDEL atomically removes the Redis key on first use — second attempt gets None.
+    /// The DB UPDATE WHERE used_at IS NULL atomically enforces single-use —
+    /// the second attempt finds the row already stamped and returns Unauthorized.
     #[sqlx::test(migrations = "../server/migrations")]
     async fn adversary_cannot_reuse_consumed_magic_link(pool: PgPool) {
         use fake::{Fake, faker::internet::en::SafeEmail};
@@ -674,9 +722,13 @@ mod tests {
             eprintln!("skipping: REDIS_URL not set"); return;
         };
 
-        let user_id = insert_user(&pool, &email).await;
-        let token   = uuid::Uuid::new_v4().to_string();
-        let key     = format!("{MAGIC_LINK_PREFIX}{token}");
+        let user_id    = insert_user(&pool, &email).await;
+        let token      = uuid::Uuid::new_v4().to_string();
+        let token_hash = sha256_hex(token.as_bytes());
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(900);
+
+        // Seed Redis.
+        let key = format!("{MAGIC_LINK_PREFIX}{token}");
         let mut conn = redis.get().await.unwrap();
         let _: () = redis::cmd("SET")
             .arg(&key).arg(i32::from(user_id).to_string())
@@ -684,18 +736,25 @@ mod tests {
             .query_async(&mut *conn).await.unwrap();
         drop(conn);
 
+        // Seed DB row — required by DB-first verify_magic_link.
+        sqlx::query(
+            "INSERT INTO magic_link_tokens (user_id, email, token_hash, expires_at) \
+             VALUES ($1, $2, $3, $4)"
+        )
+        .bind(i32::from(user_id)).bind(&email).bind(&token_hash).bind(expires_at)
+        .execute(&pool).await.unwrap();
+
         let bus = EventBus::new();
         // First use succeeds.
         verify_magic_link(&pool, &cfg, Some(&redis), &token, None, &bus).await
             .expect("first verification must succeed");
 
-        // Second use — Redis key is gone (GETDEL consumed it).
+        // Second use — used_at is now set, UPDATE WHERE used_at IS NULL finds nothing.
         let result = verify_magic_link(&pool, &cfg, Some(&redis), &token, None, &bus).await;
         assert!(matches!(result, Err(DomainError::Unauthorized)),
             "consumed token must not be verifiable again");
 
         // used_at must be set exactly once — not cleared by the second attempt.
-        let token_hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
         let used_at: Option<String> = sqlx::query_scalar(
             "SELECT used_at::text FROM magic_link_tokens WHERE token_hash = $1"
         )

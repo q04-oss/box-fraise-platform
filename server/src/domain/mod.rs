@@ -1,7 +1,10 @@
+pub mod attestations;
 pub mod auth;
+pub mod background_checks;
 pub mod beacons;
 pub mod presence;
 pub mod businesses;
 pub mod identity_credentials;
 pub mod dorotka;
+pub mod staff;
 pub mod users;

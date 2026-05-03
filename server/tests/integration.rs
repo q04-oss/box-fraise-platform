@@ -81,7 +81,7 @@ async fn magic_link_flow_fires_user_logged_in_event(pool: PgPool) {
     let bus = EventBus::new();
     let mut rx = bus.subscribe();
 
-    // Seed magic link token directly in Redis.
+    // Seed magic link token in Redis and the DB row verify_magic_link requires.
     let user_id = verified_user(&pool, "flow@test.com").await;
     let token   = "integration-flow-token";
     let key     = format!("fraise:magic:{token}");
@@ -91,6 +91,18 @@ async fn magic_link_flow_fires_user_logged_in_event(pool: PgPool) {
         .arg("EX").arg(900u64)
         .query_async(&mut *conn).await.unwrap();
     drop(conn);
+
+    let token_hash = hex::encode(ring::digest::digest(&ring::digest::SHA256, token.as_bytes()).as_ref());
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(900);
+    sqlx::query(
+        "INSERT INTO magic_link_tokens (user_id, email, token_hash, expires_at) \
+         VALUES ($1, $2, $3, $4)"
+    )
+    .bind(i32::from(user_id))
+    .bind("flow@test.com")
+    .bind(&token_hash)
+    .bind(expires_at)
+    .execute(&pool).await.unwrap();
 
     // verify_magic_link and check event + audit.
     use box_fraise_domain::domain::auth::service as auth_service;
@@ -719,4 +731,494 @@ async fn identity_verification_and_cooling_period_flow(pool: PgPool) {
         &axum::body::to_bytes(resp3.into_body(), 8192).await.unwrap()
     ).unwrap();
     assert!(body3["is_complete"].as_bool().unwrap());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Background check full journey (BFIP Sections 3b, 7b)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Create an identity_confirmed user with completed cooling, then:
+/// 1. Initiate sanctions check → webhook passed
+/// 2. Initiate identity_fraud check → webhook passed
+/// 3. Assert get_status returns all_required_passed = true
+/// 4. Assert verification_events contain two background_check_passed rows
+/// 5. Assert audit_events contain two background_check.passed rows
+#[sqlx::test]
+async fn full_background_check_journey(pool: PgPool) {
+    use box_fraise_domain::domain::background_checks::service;
+    use box_fraise_domain::domain::background_checks::types::{
+        CheckWebhookPayload, InitiateCheckRequest,
+    };
+    use box_fraise_domain::types::UserId;
+
+    // Create identity_confirmed user with completed cooling credential.
+    let (uid_raw,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('bgcheck@journey.test', true, 'identity_confirmed') RETURNING id"
+    )
+    .fetch_one(&pool).await.unwrap();
+    let user_id = UserId::from(uid_raw);
+
+    let verified_at     = chrono::Utc::now() - chrono::Duration::days(10);
+    let cooling_ends_at = verified_at + chrono::Duration::days(7);
+    sqlx::query(
+        "INSERT INTO identity_credentials \
+         (user_id, credential_type, verified_at, cooling_ends_at, cooling_completed_at) \
+         VALUES ($1, 'stripe_identity', $2, $3, now())"
+    )
+    .bind(uid_raw).bind(verified_at).bind(cooling_ends_at)
+    .execute(&pool).await.unwrap();
+
+    let bus = EventBus::new();
+
+    // ── Step 1: initiate sanctions check ─────────────────────────────────────
+    let sanctions = service::initiate_check(
+        &pool, user_id,
+        InitiateCheckRequest { check_type: "sanctions".to_owned(), provider: "comply_advantage".to_owned() },
+        &bus,
+    ).await.expect("sanctions check must initiate");
+
+    // Set external_check_id so the webhook can find the row.
+    sqlx::query("UPDATE background_checks SET external_check_id = 'sanctions-ext-001' WHERE id = $1")
+        .bind(sanctions.id).execute(&pool).await.unwrap();
+
+    // ── Step 2: webhook — sanctions passed ───────────────────────────────────
+    let s_payload = CheckWebhookPayload {
+        external_check_id: "sanctions-ext-001".to_owned(),
+        status:            "passed".to_owned(),
+        provider:          "comply_advantage".to_owned(),
+        raw_response:      serde_json::json!({ "result": "pass" }),
+    };
+    let s_raw = serde_json::to_vec(&s_payload).unwrap();
+    service::handle_webhook(&pool, s_payload, &s_raw, "test-key", &bus)
+        .await.expect("sanctions webhook must succeed");
+
+    // ── Step 3: initiate identity_fraud check ─────────────────────────────────
+    let fraud = service::initiate_check(
+        &pool, user_id,
+        InitiateCheckRequest { check_type: "identity_fraud".to_owned(), provider: "comply_advantage".to_owned() },
+        &bus,
+    ).await.expect("identity_fraud check must initiate");
+
+    sqlx::query("UPDATE background_checks SET external_check_id = 'fraud-ext-001' WHERE id = $1")
+        .bind(fraud.id).execute(&pool).await.unwrap();
+
+    // ── Step 4: webhook — identity_fraud passed ───────────────────────────────
+    let f_payload = CheckWebhookPayload {
+        external_check_id: "fraud-ext-001".to_owned(),
+        status:            "passed".to_owned(),
+        provider:          "comply_advantage".to_owned(),
+        raw_response:      serde_json::json!({ "result": "pass" }),
+    };
+    let f_raw = serde_json::to_vec(&f_payload).unwrap();
+    service::handle_webhook(&pool, f_payload, &f_raw, "test-key", &bus)
+        .await.expect("identity_fraud webhook must succeed");
+
+    // ── Step 5: assert get_status ─────────────────────────────────────────────
+    let status = service::get_status(&pool, user_id).await.unwrap();
+    assert!(status.all_required_passed,
+        "all_required_passed must be true after both required checks pass");
+    assert!(!status.cleared_eligible,
+        "cleared_eligible must be false without criminal check");
+    assert_eq!(status.sanctions_status.as_deref(),      Some("passed"));
+    assert_eq!(status.identity_fraud_status.as_deref(), Some("passed"));
+
+    // ── Step 6: assert verification_events ───────────────────────────────────
+    let ve_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM verification_events \
+         WHERE user_id = $1 AND event_type = 'background_check_passed'"
+    )
+    .bind(uid_raw)
+    .fetch_one(&pool).await.unwrap();
+    assert_eq!(ve_count, 2,
+        "two background_check_passed verification_events must be written");
+
+    // ── Step 7: assert audit_events ──────────────────────────────────────────
+    let ae_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events \
+         WHERE user_id = $1 AND event_kind = 'background_check.passed'"
+    )
+    .bind(uid_raw)
+    .fetch_one(&pool).await.unwrap();
+    assert!(ae_count >= 2,
+        "at least two background_check.passed audit_events must be written");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Staff full journey (BFIP Sections 6, 10, 12.3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Full staff visit journey:
+/// grant role → schedule → arrive → quality assessment (pass) → complete
+/// Assert status = 'completed', assessment + history records exist, audit trail written.
+#[sqlx::test]
+async fn full_staff_visit_journey(pool: PgPool) {
+    use box_fraise_domain::domain::staff::service;
+    use box_fraise_domain::domain::staff::types::{
+        ArriveAtVisitRequest, CompleteVisitRequest, GrantRoleRequest,
+        QualityAssessmentRequest, ScheduleVisitRequest,
+    };
+    use box_fraise_domain::types::UserId;
+
+    // ── Setup ─────────────────────────────────────────────────────────────────
+    let (admin_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, is_platform_admin) \
+         VALUES ('admin@journey.test', true, true) RETURNING id"
+    )
+    .fetch_one(&pool).await.unwrap();
+    let admin = UserId::from(admin_id);
+
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('Journey Store', 'box_fraise_store', '1 Journey St', 'America/Edmonton') \
+         RETURNING id"
+    )
+    .fetch_one(&pool).await.unwrap();
+
+    let (attested_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('biz-owner@journey.test', true, 'attested') RETURNING id"
+    )
+    .fetch_one(&pool).await.unwrap();
+
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'Journey Business', 'active') RETURNING id"
+    )
+    .bind(loc_id).bind(attested_id)
+    .fetch_one(&pool).await.unwrap();
+
+    let bus = EventBus::new();
+
+    // ── Step 1: grant delivery_staff role ────────────────────────────────────
+    service::grant_staff_role(
+        &pool, admin,
+        GrantRoleRequest {
+            user_id:      admin_id,
+            role:         "delivery_staff".to_owned(),
+            location_id:  Some(loc_id),
+            expires_at:   None,
+            confirmed_by: None,
+        },
+        &bus,
+    ).await.expect("grant_staff_role must succeed");
+
+    // ── Step 2: schedule visit ────────────────────────────────────────────────
+    let visit = service::schedule_visit(
+        &pool, admin,
+        ScheduleVisitRequest {
+            location_id:              loc_id,
+            visit_type:               "combined".to_owned(),
+            scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
+            window_hours:             Some(4),
+            support_booking_capacity: Some(0),
+            expected_box_count:       Some(10),
+        },
+        &bus,
+    ).await.expect("schedule_visit must succeed");
+
+    assert_eq!(visit.status, "scheduled");
+
+    // ── Step 3: arrive ────────────────────────────────────────────────────────
+    let arrived = service::arrive_at_visit(
+        &pool, visit.id, admin,
+        ArriveAtVisitRequest { arrived_latitude: Some(53.5461), arrived_longitude: Some(-113.4938) },
+    ).await.expect("arrive_at_visit must succeed");
+
+    assert_eq!(arrived.status, "in_progress");
+
+    // ── Step 4: submit quality assessment (pass) ──────────────────────────────
+    let assessment = service::submit_quality_assessment(
+        &pool, visit.id, admin,
+        QualityAssessmentRequest {
+            business_id:               biz_id,
+            beacon_functioning:        true,
+            staff_performing_correctly: true,
+            standards_maintained:      true,
+            notes:                     Some("All good.".to_owned()),
+        },
+        &bus,
+    ).await.expect("quality assessment must succeed");
+
+    assert!(assessment.overall_pass);
+
+    // ── Step 5: complete visit ────────────────────────────────────────────────
+    let completed = service::complete_visit(
+        &pool, visit.id, admin,
+        CompleteVisitRequest {
+            actual_box_count:    10,
+            delivery_signature:  Some("sig-abc123".to_owned()),
+            evidence_hash:       Some("hash-abc123".to_owned()),
+            evidence_storage_uri: Some("s3://evidence/visit".to_owned()),
+        },
+        &bus,
+    ).await.expect("complete_visit must succeed");
+
+    assert_eq!(completed.status, "completed");
+    assert_eq!(completed.actual_box_count, Some(10));
+
+    // ── Step 6: assertions ────────────────────────────────────────────────────
+
+    // Quality assessment record exists.
+    let qa_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM quality_assessments WHERE visit_id = $1"
+    )
+    .bind(visit.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(qa_count, 1, "quality_assessments record must exist");
+
+    // business_assessment_history record exists.
+    let hist_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM business_assessment_history WHERE business_id = $1"
+    )
+    .bind(biz_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(hist_count, 1, "business_assessment_history record must exist");
+
+    // Audit events exist.
+    let ae_kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT event_kind FROM audit_events WHERE event_kind LIKE 'staff.%' ORDER BY created_at"
+    )
+    .fetch_all(&pool).await.unwrap();
+
+    let expected_kinds = ["staff.role_granted", "staff.visit_scheduled", "staff.visit_arrived",
+                          "staff.quality_assessment_submitted", "staff.visit_completed"];
+    for kind in &expected_kinds {
+        assert!(ae_kinds.iter().any(|k| k == kind),
+            "audit_event '{}' must be written; got: {:?}", kind, ae_kinds);
+    }
+}
+
+/// Full attestation journey (BFIP Section 6):
+/// grant roles → schedule visit → arrive → initiate attestation →
+/// staff sign → reviewer 1 sign → reviewer 2 sign → approve →
+/// assert user.verification_status = 'attested', attempt recorded, audit trail written.
+#[sqlx::test]
+async fn full_attestation_journey(pool: PgPool) {
+    use box_fraise_domain::domain::attestations::{
+        service as attest_svc,
+        types::{
+            InitiateAttestationRequest, RejectAttestationRequest,
+            ReviewerSignAttestationRequest, StaffSignAttestationRequest,
+        },
+    };
+    use box_fraise_domain::domain::staff::service as staff_svc;
+    use box_fraise_domain::domain::staff::types::{
+        ArriveAtVisitRequest, GrantRoleRequest, ScheduleVisitRequest,
+    };
+    use box_fraise_domain::types::UserId;
+
+    // ── Setup ─────────────────────────────────────────────────────────────────
+    let bus = EventBus::new();
+
+    let (admin_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, is_platform_admin) \
+         VALUES ('attest-admin@journey.test', true, true) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let admin = UserId::from(admin_id);
+
+    let (staff_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ('attest-staff@journey.test', true) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let staff = UserId::from(staff_id);
+
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('Attest Journey Store', 'box_fraise_store', '1 Attest Rd', 'America/Edmonton') \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'Attest Journey Biz', 'active') RETURNING id",
+    )
+    .bind(loc_id)
+    .bind(admin_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // ── Step 1: grant delivery_staff role ─────────────────────────────────────
+    staff_svc::grant_staff_role(
+        &pool, admin,
+        GrantRoleRequest {
+            user_id: staff_id, role: "delivery_staff".to_owned(),
+            location_id: Some(loc_id), expires_at: None, confirmed_by: None,
+        },
+        &bus,
+    ).await.expect("grant delivery_staff must succeed");
+
+    // ── Step 2: grant 2 attestation_reviewer roles ────────────────────────────
+    let (r1_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('reviewer1@journey.test', true) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let (r2_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('reviewer2@journey.test', true) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    for rid in [r1_id, r2_id] {
+        staff_svc::grant_staff_role(
+            &pool, admin,
+            GrantRoleRequest {
+                user_id: rid, role: "attestation_reviewer".to_owned(),
+                location_id: None, expires_at: None, confirmed_by: None,
+            },
+            &bus,
+        ).await.unwrap();
+    }
+
+    // ── Step 3: schedule + arrive at visit ────────────────────────────────────
+    let visit = staff_svc::schedule_visit(
+        &pool, staff,
+        ScheduleVisitRequest {
+            location_id: loc_id, visit_type: "combined".to_owned(),
+            scheduled_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            window_hours: Some(4), support_booking_capacity: Some(0), expected_box_count: Some(5),
+        },
+        &bus,
+    ).await.expect("schedule_visit must succeed");
+
+    staff_svc::arrive_at_visit(
+        &pool, visit.id, staff,
+        ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+    ).await.expect("arrive must succeed");
+
+    // ── Step 4: presence-confirmed target user + met threshold ────────────────
+    let (target_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('target@journey.test', true, 'presence_confirmed') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let (threshold_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO presence_thresholds \
+         (user_id, business_id, event_count, days_count, threshold_met_at) \
+         VALUES ($1, $2, 3, 3, now()) RETURNING id",
+    )
+    .bind(target_id)
+    .bind(biz_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // ── Step 5: initiate attestation ─────────────────────────────────────────
+    let attest = attest_svc::initiate_attestation(
+        &pool, staff,
+        InitiateAttestationRequest {
+            visit_id: visit.id, user_id: target_id, presence_threshold_id: threshold_id,
+            photo_hash: Some("sha256-photo".to_owned()), photo_storage_uri: None,
+        },
+        &bus,
+    ).await.expect("initiate_attestation must succeed");
+
+    assert_eq!(attest.status, "pending");
+    assert_ne!(attest.assigned_reviewer_1_id, attest.assigned_reviewer_2_id);
+
+    // ── Step 6: staff sign ────────────────────────────────────────────────────
+    let after_staff_sign = attest_svc::staff_sign(
+        &pool, attest.id, staff,
+        StaffSignAttestationRequest {
+            staff_signature:        "staff-sig-journey".to_owned(),
+            photo_hash:             None,
+            location_confirmed:     true,
+            user_present_confirmed: true,
+        },
+        &bus,
+    ).await.expect("staff_sign must succeed");
+
+    assert_eq!(after_staff_sign.status, "co_sign_pending");
+    assert!(after_staff_sign.co_sign_deadline.is_some());
+
+    // ── Step 7: reviewer 1 sign ───────────────────────────────────────────────
+    let r1 = UserId::from(attest.assigned_reviewer_1_id);
+    let after_r1 = attest_svc::reviewer_sign(
+        &pool, attest.id, r1,
+        ReviewerSignAttestationRequest {
+            signature:              "r1-sig".to_owned(),
+            evidence_hash_reviewed: "r1-evidence".to_owned(),
+        },
+        &bus,
+    ).await.expect("reviewer_1 sign must succeed");
+
+    assert_eq!(after_r1.status, "co_sign_pending", "one reviewer signed — still pending");
+
+    // ── Step 8: reviewer 2 sign → approve ────────────────────────────────────
+    let r2 = UserId::from(attest.assigned_reviewer_2_id);
+    let approved = attest_svc::reviewer_sign(
+        &pool, attest.id, r2,
+        ReviewerSignAttestationRequest {
+            signature:              "r2-sig".to_owned(),
+            evidence_hash_reviewed: "r2-evidence".to_owned(),
+        },
+        &bus,
+    ).await.expect("reviewer_2 sign must succeed");
+
+    assert_eq!(approved.status, "approved");
+
+    // ── Step 9: assertions ────────────────────────────────────────────────────
+
+    // User is now attested.
+    let user_status: String = sqlx::query_scalar(
+        "SELECT verification_status FROM users WHERE id = $1",
+    )
+    .bind(target_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(user_status, "attested", "user.verification_status must be 'attested'");
+
+    // attestation_attempts record exists with 'approved' outcome.
+    let attempt_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM attestation_attempts \
+         WHERE attestation_id = $1 AND outcome = 'approved'",
+    )
+    .bind(attest.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(attempt_count, 1, "approved attestation_attempt must be recorded");
+
+    // reviewer_assignment_log has entries for both reviewers.
+    let assignment_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reviewer_assignment_log WHERE visit_id = $1",
+    )
+    .bind(visit.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(assignment_count, 2, "reviewer_assignment_log must have 2 entries");
+
+    // Audit events exist for the attestation lifecycle.
+    let ae_kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT event_kind FROM audit_events \
+         WHERE event_kind LIKE 'attestation.%' ORDER BY created_at",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    for kind in &["attestation.initiated", "attestation.staff_signed", "attestation.approved"] {
+        assert!(
+            ae_kinds.iter().any(|k| k == kind),
+            "audit_event '{}' must be written; got: {:?}", kind, ae_kinds
+        );
+    }
 }

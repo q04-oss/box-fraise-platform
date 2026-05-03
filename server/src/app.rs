@@ -93,11 +93,14 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::openapi::router())
         // ── Domain routes ─────────────────────────────────────────────────────
         .merge(meta::router())
+        .merge(crate::domain::attestations::routes::router())
         .merge(crate::domain::auth::routes::router())
+        .merge(crate::domain::background_checks::routes::router())
         .merge(crate::domain::beacons::routes::router())
         .merge(crate::domain::businesses::routes::router())
         .merge(crate::domain::presence::routes::router())
         .merge(crate::domain::identity_credentials::routes::router())
+        .merge(crate::domain::staff::routes::router())
         .merge(crate::domain::users::routes::router())
         .merge(crate::domain::dorotka::routes::router())
         // ── Security middleware (innermost — runs first) ───────────────────────

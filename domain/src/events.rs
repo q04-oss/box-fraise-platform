@@ -91,6 +91,67 @@ pub enum DomainEvent {
         credential_id: i32,
     },
 
+    // ── Attestations ─────────────────────────────────────────────────────────
+    /// A staff attestation was initiated for a user.
+    AttestationInitiated {
+        attestation_id: i32,
+        user_id:        i32,
+        visit_id:       i32,
+    },
+    /// A staff attestation was approved (both reviewers co-signed).
+    AttestationApproved {
+        attestation_id: i32,
+        user_id:        i32,
+    },
+    /// A staff attestation was rejected by a reviewer.
+    AttestationRejected {
+        attestation_id:        i32,
+        user_id:               i32,
+        rejection_reviewer_id: i32,
+    },
+
+    // ── Staff ─────────────────────────────────────────────────────────────────
+    /// A staff role was granted to a user.
+    StaffRoleGranted {
+        user_id: i32,
+        role:    String,
+    },
+    /// A staff visit was scheduled.
+    VisitScheduled {
+        visit_id:    i32,
+        location_id: i32,
+    },
+    /// A staff visit was marked completed.
+    VisitCompleted {
+        visit_id: i32,
+    },
+    /// A quality assessment was submitted for a business.
+    QualityAssessmentSubmitted {
+        visit_id:     i32,
+        business_id:  i32,
+        overall_pass: bool,
+    },
+
+    // ── Background checks ─────────────────────────────────────────────────────
+    /// A background check was initiated.
+    BackgroundCheckInitiated {
+        user_id:    i32,
+        check_id:   i32,
+        check_type: String,
+    },
+    /// A background check returned a passed result.
+    BackgroundCheckPassed {
+        user_id:    i32,
+        check_id:   i32,
+        check_type: String,
+    },
+    /// A background check returned a failed result.
+    BackgroundCheckFailed {
+        user_id:    i32,
+        check_id:   i32,
+        check_type: String,
+    },
+
     // ── Dorotka ───────────────────────────────────────────────────────────────
     /// A query was submitted to the Dorotka AI assistant.
     DorotkaQueried {
