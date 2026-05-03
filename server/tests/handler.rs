@@ -1806,3 +1806,209 @@ async fn get_support_bookings_me_returns_200(pool: PgPool) {
 
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Attestation tokens domain
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Set up an attested user with an active soultoken.
+/// Returns (user_id, user_token).
+async fn setup_attested_user_with_soultoken_for_handler(pool: &PgPool) -> (i32, String) {
+    use box_fraise_domain::{
+        domain::soultokens::{service as st_svc, types::IssueSoultokenRequest},
+        event_bus::EventBus,
+        types::UserId,
+    };
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let bus = EventBus::new();
+
+    // Use direct SQL inserts — same approach as soultokens/service.rs tests.
+    let user_email: String = SafeEmail().fake();
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ($1, true, 'presence_confirmed') RETURNING id"
+    ).bind(&user_email).fetch_one(pool).await.unwrap();
+
+    let s_email: String = SafeEmail().fake();
+    let r1_email: String = SafeEmail().fake();
+    let r2_email: String = SafeEmail().fake();
+    let (staff_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    ).bind(&s_email).fetch_one(pool).await.unwrap();
+    let (r1_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    ).bind(&r1_email).fetch_one(pool).await.unwrap();
+    let (r2_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    ).bind(&r2_email).fetch_one(pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO identity_credentials \
+         (user_id, credential_type, verified_at, cooling_ends_at, cooling_completed_at) \
+         VALUES ($1, 'stripe_identity', now(), now() + interval '7 days', now())"
+    ).bind(uid).execute(pool).await.unwrap();
+
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('AT Handler Store', 'box_fraise_store', '1 ATH St', 'America/Edmonton') \
+         RETURNING id"
+    ).fetch_one(pool).await.unwrap();
+
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'AT Biz', 'active') RETURNING id"
+    ).bind(loc_id).bind(uid).fetch_one(pool).await.unwrap();
+
+    let (thresh_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO presence_thresholds \
+         (user_id, business_id, event_count, days_count, threshold_met_at) \
+         VALUES ($1, $2, 3, 3, now()) RETURNING id"
+    ).bind(uid).bind(biz_id).fetch_one(pool).await.unwrap();
+
+    let (visit_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO staff_visits (location_id, staff_id, visit_type, status, scheduled_at) \
+         VALUES ($1, $2, 'combined', 'completed', now()) RETURNING id"
+    ).bind(loc_id).bind(staff_id).fetch_one(pool).await.unwrap();
+
+    let (attest_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO visit_attestations \
+         (visit_id, user_id, staff_id, presence_threshold_id, \
+          assigned_reviewer_1_id, assigned_reviewer_2_id, status) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'approved') RETURNING id"
+    ).bind(visit_id).bind(uid).bind(staff_id)
+     .bind(thresh_id).bind(r1_id).bind(r2_id)
+     .fetch_one(pool).await.unwrap();
+
+    sqlx::query("UPDATE users SET verification_status = 'attested', attested_at = now() WHERE id = $1")
+        .bind(uid).execute(pool).await.unwrap();
+
+    st_svc::issue_soultoken(pool, UserId::from(uid),
+        IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+        b"test-soultoken-hmac-key-32bytes!!", b"test-soultoken-sign-key-32bytes!!", &bus,
+    ).await.unwrap();
+
+    (uid, common::valid_token(uid))
+}
+
+#[sqlx::test]
+async fn post_issue_returns_201_with_raw_token(pool: PgPool) {
+    let (_, token) = setup_attested_user_with_soultoken_for_handler(&pool).await;
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST", "/api/attestation-tokens/issue", &token,
+            serde_json::json!({ "scope": "presence.verified" }),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+
+    assert!(body["raw_token"].as_str().is_some(), "raw_token must be in issue response");
+    assert_eq!(body["raw_token"].as_str().unwrap().len(), 64);
+    assert_eq!(body["scope"], "presence.verified");
+}
+
+#[sqlx::test]
+async fn post_verify_returns_200_for_valid_token(pool: PgPool) {
+    use box_fraise_domain::{
+        domain::attestation_tokens::{service as at_svc, types::IssueAttestationTokenRequest},
+        event_bus::EventBus, types::UserId,
+    };
+    let bus = EventBus::new();
+    let (user_id, _) = setup_attested_user_with_soultoken_for_handler(&pool).await;
+
+    let issued = at_svc::issue_token(&pool, UserId::from(user_id),
+        IssueAttestationTokenRequest {
+            scope: "presence.verified".to_owned(),
+            requesting_business_soultoken_id: None,
+            user_device_id: None,
+            presentation_latitude: None,
+            presentation_longitude: None,
+        }, &bus,
+    ).await.unwrap();
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(json_req(
+            "POST", "/api/attestation-tokens/verify",
+            serde_json::json!({ "raw_token": &issued.raw_token }),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+
+    assert_eq!(body["valid"], true);
+    assert_eq!(body["outcome"], "success");
+}
+
+#[sqlx::test]
+async fn post_verify_returns_200_for_invalid_token(pool: PgPool) {
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(json_req(
+            "POST", "/api/attestation-tokens/verify",
+            serde_json::json!({ "raw_token": "0000000000000000000000000000000000000000000000000000000000000000" }),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+
+    assert_eq!(body["valid"], false);
+    assert_eq!(body["outcome"], "not_found");
+}
+
+#[sqlx::test]
+async fn get_me_returns_200_without_raw_token(pool: PgPool) {
+    use box_fraise_domain::{
+        domain::attestation_tokens::{service as at_svc, types::IssueAttestationTokenRequest},
+        event_bus::EventBus, types::UserId,
+    };
+    let bus = EventBus::new();
+    let (user_id, user_token) = setup_attested_user_with_soultoken_for_handler(&pool).await;
+
+    let issued = at_svc::issue_token(&pool, UserId::from(user_id),
+        IssueAttestationTokenRequest {
+            scope: "presence.verified".to_owned(),
+            requesting_business_soultoken_id: None,
+            user_device_id: None,
+            presentation_latitude: None,
+            presentation_longitude: None,
+        }, &bus,
+    ).await.unwrap();
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/attestation-tokens/me", &user_token))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body_str   = std::str::from_utf8(&body_bytes).unwrap();
+
+    assert!(!body_str.contains(&issued.raw_token),
+        "raw_token value must not appear in GET /me response");
+    assert!(!body_str.contains("\"raw_token\""),
+        "field name raw_token must not appear in list response");
+}

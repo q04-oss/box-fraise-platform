@@ -11,3 +11,4 @@ pub mod identity_credentials;
 pub mod dorotka;
 pub mod staff;
 pub mod users;
+pub mod attestation_tokens;

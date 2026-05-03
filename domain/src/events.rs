@@ -186,6 +186,18 @@ pub enum DomainEvent {
         check_type: String,
     },
 
+    // ── Attestation tokens ───────────────────────────────────────────────────
+    /// A short-lived attestation token was issued to a user.
+    AttestationTokenIssued {
+        user_id:  i32,
+        token_id: i32,
+    },
+    /// A third party successfully verified an attestation token.
+    AttestationTokenVerified {
+        user_id:  i32,
+        token_id: i32,
+    },
+
     // ── Support bookings ──────────────────────────────────────────────────────
     /// A user booked a support slot at a staff visit.
     SupportBookingCreated {

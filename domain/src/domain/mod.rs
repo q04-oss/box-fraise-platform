@@ -24,3 +24,5 @@ pub mod staff;
 pub mod users;
 /// Support bookings — in-person support interactions and gift box fulfilment (BFIP Section 10).
 pub mod support;
+/// Attestation tokens — short-lived scoped tokens for third-party verification (BFIP Section 11).
+pub mod attestation_tokens;

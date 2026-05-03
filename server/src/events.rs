@@ -335,6 +335,30 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
             .await;
         }
 
+        DomainEvent::AttestationTokenIssued { user_id, token_id } => {
+            tracing::info!(user_id, token_id, "attestation_token.issued");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "attestation_token.issued",
+                serde_json::json!({ "token_id": token_id }),
+            )
+            .await;
+        }
+
+        DomainEvent::AttestationTokenVerified { user_id, token_id } => {
+            tracing::info!(user_id, token_id, "attestation_token.verified");
+            audit::write(
+                pool,
+                Some(user_id),
+                None,
+                "attestation_token.verified",
+                serde_json::json!({ "token_id": token_id }),
+            )
+            .await;
+        }
+
         DomainEvent::SupportBookingCreated { booking_id, user_id, visit_id } => {
             tracing::info!(booking_id, user_id, visit_id, "support.booking_created");
             audit::write(

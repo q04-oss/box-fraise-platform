@@ -283,3 +283,55 @@ Full support booking lifecycle: `POST /api/support/bookings` creates a slot at a
 
 ### Summary
 Support domain (Section 10) moved the grade to B (7.61 weighted). 13 of 19 BFIP sections now fully implemented, 277 tests passing. The platform loop from verification to purchase to in-person support is complete. The remaining highest-leverage work is Ed25519 soultoken PKI upgrade and Dorotka soultoken gating.
+
+---
+## [2026-05-03 late-3] Scorecard — post attestation_tokens (BFIP Section 11)
+
+| Dimension | Score | Weight | Weighted | Δ |
+|-----------|-------|--------|---------|---|
+| Security | 8.7/10 | 1.5x | 13.05 | +0.4 |
+| Architecture | 8.1/10 | 1.0x | 8.1 | +0.1 |
+| Engineer Usability | 8.4/10 | 1.0x | 8.4 | +0.2 |
+| Protocol Conformance | 7.8/10 | 1.5x | 11.7 | +0.4 |
+| Operational Readiness | 6.5/10 | 1.0x | 6.5 | — |
+| Product Completeness | 7.5/10 | 1.0x | 7.5 | +0.5 |
+| **Overall (straight)** | **7.83/10** | | | **+0.26** |
+| **Overall (weighted)** | **7.90/10** | | | **+0.29** |
+| **Grade** | **B+** | | | |
+
+### What changed
+
+**attestation_tokens** (BFIP Section 11) — 296 tests (19 added), 0 failures.
+
+**Cryptographic primitives** — `generate_raw_token()` uses `OsRng` to produce 32 cryptographically random bytes (64-char hex). `hash_token()` applies SHA-256 via the `sha2` crate. Raw token returned ONCE on issuance; only hash stored. Verified adversarially by `issue_token_raw_token_not_stored_in_db` (scans every column for the raw value) and `adversary_cannot_retrieve_raw_token_after_issuance` (serializes GET /me response, asserts raw_token absent).
+
+**Single-use enforcement** — `verified_at` set on first successful verification; second attempt returns `already_verified`. Logged to `third_party_verification_attempts` every time.
+
+**Always-200 verify endpoint** — `/api/attestation-tokens/verify` returns 200 regardless of outcome. `valid` field signals result. Never leaks token existence via HTTP status code.
+
+**Rate limiting** — `get_recent_attempts_by_business` counts attempts from a business soultoken in last 60 seconds; >10 returns `InvalidInput`.
+
+**Routes** — `POST /issue` (201 with one-time raw_token), `POST /verify` (200, no auth, always returns), `GET /me` (200, no raw_token in response), `POST /:id/revoke` (200).
+
+### Justifications
+
+**Security 8.7:** OsRng-generated 32-byte tokens, SHA-256 hash stored (plaintext never persisted), adversarial tests cover enumeration-via-timing, hash-instead-of-token attacks, and cross-user revocation. Stops at 8.7 because App Attest still deferred and soultoken signing uses HMAC-SHA256 (not Ed25519).
+
+**Architecture 8.1:** Attestation tokens follows routes → service → repository strictly. No cross-domain layer violations. Crypto primitives (generate/hash) are private module-level functions — not re-exported from domain. Stops at 8.1 because dead `KeyId`/`MessageId` exports in `types/mod.rs` remain.
+
+**Engineer Usability 8.4:** 296 tests total. 14 adversarial tests across two domains. `full_attestation_token_lifecycle` proves: issue → hash stored (not raw) → verify success → verify again (already_verified) → both attempts logged → audit events written. Stops at 8.4 because OpenAPI spec still hand-built.
+
+**Protocol Conformance 7.8:** Section 11 (attestation tokens) now fully implemented. Platform covers: 1, 3, 3b, 4, 5, 6, 7, 7b, 8, 9, 10, 11, 12.3 (14 of 19 BFIP sections). Stops at 7.8 because Sections 12.1–12.2 (business commerce reporting) and 15 (push notifications) are absent.
+
+**Product Completeness 7.5:** A verified user can now issue, present, and have verified an attestation token. Third-party businesses can verify user identity without receiving any PII — they only learn `valid: true/false` and `scope: presence.verified`. The full privacy-preserving verification flow is live.
+
+### Top 6 improvements
+1. **Ed25519 PKI for soultoken signing** → Security +0.4, **+0.09 weighted**
+2. **Dorotka soultoken gating** → Protocol +0.2, Product +0.2, **+0.09 weighted**
+3. **CSP nonce middleware** (deferred security debt) → Security +0.2, **+0.04 weighted**
+4. **OpenAPI proc-macro annotations** (utoipa) → Usability +0.3, **+0.04 overall**
+5. **Retry-After on 429** in `rate_limit.rs` → Operational +0.2, **+0.03 overall**
+6. **Business commerce reporting** (Sections 12.1–12.2) → Protocol +0.2, Product +0.3, **+0.10 weighted**
+
+### Summary
+Attestation tokens (Section 11) moved the grade to B+ (7.90 weighted). 14 of 19 BFIP sections now implemented, 296 tests passing. The platform now supports a complete privacy-preserving identity verification loop: user proves presence → receives soultoken → issues short-lived scoped token → third party verifies without PII. The remaining work is Ed25519 PKI, Dorotka gating, and business reporting.
