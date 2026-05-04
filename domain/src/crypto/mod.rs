@@ -29,6 +29,10 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::error::{DomainError, AppResult};
 
+/// Ed25519 key pair and signature primitives (BFIP cryptography.md Section 4).
+pub mod ed25519;
+pub use ed25519::{Ed25519KeyPair, verify_ed25519, verify_aggregated_ed25519, Ed25519Error};
+
 /// Encrypts `plaintext` with AES-256-GCM using the provided hex key.
 /// Returns a hex string suitable for DB storage.
 pub fn encrypt(key_hex: &str, plaintext: &str) -> AppResult<String> {
