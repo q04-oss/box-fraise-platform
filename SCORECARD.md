@@ -383,3 +383,65 @@ Attestation tokens (Section 11) moved the grade to B+ (7.90 weighted). 14 of 19 
 
 ### Summary
 verification_events (Section 17) reached the 8.0 straight score threshold for the first time (8.00/8.07 weighted). 15 of 19 BFIP sections implemented, 309 tests passing. Users can now exercise their right of access to see their complete verification journey. The platform's compliance obligations (BFIP Section 17, GDPR Article 15) are met. The remaining high-leverage work is Ed25519 soultoken PKI and business reporting (12.1–12.2).
+
+---
+## [2026-05-03 late-5] Scorecard — post platform_configuration (BFIP Section 15)
+
+| Dimension | Score | Weight | Weighted | Δ |
+|-----------|-------|--------|---------|---|
+| Security | 8.9/10 | 1.5x | 13.35 | +0.1 |
+| Architecture | 8.3/10 | 1.0x | 8.3 | +0.1 |
+| Engineer Usability | 8.6/10 | 1.0x | 8.6 | +0.1 |
+| Protocol Conformance | 8.5/10 | 1.5x | 12.75 | +0.3 |
+| Operational Readiness | 7.0/10 | 1.0x | 7.0 | +0.5 |
+| Product Completeness | 8.0/10 | 1.0x | 8.0 | +0.2 |
+| **Overall (straight)** | **8.22/10** | | | **+0.22** |
+| **Overall (weighted)** | **8.29/10** | | | **+0.22** |
+| **Grade** | **B+** | | | |
+
+### What changed
+
+**platform_configuration** (BFIP Section 15) — 325 tests (16 added), 0 failures.
+
+**Runtime-configurable parameters** — 14 BFIP Section 15 defaults seeded at startup via `ON CONFLICT (key) DO NOTHING`. Custom values set by admins survive re-deployment. `PATCH /api/admin/configuration/:key` validates value against `value_type` (integer/boolean/interval/text) before writing.
+
+**Append-only history** — every change recorded in `platform_configuration_history` with previous value preserved. DB trigger prevents modification.
+
+**Server startup integration** — `initialize_defaults` called in `lib.rs` after DB connect, before bind. Errors logged as warnings (non-fatal — server starts anyway). The platform can now self-configure on first deployment.
+
+**Type validation as injection gate** — integer/interval types reject non-numeric strings at the service layer before any DB interaction. `adversary_cannot_inject_invalid_type_values` proves SQL injection via value field is blocked by type validation.
+
+**Operational Readiness +0.5** — this domain is the largest operational readiness improvement in the project: protocol parameters (cooling period, presence threshold, attestation window, gift limits) can now be adjusted without code deployment, which is the primary operational pain point for a live BFIP platform.
+
+### Justifications
+
+**Security 8.9:** Type validation rejects all non-conforming values at the service layer before DB interaction. Configuration history is append-only. Admin gate enforced. Stops at 8.9 because Ed25519 PKI not yet implemented.
+
+**Architecture 8.3:** Clean routes → service → repository. `seed_defaults` uses a constants array in `types.rs` — no magic strings scattered in service code. `initialize_defaults` is a thin wrapper making startup integration obvious.
+
+**Engineer Usability 8.6:** 325 tests, 16 added. `full_configuration_lifecycle` proves the complete flow: initialize → view → update → history preserved → re-seed leaves custom value intact. SQL injection adversarial test covers the primary threat vector for a configuration endpoint.
+
+**Protocol Conformance 8.5:** Section 15 now implemented. Platform covers: 1, 3, 3b, 4, 5, 6, 7, 7b, 8, 9, 10, 11, 12.3, 15, 17 (16 of 19 BFIP sections). Remaining: 12.1–12.2 (business reporting) and 14 (push notifications integration).
+
+**Operational Readiness 7.0:** Protocol parameters now adjustable without code deployment. Server initializes defaults on startup. Audit trail for all changes. Stops at 7.0 because no metrics/Prometheus, no Retry-After on 429s.
+
+**Product Completeness 8.0:** Platform is now self-configuring. Operators can tune cooling period, presence thresholds, token expiry, and gift limits via admin API without touching code. The full BFIP Section 15 parameter surface is covered.
+
+### Summary
+16 of 19 BFIP sections now implemented. 325 tests passing. Weighted score 8.29 — B+. The platform is now functionally complete for the core BFIP identity verification loop with all tuneable protocol parameters configurable at runtime. The remaining three sections (12.1, 12.2, 14) cover business-side commerce reporting and push notifications — important for production launch but not blocking the core protocol.
+
+### Complete platform summary
+The box-fraise-platform backend now implements:
+- **Auth** (§1): Apple Sign In, magic link, JWT with rotation
+- **Identity** (§3): Stripe Identity verification + cooling period
+- **Background checks** (§3b/7b): Sanctions, identity fraud, criminal, cleared-status
+- **Presence** (§5): Beacon dwell + NFC tap threshold tracking
+- **Attestation** (§6): Two-reviewer co-sign with collusion prevention
+- **Soultokens** (§7): HMAC-SHA256 display code, payload signing, lifecycle
+- **Orders** (§9): Strawberry purchase + NFC box collection, clone detection
+- **Support** (§10): In-person support bookings, platform gift coverage
+- **Attestation tokens** (§11): One-time scoped tokens for third-party verification
+- **Staff** (§12.3): Quality assessments, beacon suspension
+- **Platform config** (§15): Runtime-configurable protocol parameters
+- **User audit trail** (§17): GDPR Article 15 right of access, compliance log
+- **Businesses, beacons, users, presence, Dorotka**: Full domain coverage

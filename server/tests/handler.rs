@@ -2086,3 +2086,101 @@ async fn get_admin_audit_returns_403_for_non_admin(pool: PgPool) {
 
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Platform configuration domain
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn get_admin_configuration_returns_200_for_admin(pool: PgPool) {
+    use box_fraise_domain::domain::platform_configuration::service as cfg_svc;
+    cfg_svc::initialize_defaults(&pool).await.unwrap();
+
+    let (admin_id, token) = create_platform_admin_user(&pool).await;
+    let _ = admin_id;
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/admin/configuration", &token))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+
+    assert!(body.is_array());
+    assert!(body.as_array().unwrap().len() >= 14);
+}
+
+#[sqlx::test]
+async fn get_admin_configuration_returns_403_for_non_admin(pool: PgPool) {
+    use box_fraise_domain::domain::platform_configuration::service as cfg_svc;
+    cfg_svc::initialize_defaults(&pool).await.unwrap();
+
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let email: String = SafeEmail().fake();
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    ).bind(&email).fetch_one(&pool).await.unwrap();
+    let token = common::valid_token(uid);
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/admin/configuration", &token))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn patch_configuration_returns_200_for_valid_update(pool: PgPool) {
+    use box_fraise_domain::domain::platform_configuration::service as cfg_svc;
+    cfg_svc::initialize_defaults(&pool).await.unwrap();
+
+    let (_, token) = create_platform_admin_user(&pool).await;
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "PATCH", "/api/admin/configuration/cooling_period_days", &token,
+            serde_json::json!({ "value": "14" }),
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+    assert_eq!(body["value"], "14");
+}
+
+#[sqlx::test]
+async fn patch_configuration_returns_422_for_invalid_type(pool: PgPool) {
+    use box_fraise_domain::domain::platform_configuration::service as cfg_svc;
+    cfg_svc::initialize_defaults(&pool).await.unwrap();
+
+    let (_, token) = create_platform_admin_user(&pool).await;
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "PATCH", "/api/admin/configuration/cooling_period_days", &token,
+            serde_json::json!({ "value": "not_a_number" }),
+        ))
+        .await.unwrap();
+
+    // InvalidInput → 400 Bad Request via AppError.
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+

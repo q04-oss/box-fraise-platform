@@ -2077,3 +2077,72 @@ async fn full_audit_trail_completeness(pool: PgPool) {
     // No token_hash field name.
     assert!(!json.contains("token_hash"), "token_hash must not appear in audit trail");
 }
+
+// ── full_configuration_lifecycle ──────────────────────────────────────────────
+
+#[sqlx::test]
+async fn full_configuration_lifecycle(pool: PgPool) {
+    use box_fraise_domain::{
+        domain::platform_configuration::{
+            service as cfg_svc,
+            types::UpdateConfigurationRequest,
+        },
+        types::UserId,
+    };
+
+    // ── Setup: platform admin ─────────────────────────────────────────────────
+
+    let (admin_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, is_platform_admin) \
+         VALUES ('admin@cfg-int.test', true, true) RETURNING id"
+    ).fetch_one(&pool).await.unwrap();
+    let admin = UserId::from(admin_id);
+
+    // ── Step 1: Initialize defaults ───────────────────────────────────────────
+
+    cfg_svc::initialize_defaults(&pool).await.expect("initialize_defaults must succeed");
+
+    let all = cfg_svc::get_all_configuration(&pool, admin).await.unwrap();
+    assert_eq!(all.len(), 14, "must have all 14 default keys");
+
+    let cooling = all.iter().find(|c| c.key == "cooling_period_days").unwrap();
+    assert_eq!(cooling.value, "7", "default must be 7");
+
+    // ── Step 2: Admin updates cooling_period_days ─────────────────────────────
+
+    let updated = cfg_svc::update_configuration(
+        &pool, "cooling_period_days", admin,
+        UpdateConfigurationRequest { value: "14".to_string() },
+    ).await.expect("update must succeed");
+
+    assert_eq!(updated.value, "14", "value must be updated");
+
+    // ── Step 3: History has previous value preserved ──────────────────────────
+
+    let history = cfg_svc::get_configuration_history(&pool, "cooling_period_days", admin)
+        .await.unwrap();
+
+    assert_eq!(history.len(), 1, "one history record");
+    assert_eq!(history[0].previous_value, "7", "previous value must be preserved");
+    assert_eq!(history[0].new_value, "14");
+
+    // ── Step 4: Audit events written ─────────────────────────────────────────
+
+    let ae_view: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE event_kind = 'config.viewed'"
+    ).fetch_one(&pool).await.unwrap();
+    assert!(ae_view >= 1, "config.viewed audit event must be written");
+
+    let ae_update: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE event_kind = 'config.updated'"
+    ).fetch_one(&pool).await.unwrap();
+    assert!(ae_update >= 1, "config.updated audit event must be written");
+
+    // ── Step 5: Re-initialize — ON CONFLICT DO NOTHING preserves custom value ─
+
+    cfg_svc::initialize_defaults(&pool).await.expect("second initialize must succeed");
+
+    let after_reseed = cfg_svc::get_configuration(&pool, "cooling_period_days").await.unwrap();
+    assert_eq!(after_reseed.value, "14",
+        "re-seeding must not overwrite custom value — ON CONFLICT DO NOTHING");
+}

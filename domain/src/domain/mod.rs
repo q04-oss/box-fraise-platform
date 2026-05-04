@@ -28,3 +28,5 @@ pub mod support;
 pub mod attestation_tokens;
 /// Verification events and BFIP Section 17 user audit trail (right of access).
 pub mod verification_events;
+/// Platform configuration — runtime-configurable BFIP protocol parameters (BFIP Section 15).
+pub mod platform_configuration;

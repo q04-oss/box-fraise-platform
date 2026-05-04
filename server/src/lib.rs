@@ -45,6 +45,13 @@ pub async fn run() -> anyhow::Result<()> {
     let port = cfg.port;
     let pool = db::connect(cfg.database_url.expose_secret()).await?;
 
+    // Seed BFIP Section 15 defaults — ON CONFLICT DO NOTHING so custom values are preserved.
+    if let Err(e) = box_fraise_domain::domain::platform_configuration::service::initialize_defaults(&pool).await {
+        tracing::warn!(error = ?e, "platform configuration seed failed — defaults may be missing");
+    } else {
+        tracing::info!("Platform configuration defaults initialized");
+    }
+
     let state  = app::AppState::new(pool, cfg);
 
     // Subscribe before building the router so no early events are missed.
