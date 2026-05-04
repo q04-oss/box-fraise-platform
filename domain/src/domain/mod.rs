@@ -26,3 +26,5 @@ pub mod users;
 pub mod support;
 /// Attestation tokens — short-lived scoped tokens for third-party verification (BFIP Section 11).
 pub mod attestation_tokens;
+/// Verification events and BFIP Section 17 user audit trail (right of access).
+pub mod verification_events;

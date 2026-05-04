@@ -2012,3 +2012,77 @@ async fn get_me_returns_200_without_raw_token(pool: PgPool) {
     assert!(!body_str.contains("\"raw_token\""),
         "field name raw_token must not appear in list response");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Verification events domain
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn get_audit_trail_returns_200(pool: PgPool) {
+    let (user_id, token) = setup_attested_user_with_soultoken_for_handler(&pool).await;
+    let _ = user_id;
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/audit/trail", &token))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+
+    assert!(body["verification_journey"].is_array());
+    assert!(body["soultoken_history"].is_array());
+    assert!(body["presence_history"].is_array());
+    assert!(body["attestation_history"].is_array());
+    assert!(body["token_history"].is_array());
+}
+
+#[sqlx::test]
+async fn get_audit_journey_returns_200(pool: PgPool) {
+    let (_, token) = setup_attested_user_with_soultoken_for_handler(&pool).await;
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/audit/journey", &token))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+
+    assert!(body.is_array(), "journey endpoint must return a JSON array");
+}
+
+#[sqlx::test]
+async fn get_admin_audit_returns_403_for_non_admin(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let email: String = SafeEmail().fake();
+    let (non_admin_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    ).bind(&email).fetch_one(&pool).await.unwrap();
+    let non_admin_token = common::valid_token(non_admin_id);
+
+    let target_id = non_admin_id;
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req(
+            "GET",
+            &format!("/api/admin/audit/{}", target_id),
+            &non_admin_token,
+        ))
+        .await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}

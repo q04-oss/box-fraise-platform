@@ -335,3 +335,51 @@ Support domain (Section 10) moved the grade to B (7.61 weighted). 13 of 19 BFIP 
 
 ### Summary
 Attestation tokens (Section 11) moved the grade to B+ (7.90 weighted). 14 of 19 BFIP sections now implemented, 296 tests passing. The platform now supports a complete privacy-preserving identity verification loop: user proves presence → receives soultoken → issues short-lived scoped token → third party verifies without PII. The remaining work is Ed25519 PKI, Dorotka gating, and business reporting.
+
+---
+## [2026-05-03 late-4] Scorecard — post verification_events (BFIP Section 17)
+
+| Dimension | Score | Weight | Weighted | Δ |
+|-----------|-------|--------|---------|---|
+| Security | 8.8/10 | 1.5x | 13.20 | +0.1 |
+| Architecture | 8.2/10 | 1.0x | 8.2 | +0.1 |
+| Engineer Usability | 8.5/10 | 1.0x | 8.5 | +0.1 |
+| Protocol Conformance | 8.2/10 | 1.5x | 12.3 | +0.4 |
+| Operational Readiness | 6.5/10 | 1.0x | 6.5 | — |
+| Product Completeness | 7.8/10 | 1.0x | 7.8 | +0.3 |
+| **Overall (straight)** | **8.00/10** | | | **+0.17** |
+| **Overall (weighted)** | **8.07/10** | | | **+0.17** |
+| **Grade** | **B+** | | | |
+
+### What changed
+
+**verification_events** (BFIP Section 17) — 309 tests (13 added), 0 failures.
+
+**BFIP Section 17 right of access** — `GET /api/audit/trail` returns the authenticated user's complete history: verification journey (chronological), soultoken history, presence events, attestations, and attestation tokens. `GET /api/audit/journey` is the lightweight journey-only view. `GET /api/admin/audit/:user_id` requires `is_platform_admin`.
+
+**Sensitive field exclusions** — `uuid` never appears in soultoken summaries; `token_hash` never appears in token summaries; `actor_id` and `reference_id` stripped from event responses. Verified adversarially: uuid regex scan, token_hash scan, cross-user isolation.
+
+**Compliance trail** — every access request recorded in append-only `audit_request_log` (user_id, requested_by, delivery_method, requested_at). Satisfies PIPEDA/GDPR Article 15 right-of-access audit obligations.
+
+### Justifications
+
+**Security 8.8:** Audit trail systematically strips all internal identifiers (uuid, token_hash, actor_id, reference_id). Cross-user isolation tested adversarially. Admin access gated on `is_platform_admin`. Compliance log is append-only (DB trigger). Stops at 8.8 because App Attest still deferred.
+
+**Architecture 8.2:** Verification events follows routes → service → repository strictly. Sensitive field exclusion is enforced at the mapping layer (`to_event_response`) not at the query layer — correct for defense in depth. Stops at 8.2 because `types/mod.rs` dead exports remain.
+
+**Engineer Usability 8.5:** 309 tests. `full_audit_trail_completeness` proves chronological order, all sections populated, audit_request_log written, sensitive fields absent. Adversarial tests scan JSON string for uuid regex and stored token_hash value.
+
+**Protocol Conformance 8.2:** Section 17 (right of access) now implemented. Platform covers: 1, 3, 3b, 4, 5, 6, 7, 7b, 8, 9, 10, 11, 12.3, 17 (15 of 19 BFIP sections). Stops at 8.2 because Sections 12.1–12.2 (business commerce reporting) and 15 (push notifications) are absent.
+
+**Product Completeness 7.8:** Users can now inspect their complete verification history in-app. The compliance-required right-of-access flow is live. Platform now exposes the full verified-identity story to its users.
+
+### Top 6 improvements
+1. **Ed25519 PKI for soultoken signing** → Security +0.4, **+0.09 weighted**
+2. **Business commerce reporting** (Sections 12.1–12.2) → Protocol +0.3, Product +0.3, **+0.15 weighted**
+3. **Dorotka soultoken gating** → Protocol +0.2, Product +0.2, **+0.09 weighted**
+4. **CSP nonce middleware** (deferred security debt) → Security +0.2, **+0.04 weighted**
+5. **OpenAPI proc-macro annotations** → Usability +0.3, **+0.04 overall**
+6. **Retry-After on 429** → Operational +0.2, **+0.03 overall**
+
+### Summary
+verification_events (Section 17) reached the 8.0 straight score threshold for the first time (8.00/8.07 weighted). 15 of 19 BFIP sections implemented, 309 tests passing. Users can now exercise their right of access to see their complete verification journey. The platform's compliance obligations (BFIP Section 17, GDPR Article 15) are met. The remaining high-leverage work is Ed25519 soultoken PKI and business reporting (12.1–12.2).

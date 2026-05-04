@@ -107,6 +107,7 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::dorotka::routes::router())
         .merge(crate::domain::support::routes::router())
         .merge(crate::domain::attestation_tokens::routes::router())
+        .merge(crate::domain::verification_events::routes::router())
         // ── Security middleware (innermost — runs first) ───────────────────────
         .layer(middleware::from_fn_with_state(
             state.clone(),

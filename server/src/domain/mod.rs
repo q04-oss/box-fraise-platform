@@ -12,3 +12,4 @@ pub mod dorotka;
 pub mod staff;
 pub mod users;
 pub mod attestation_tokens;
+pub mod verification_events;

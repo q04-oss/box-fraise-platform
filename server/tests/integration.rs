@@ -1923,3 +1923,157 @@ async fn full_attestation_token_lifecycle(pool: PgPool) {
     assert!(ae_kinds.iter().any(|k| k == "attestation_token.verified"),
         "attestation_token.verified audit event must be written");
 }
+
+// ── full_audit_trail_completeness ─────────────────────────────────────────────
+
+#[sqlx::test]
+async fn full_audit_trail_completeness(pool: PgPool) {
+    use box_fraise_domain::{
+        domain::{
+            soultokens::{service as st_svc, types::IssueSoultokenRequest},
+            verification_events::service as ve_svc,
+        },
+        types::UserId,
+    };
+
+    let bus = EventBus::new();
+
+    // ── Setup: attested user with soultoken ───────────────────────────────────
+
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('audit@int.test', true, 'presence_confirmed') RETURNING id"
+    ).fetch_one(&pool).await.unwrap();
+    let user = UserId::from(uid);
+
+    let (staff_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ('staff@audit-int.test', true) RETURNING id"
+    ).fetch_one(&pool).await.unwrap();
+    let (r1_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ('r1@audit-int.test', true) RETURNING id"
+    ).fetch_one(&pool).await.unwrap();
+    let (r2_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ('r2@audit-int.test', true) RETURNING id"
+    ).fetch_one(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO identity_credentials \
+         (user_id, credential_type, verified_at, cooling_ends_at, cooling_completed_at) \
+         VALUES ($1, 'stripe_identity', now(), now() + interval '7 days', now())"
+    ).bind(uid).execute(&pool).await.unwrap();
+
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('Audit Integration', 'box_fraise_store', '1 Audit', 'America/Edmonton') RETURNING id"
+    ).fetch_one(&pool).await.unwrap();
+
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'Audit Biz', 'active') RETURNING id"
+    ).bind(loc_id).bind(uid).fetch_one(&pool).await.unwrap();
+
+    let (thresh_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO presence_thresholds \
+         (user_id, business_id, event_count, days_count, threshold_met_at) \
+         VALUES ($1, $2, 3, 3, now()) RETURNING id"
+    ).bind(uid).bind(biz_id).fetch_one(&pool).await.unwrap();
+
+    let (visit_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO staff_visits (location_id, staff_id, visit_type, status, scheduled_at) \
+         VALUES ($1, $2, 'combined', 'completed', now()) RETURNING id"
+    ).bind(loc_id).bind(staff_id).fetch_one(&pool).await.unwrap();
+
+    let (attest_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO visit_attestations \
+         (visit_id, user_id, staff_id, presence_threshold_id, \
+          assigned_reviewer_1_id, assigned_reviewer_2_id, status) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'approved') RETURNING id"
+    ).bind(visit_id).bind(uid).bind(staff_id)
+     .bind(thresh_id).bind(r1_id).bind(r2_id)
+     .fetch_one(&pool).await.unwrap();
+
+    // Insert presence event.
+    sqlx::query(
+        "INSERT INTO presence_events \
+         (user_id, business_id, event_type, is_qualifying, calendar_date, occurred_at) \
+         VALUES ($1, $2, 'beacon_dwell', true, CURRENT_DATE, now())"
+    ).bind(uid).bind(biz_id).execute(&pool).await.unwrap();
+
+    // Insert verification events for the journey.
+    sqlx::query(
+        "INSERT INTO verification_events (user_id, event_type, from_status, to_status) \
+         VALUES ($1, 'identity_confirmed', 'registered', 'identity_confirmed'), \
+                ($1, 'presence_threshold_met', 'identity_confirmed', 'presence_confirmed'), \
+                ($1, 'attestation_approved', 'presence_confirmed', 'attested'), \
+                ($1, 'soultoken_issued', 'attested', 'attested')"
+    ).bind(uid).execute(&pool).await.unwrap();
+
+    sqlx::query(
+        "UPDATE users SET verification_status = 'attested', attested_at = now() WHERE id = $1"
+    ).bind(uid).execute(&pool).await.unwrap();
+
+    st_svc::issue_soultoken(&pool, user,
+        IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+        b"test-soultoken-hmac-key-32bytes!!", b"test-soultoken-sign-key-32bytes!!", &bus,
+    ).await.expect("issue_soultoken must succeed");
+
+    // ── Request audit trail ───────────────────────────────────────────────────
+
+    let trail = ve_svc::get_my_audit_trail(&pool, user)
+        .await.expect("get_my_audit_trail must succeed");
+
+    // ── Assert all sections populated ─────────────────────────────────────────
+
+    assert!(!trail.verification_journey.is_empty(), "journey must be populated");
+    assert!(!trail.soultoken_history.is_empty(), "soultoken_history must be populated");
+    assert!(!trail.presence_history.is_empty(), "presence_history must be populated");
+    assert!(!trail.attestation_history.is_empty(), "attestation_history must be populated");
+
+    // ── Assert chronological order ────────────────────────────────────────────
+
+    let journey = &trail.verification_journey;
+    for w in journey.windows(2) {
+        assert!(w[0].created_at <= w[1].created_at, "journey must be chronological");
+    }
+
+    // ── Assert expected event types present ───────────────────────────────────
+
+    let event_types: Vec<&str> = journey.iter().map(|e| e.event_type.as_str()).collect();
+    for expected in &["identity_confirmed", "presence_threshold_met", "attestation_approved"] {
+        assert!(event_types.contains(expected),
+            "event '{}' must be in journey; got: {:?}", expected, event_types);
+    }
+
+    // ── Assert audit_request_log has one record ───────────────────────────────
+
+    let log_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_request_log WHERE user_id = $1 AND requested_by = $1"
+    ).bind(uid).fetch_one(&pool).await.unwrap();
+    assert_eq!(log_count, 1, "exactly one audit_request_log record must be written");
+
+    // ── Assert audit_event written ─────────────────────────────────────────────
+
+    let ae_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE event_kind = 'audit.trail_requested'"
+    ).fetch_one(&pool).await.unwrap();
+    assert!(ae_count >= 1, "audit.trail_requested audit event must be written");
+
+    // ── Assert no sensitive fields in response ────────────────────────────────
+
+    let json = serde_json::to_string(&trail).unwrap();
+
+    // No uuid.
+    let uuid_re = regex::Regex::new(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    ).unwrap();
+    assert!(!uuid_re.is_match(&json), "uuid must not appear in audit trail");
+
+    // No actor_id field name.
+    assert!(!json.contains("actor_id"), "actor_id must not appear in audit trail");
+
+    // No reference_id field name.
+    assert!(!json.contains("reference_id"), "reference_id must not appear in audit trail");
+
+    // No token_hash field name.
+    assert!(!json.contains("token_hash"), "token_hash must not appear in audit trail");
+}
