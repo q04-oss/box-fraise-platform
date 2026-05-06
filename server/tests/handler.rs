@@ -1813,7 +1813,10 @@ async fn get_support_bookings_me_returns_200(pool: PgPool) {
 
 /// Set up an attested user with an active soultoken.
 /// Returns (user_id, user_token).
-async fn setup_attested_user_with_soultoken_for_handler(pool: &PgPool) -> (i32, String) {
+async fn setup_attested_user_with_soultoken_for_handler(
+    pool: &PgPool,
+    user_email: &str,
+) -> (i32, String) {
     use box_fraise_domain::{
         domain::soultokens::{service as st_svc, types::IssueSoultokenRequest},
         event_bus::EventBus,
@@ -1824,11 +1827,10 @@ async fn setup_attested_user_with_soultoken_for_handler(pool: &PgPool) -> (i32, 
     let bus = EventBus::new();
 
     // Use direct SQL inserts — same approach as soultokens/service.rs tests.
-    let user_email: String = SafeEmail().fake();
     let (uid,): (i32,) = sqlx::query_as(
         "INSERT INTO users (email, email_verified, verification_status) \
          VALUES ($1, true, 'presence_confirmed') RETURNING id"
-    ).bind(&user_email).fetch_one(pool).await.unwrap();
+    ).bind(user_email).fetch_one(pool).await.unwrap();
 
     let s_email: String = SafeEmail().fake();
     let r1_email: String = SafeEmail().fake();
@@ -1893,7 +1895,9 @@ async fn setup_attested_user_with_soultoken_for_handler(pool: &PgPool) -> (i32, 
 
 #[sqlx::test]
 async fn post_issue_returns_201_with_raw_token(pool: PgPool) {
-    let (_, token) = setup_attested_user_with_soultoken_for_handler(&pool).await;
+    let (_, token) = setup_attested_user_with_soultoken_for_handler(
+        &pool, "attestation_token_test_user@example.com",
+    ).await;
 
     let state = common::build_state(pool, None);
     let app   = box_fraise_server::app::build(state);
@@ -1922,7 +1926,9 @@ async fn post_verify_returns_200_for_valid_token(pool: PgPool) {
         event_bus::EventBus, types::UserId,
     };
     let bus = EventBus::new();
-    let (user_id, _) = setup_attested_user_with_soultoken_for_handler(&pool).await;
+    let (user_id, _) = setup_attested_user_with_soultoken_for_handler(
+        &pool, "attestation_token_verify_valid_user@example.com",
+    ).await;
 
     let issued = at_svc::issue_token(&pool, UserId::from(user_id),
         IssueAttestationTokenRequest {
@@ -1983,7 +1989,9 @@ async fn get_me_returns_200_without_raw_token(pool: PgPool) {
         event_bus::EventBus, types::UserId,
     };
     let bus = EventBus::new();
-    let (user_id, user_token) = setup_attested_user_with_soultoken_for_handler(&pool).await;
+    let (user_id, user_token) = setup_attested_user_with_soultoken_for_handler(
+        &pool, "attestation_token_get_me_user@example.com",
+    ).await;
 
     let issued = at_svc::issue_token(&pool, UserId::from(user_id),
         IssueAttestationTokenRequest {
@@ -2019,7 +2027,9 @@ async fn get_me_returns_200_without_raw_token(pool: PgPool) {
 
 #[sqlx::test]
 async fn get_audit_trail_returns_200(pool: PgPool) {
-    let (user_id, token) = setup_attested_user_with_soultoken_for_handler(&pool).await;
+    let (user_id, token) = setup_attested_user_with_soultoken_for_handler(
+        &pool, "audit_trail_test_user@example.com",
+    ).await;
     let _ = user_id;
 
     let state = common::build_state(pool, None);
@@ -2044,7 +2054,9 @@ async fn get_audit_trail_returns_200(pool: PgPool) {
 
 #[sqlx::test]
 async fn get_audit_journey_returns_200(pool: PgPool) {
-    let (_, token) = setup_attested_user_with_soultoken_for_handler(&pool).await;
+    let (_, token) = setup_attested_user_with_soultoken_for_handler(
+        &pool, "audit_journey_test_user@example.com",
+    ).await;
 
     let state = common::build_state(pool, None);
     let app   = box_fraise_server::app::build(state);
