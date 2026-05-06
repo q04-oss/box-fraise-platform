@@ -5,6 +5,7 @@ use axum::{
     Json, Router,
 };
 use secrecy::ExposeSecret;
+use serde_json::json;
 
 use crate::{
     app::AppState,
@@ -22,6 +23,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/soultokens/renew",        post(renew))
         .route("/api/soultokens/{id}/revoke",  post(revoke))
         .route("/api/soultokens/{id}/surrender", post(surrender))
+        // Public — no auth — soultoken trust registry (Hardening Section 1b).
+        .route("/api/trust-registry/public-key", get(trust_registry_public_key))
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -35,10 +38,9 @@ async fn issue(
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<IssueSoultokenRequest>,
 ) -> AppResult<(StatusCode, Json<SoultokenResponse>)> {
-    let hmac_key    = state.cfg.soultoken_hmac_key.expose_secret().as_bytes().to_vec();
-    let signing_key = state.cfg.soultoken_signing_key.expose_secret().as_bytes().to_vec();
+    let hmac_key = state.cfg.soultoken_hmac_key.expose_secret().as_bytes().to_vec();
     let resp = service::issue_soultoken(
-        &state.db, user_id, body, &hmac_key, &signing_key, &state.event_bus,
+        &state.db, user_id, body, &hmac_key, &state.ed25519_key_pair, &state.event_bus,
     ).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -63,8 +65,26 @@ async fn renew(
     AppJson(body):        AppJson<RenewSoultokenRequest>,
 ) -> AppResult<Json<SoultokenRenewalResponse>> {
     Ok(Json(
-        service::renew_soultoken(&state.db, user_id, body, &state.event_bus).await?,
+        service::renew_soultoken(
+            &state.db, user_id, body, &state.ed25519_key_pair, &state.event_bus,
+        ).await?,
     ))
+}
+
+/// GET /api/trust-registry/public-key
+///
+/// Public endpoint — no auth required. Publishes the Ed25519 verifying key
+/// any third party can use to verify Box Fraise soultoken signatures offline.
+async fn trust_registry_public_key(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    Json(json!({
+        "verifying_key_hex": state.cfg.soultoken_verifying_key_hex,
+        "algorithm":         "Ed25519",
+        "bfip_version":      "0.1.2",
+        "description":       "Use this key to verify Box Fraise \
+                              soultoken signatures offline",
+    }))
 }
 
 /// POST /api/soultokens/:id/revoke

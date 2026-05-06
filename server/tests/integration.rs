@@ -74,8 +74,9 @@ async fn magic_link_flow_fires_user_logged_in_event(pool: PgPool) {
         api_base_url: "http://localhost:3001".to_owned(),
         app_store_id: None, platform_fee_bips: 500,
         square_order_webhook_signing_key: None, square_order_notification_url: None,
-        soultoken_hmac_key:    "test-soultoken-hmac-key-32bytes!!".to_string().into(),
-        soultoken_signing_key: "test-soultoken-sign-key-32bytes!!".to_string().into(),
+        soultoken_hmac_key:          "test-soultoken-hmac-key-32bytes!!".to_string().into(),
+        soultoken_signing_key_hex:   common::TEST_ED25519_SIGNING_KEY_HEX.to_string().into(),
+        soultoken_verifying_key_hex: common::test_ed25519_key_pair().verifying_key_hex(),
     });
     let _http = reqwest::Client::new();
 
@@ -1314,15 +1315,14 @@ async fn full_soultoken_lifecycle(pool: PgPool) {
     .bind(uid).execute(&pool).await.unwrap();
 
     let state = common::build_state(pool.clone(), None);
-    let hmac_key    = state.cfg.soultoken_hmac_key.expose_secret().as_bytes().to_vec();
-    let signing_key = state.cfg.soultoken_signing_key.expose_secret().as_bytes().to_vec();
+    let hmac_key = state.cfg.soultoken_hmac_key.expose_secret().as_bytes().to_vec();
     let bus = state.event_bus.clone();
 
     // ── Step 1: Issue soultoken ───────────────────────────────────────────────
     let token = st_svc::issue_soultoken(
         &state.db, UserId::from(uid),
         IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-        &hmac_key, &signing_key, &bus,
+        &hmac_key, &state.ed25519_key_pair, &bus,
     ).await.expect("issue_soultoken must succeed");
 
     // Display code format
@@ -1350,7 +1350,7 @@ async fn full_soultoken_lifecycle(pool: PgPool) {
     let renewal = st_svc::renew_soultoken(
         &state.db, UserId::from(uid),
         RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
-        &bus,
+        &state.ed25519_key_pair, &bus,
     ).await.expect("renew_soultoken must succeed");
 
     assert!(renewal.new_expires_at > before_renewal,
@@ -1835,9 +1835,10 @@ async fn full_attestation_token_lifecycle(pool: PgPool) {
     sqlx::query("UPDATE users SET verification_status = 'attested', attested_at = now() WHERE id = $1")
         .bind(uid).execute(&pool).await.unwrap();
 
+    let kp = common::test_ed25519_key_pair();
     st_svc::issue_soultoken(&pool, user,
         IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-        b"test-soultoken-hmac-key-32bytes!!", b"test-soultoken-sign-key-32bytes!!", &bus,
+        b"test-soultoken-hmac-key-32bytes!!", &kp, &bus,
     ).await.expect("issue_soultoken must succeed");
 
     let user_id = uid;
@@ -2012,9 +2013,10 @@ async fn full_audit_trail_completeness(pool: PgPool) {
         "UPDATE users SET verification_status = 'attested', attested_at = now() WHERE id = $1"
     ).bind(uid).execute(&pool).await.unwrap();
 
+    let kp = common::test_ed25519_key_pair();
     st_svc::issue_soultoken(&pool, user,
         IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-        b"test-soultoken-hmac-key-32bytes!!", b"test-soultoken-sign-key-32bytes!!", &bus,
+        b"test-soultoken-hmac-key-32bytes!!", &kp, &bus,
     ).await.expect("issue_soultoken must succeed");
 
     // ── Request audit trail ───────────────────────────────────────────────────

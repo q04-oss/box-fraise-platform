@@ -52,8 +52,12 @@ pub struct Config {
     pub square_order_notification_url:    Option<String>,
     /// HMAC key for soultoken display code derivation (BFIP Section 7 / cryptography.md Section 3).
     pub soultoken_hmac_key:    SecretString,
-    /// Signing key for soultoken payload HMAC-SHA256 (BFIP cryptography.md Section 4).
-    pub soultoken_signing_key: SecretString,
+    /// Ed25519 private key (32 bytes) as 64 hex chars — soultoken payload signing
+    /// (BFIP cryptography.md Section 4 / Hardening Section 1b).
+    pub soultoken_signing_key_hex:   SecretString,
+    /// Ed25519 public key (32 bytes) as 64 hex chars — published via the
+    /// trust-registry endpoint for offline signature verification.
+    pub soultoken_verifying_key_hex: String,
 }
 
 impl Config {
@@ -98,10 +102,10 @@ impl Config {
         if soultoken_hmac_key_raw.len() < 32 {
             anyhow::bail!("SOULTOKEN_HMAC_KEY must be at least 32 characters");
         }
-        let soultoken_signing_key_raw = require("SOULTOKEN_SIGNING_KEY")?;
-        if soultoken_signing_key_raw.len() < 32 {
-            anyhow::bail!("SOULTOKEN_SIGNING_KEY must be at least 32 characters");
-        }
+        let soultoken_signing_key_hex_raw = require("SOULTOKEN_SIGNING_KEY_HEX")?;
+        validate_ed25519_hex("SOULTOKEN_SIGNING_KEY_HEX", &soultoken_signing_key_hex_raw)?;
+        let soultoken_verifying_key_hex_raw = require("SOULTOKEN_VERIFYING_KEY_HEX")?;
+        validate_ed25519_hex("SOULTOKEN_VERIFYING_KEY_HEX", &soultoken_verifying_key_hex_raw)?;
 
         let hmac_shared_key = optional_secret("FRAISE_HMAC_SHARED_KEY");
         if hmac_shared_key.is_none() {
@@ -147,10 +151,21 @@ impl Config {
             square_app_secret:         optional_secret("SQUARE_APP_SECRET"),
             square_oauth_redirect_url: optional("SQUARE_OAUTH_REDIRECT_URL"),
             square_token_encryption_key: optional_secret("SQUARE_TOKEN_ENCRYPTION_KEY"),
-            soultoken_hmac_key:    soultoken_hmac_key_raw.into(),
-            soultoken_signing_key: soultoken_signing_key_raw.into(),
+            soultoken_hmac_key:          soultoken_hmac_key_raw.into(),
+            soultoken_signing_key_hex:   soultoken_signing_key_hex_raw.into(),
+            soultoken_verifying_key_hex: soultoken_verifying_key_hex_raw,
         })
     }
+}
+
+fn validate_ed25519_hex(key: &str, value: &str) -> anyhow::Result<()> {
+    if value.len() != 64 {
+        anyhow::bail!("`{key}` must be exactly 64 hex chars (32 bytes), got {} chars", value.len());
+    }
+    if !value.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("`{key}` must be valid lowercase or uppercase hex");
+    }
+    Ok(())
 }
 
 fn require(key: &str) -> anyhow::Result<String> {

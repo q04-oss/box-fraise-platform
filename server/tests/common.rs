@@ -15,7 +15,7 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::ContainerAsync;
 use testcontainers_modules::redis::Redis;
 
-use box_fraise_domain::event_bus::EventBus;
+use box_fraise_domain::{crypto::Ed25519KeyPair, event_bus::EventBus};
 use box_fraise_server::{
     app::AppState,
     auth::new_revoked_tokens,
@@ -23,6 +23,17 @@ use box_fraise_server::{
     http::middleware::{hmac::new_nonce_cache, rate_limit::RateLimiter},
     types::UserId,
 };
+
+/// Fixed Ed25519 signing key for tests — 32 bytes of `0x42`.
+/// Reused across `test_config` and `build_state_with_config` so the configured
+/// verifying key always matches the key pair AppState ships.
+pub const TEST_ED25519_SIGNING_KEY_HEX: &str =
+    "4242424242424242424242424242424242424242424242424242424242424242";
+
+pub fn test_ed25519_key_pair() -> Ed25519KeyPair {
+    Ed25519KeyPair::from_hex(TEST_ED25519_SIGNING_KEY_HEX)
+        .expect("static test signing key must parse")
+}
 
 // ── AppState ──────────────────────────────────────────────────────────────────
 
@@ -62,8 +73,9 @@ pub fn test_config() -> Config {
         square_order_webhook_signing_key: None,
         square_order_notification_url:    None,
         app_store_id:                     None,
-        soultoken_hmac_key:    SecretString::from("test-soultoken-hmac-key-32bytes!!".to_string()),
-        soultoken_signing_key: SecretString::from("test-soultoken-sign-key-32bytes!!".to_string()),
+        soultoken_hmac_key:          SecretString::from("test-soultoken-hmac-key-32bytes!!".to_string()),
+        soultoken_signing_key_hex:   SecretString::from(TEST_ED25519_SIGNING_KEY_HEX.to_string()),
+        soultoken_verifying_key_hex: test_ed25519_key_pair().verifying_key_hex(),
     }
 }
 
@@ -76,14 +88,15 @@ pub fn build_state(db: PgPool, redis: Option<RedisPool>) -> AppState {
 pub fn build_state_with_config(db: PgPool, redis: Option<RedisPool>, cfg: Config) -> AppState {
     AppState {
         db,
-        cfg:          Arc::new(cfg),
-        revoked:      new_revoked_tokens(),
-        nonces:       new_nonce_cache(),
+        cfg:              Arc::new(cfg),
+        revoked:          new_revoked_tokens(),
+        nonces:           new_nonce_cache(),
         redis,
-        rate:         RateLimiter::new(120, 60),
-        dorotka_rate: RateLimiter::new(20, 60),
-        http:         reqwest::Client::new(),
-        event_bus:    EventBus::new(),
+        rate:             RateLimiter::new(120, 60),
+        dorotka_rate:     RateLimiter::new(20, 60),
+        http:             reqwest::Client::new(),
+        event_bus:        EventBus::new(),
+        ed25519_key_pair: Arc::new(test_ed25519_key_pair()),
     }
 }
 

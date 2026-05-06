@@ -324,7 +324,13 @@ mod tests {
     use sqlx::PgPool;
 
     const TEST_HMAC_KEY:    &[u8] = b"test-soultoken-hmac-key-32bytes!!";
-    const TEST_SIGNING_KEY: &[u8] = b"test-soultoken-sign-key-32bytes!!";
+    const TEST_SIGNING_KEY_HEX: &str =
+        "4242424242424242424242424242424242424242424242424242424242424242";
+
+    fn test_key_pair() -> crate::crypto::Ed25519KeyPair {
+        crate::crypto::Ed25519KeyPair::from_hex(TEST_SIGNING_KEY_HEX)
+            .expect("static test signing key must parse")
+    }
 
     // ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -419,13 +425,14 @@ mod tests {
 
         // Issue soultoken using the correct signature.
         let user = UserId::from(uid);
+        let kp   = test_key_pair();
         let st = soultoken_svc::issue_soultoken(
             pool, user,
             IssueSoultokenRequest {
                 attestation_id: attest_id,
                 token_type:     "user".to_owned(),
             },
-            TEST_HMAC_KEY, TEST_SIGNING_KEY, &bus,
+            TEST_HMAC_KEY, &kp, &bus,
         ).await.expect("issue_soultoken must succeed");
 
         (user, st.id)

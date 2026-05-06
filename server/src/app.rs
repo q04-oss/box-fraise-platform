@@ -14,6 +14,7 @@ use tower_http::{
 use box_fraise_domain::{
     auth::{new_revoked_tokens, RevokedTokens},
     config::Config,
+    crypto::Ed25519KeyPair,
     event_bus::EventBus,
 };
 use crate::http::{
@@ -38,6 +39,10 @@ pub struct AppState {
     pub dorotka_rate: SharedRateLimiter,
     pub http:         reqwest::Client,
     pub event_bus:    EventBus,
+    /// Ed25519 key pair for soultoken signing (BFIP cryptography.md Section 4 /
+    /// Hardening Section 1b). Wrapped in `Arc` because `Ed25519KeyPair` is not
+    /// `Clone` and `AppState` is cloned per request.
+    pub ed25519_key_pair: Arc<Ed25519KeyPair>,
 }
 
 impl AppState {
@@ -67,6 +72,37 @@ impl AppState {
             );
         }
 
+        // Load the Ed25519 key pair from SOULTOKEN_SIGNING_KEY_HEX. Failure is
+        // fatal — the server must not start with an unsignable soultoken path.
+        let ed25519_key_pair = Ed25519KeyPair::from_hex(
+            cfg.soultoken_signing_key_hex.expose_secret(),
+        )
+        .unwrap_or_else(|e| {
+            tracing::error!(error = ?e, "SOULTOKEN_SIGNING_KEY_HEX could not be loaded");
+            eprintln!("FATAL: SOULTOKEN_SIGNING_KEY_HEX is invalid: {e:?}");
+            std::process::exit(1);
+        });
+
+        let derived_pub = ed25519_key_pair.verifying_key_hex();
+        if !derived_pub.eq_ignore_ascii_case(&cfg.soultoken_verifying_key_hex) {
+            tracing::error!(
+                derived = %derived_pub,
+                configured = %cfg.soultoken_verifying_key_hex,
+                "SOULTOKEN_VERIFYING_KEY_HEX does not match the public key derived \
+                 from SOULTOKEN_SIGNING_KEY_HEX",
+            );
+            eprintln!(
+                "FATAL: SOULTOKEN_VERIFYING_KEY_HEX does not match the public key \
+                 derived from the signing key. Update the env var to: {derived_pub}",
+            );
+            std::process::exit(1);
+        }
+
+        tracing::info!(
+            verifying_key_hex = %derived_pub,
+            "Ed25519 soultoken signing key loaded",
+        );
+
         Self {
             db,
             cfg:          Arc::new(cfg),
@@ -80,6 +116,7 @@ impl AppState {
                 .build()
                 .expect("reqwest client is infallible"),
             event_bus: EventBus::new(),
+            ed25519_key_pair: Arc::new(ed25519_key_pair),
         }
     }
 }

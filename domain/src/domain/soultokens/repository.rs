@@ -186,3 +186,40 @@ pub async fn renew_soultoken(
     .await
     .map_err(DomainError::Db)
 }
+
+/// Persist a freshly-computed Ed25519 signature.
+///
+/// Used after [`renew_soultoken`] extends `expires_at` — the previous signature
+/// no longer covers the new expiry, so renewal must rewrite it.
+pub async fn update_signature(
+    pool:          &PgPool,
+    soultoken_id:  i32,
+    new_signature: &str,
+) -> AppResult<()> {
+    sqlx::query("UPDATE soultokens SET signature = $2 WHERE id = $1")
+        .bind(soultoken_id)
+        .bind(new_signature)
+        .execute(pool)
+        .await
+        .map_err(DomainError::Db)?;
+    Ok(())
+}
+
+/// Look up the internal UUID for a soultoken row.
+///
+/// Kept separate from [`get_soultoken_by_id`] so the public-facing row type
+/// never carries the UUID — callers must explicitly opt in. Used at renewal
+/// time when the signing payload needs the original UUID.
+pub async fn get_soultoken_uuid(
+    pool:         &PgPool,
+    soultoken_id: i32,
+) -> AppResult<Option<Uuid>> {
+    let opt: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT uuid FROM soultokens WHERE id = $1"
+    )
+    .bind(soultoken_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(DomainError::Db)?;
+    Ok(opt.map(|(u,)| u))
+}

@@ -227,8 +227,9 @@ mod proptest_tests {
             api_base_url: "http://localhost:3001".to_owned(),
             app_store_id: None, platform_fee_bips: 500,
             square_order_webhook_signing_key: None, square_order_notification_url: None,
-            soultoken_hmac_key:    s("test-soultoken-hmac-key-32bytes!!"),
-            soultoken_signing_key: s("test-soultoken-sign-key-32bytes!!"),
+            soultoken_hmac_key:          s("test-soultoken-hmac-key-32bytes!!"),
+            soultoken_signing_key_hex:   s("4242424242424242424242424242424242424242424242424242424242424242"),
+            soultoken_verifying_key_hex: "4242424242424242424242424242424242424242424242424242424242424242".to_owned(),
         }
     }
 

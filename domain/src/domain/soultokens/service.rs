@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     audit,
+    crypto::Ed25519KeyPair,
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
@@ -50,30 +51,40 @@ fn base36_encode(bytes: &[u8]) -> String {
     digits.iter().map(|&d| CHARS[d as usize] as char).collect()
 }
 
-/// BFIP cryptography.md Section 4 — Soultoken signature.
+/// BFIP cryptography.md Section 4 — Soultoken signature (Hardening Section 1b).
 ///
 /// Payload: uuid_str|holder_user_id|issued_at_rfc3339|expires_at_rfc3339|display_code
-/// Signed with HMAC-SHA256 (Ed25519 reserved for future PKI pass).
+/// Signed with Ed25519. The returned signature is a 128-char hex string.
 pub fn sign_soultoken(
     uuid:           &Uuid,
     holder_user_id: i32,
     issued_at:      &chrono::DateTime<Utc>,
     expires_at:     &chrono::DateTime<Utc>,
     display_code:   &str,
-    signing_key:    &[u8],
+    key_pair:       &Ed25519KeyPair,
 ) -> String {
-    use ring::hmac as ring_hmac;
-    let payload = format!(
+    let payload = soultoken_payload(uuid, holder_user_id, issued_at, expires_at, display_code);
+    key_pair.sign(payload.as_bytes())
+}
+
+/// Construct the canonical soultoken payload bytes that signing and verification
+/// agree on. Exposed so verifiers (trust registry consumers, tests) can rebuild
+/// the exact byte string the signature covers.
+pub fn soultoken_payload(
+    uuid:           &Uuid,
+    holder_user_id: i32,
+    issued_at:      &chrono::DateTime<Utc>,
+    expires_at:     &chrono::DateTime<Utc>,
+    display_code:   &str,
+) -> String {
+    format!(
         "{}|{}|{}|{}|{}",
         uuid,
         holder_user_id,
         issued_at.to_rfc3339(),
         expires_at.to_rfc3339(),
         display_code,
-    );
-    let key = ring_hmac::Key::new(ring_hmac::HMAC_SHA256, signing_key);
-    let tag = ring_hmac::sign(&key, payload.as_bytes());
-    hex::encode(tag.as_ref())
+    )
 }
 
 /// Admin reference string — generated at display time only, never stored.
@@ -125,7 +136,7 @@ pub async fn issue_soultoken(
     user_id:     UserId,
     req:         IssueSoultokenRequest,
     hmac_key:    &[u8],
-    signing_key: &[u8],
+    key_pair:    &Ed25519KeyPair,
     event_bus:   &EventBus,
 ) -> AppResult<SoultokenResponse> {
     let uid = i32::from(user_id);
@@ -172,22 +183,15 @@ pub async fn issue_soultoken(
     .map_err(DomainError::Db)?;
 
     // 5. Generate UUID and derive display_code.
-    let token_uuid  = Uuid::new_v4();
+    let token_uuid   = Uuid::new_v4();
     let display_code = derive_display_code(&token_uuid, hmac_key, 1);
-    let issued_at   = Utc::now();
-    let expires_at  = issued_at + chrono::Duration::days(365);
+    let expires_at   = Utc::now() + chrono::Duration::days(365);
 
-    // 6. Sign the soultoken.
-    let signature = sign_soultoken(
-        &token_uuid,
-        uid,
-        &issued_at,
-        &expires_at,
-        &display_code,
-        signing_key,
-    );
-
-    // 7. Create soultoken record with full verification chain.
+    // 6. Insert the soultoken WITHOUT a signature first, so the persisted
+    // timestamps (µs-precision in PostgreSQL) are the canonical inputs for
+    // signing. Signing in-memory `Utc::now()` (ns-precision) before insert
+    // would produce a signature that no longer verifies once the row is read
+    // back, because RFC3339 formatting differs at the sub-microsecond level.
     let token = repository::create_soultoken(
         pool,
         token_uuid,
@@ -199,9 +203,20 @@ pub async fn issue_soultoken(
         identity_credential_id,
         Some(attest_presence_threshold_id),
         Some(req.attestation_id),
-        Some(&signature),
+        None,
         expires_at,
     ).await?;
+
+    // 7. Sign using the DB-stored timestamps and persist the signature.
+    let signature = sign_soultoken(
+        &token_uuid,
+        uid,
+        &token.issued_at,
+        &token.expires_at,
+        &display_code,
+        key_pair,
+    );
+    repository::update_signature(pool, token.id, &signature).await?;
 
     // 8. Update users.soultoken_id.
     repository::update_user_soultoken_id(pool, uid, Some(token.id)).await?;
@@ -496,6 +511,7 @@ pub async fn renew_soultoken(
     pool:              &PgPool,
     user_id:           UserId,
     req:               RenewSoultokenRequest,
+    key_pair:          &Ed25519KeyPair,
     event_bus:         &EventBus,
 ) -> AppResult<SoultokenRenewalResponse> {
     let uid = i32::from(user_id);
@@ -516,8 +532,26 @@ pub async fn renew_soultoken(
     let previous_expires_at = token.expires_at;
     let new_expires_at      = Utc::now() + chrono::Duration::days(365);
 
-    // 4. Update soultoken expires_at.
-    repository::renew_soultoken(pool, token.id, new_expires_at).await?;
+    // 4. Update soultoken expires_at and re-sign with the new payload.
+    //    Use the row returned by the UPDATE so the signature is computed from
+    //    the µs-precision timestamps Postgres actually stored.
+    let renewed = repository::renew_soultoken(pool, token.id, new_expires_at).await?;
+
+    // The internal UUID is not carried on `SoultokenRow` — fetch it here so the
+    // signing payload can be rebuilt for the new expires_at.
+    let token_uuid = repository::get_soultoken_uuid(pool, token.id)
+        .await?
+        .ok_or(DomainError::NotFound)?;
+
+    let new_signature = sign_soultoken(
+        &token_uuid,
+        renewed.holder_user_id,
+        &renewed.issued_at,
+        &renewed.expires_at,
+        &renewed.display_code,
+        key_pair,
+    );
+    repository::update_signature(pool, token.id, &new_signature).await?;
 
     // 5. Create renewal record.
     let renewal = repository::create_renewal(
@@ -584,7 +618,17 @@ mod tests {
     use sqlx::PgPool;
 
     const TEST_HMAC_KEY:    &[u8] = b"test-soultoken-hmac-key-32bytes!!";
-    const TEST_SIGNING_KEY: &[u8] = b"test-soultoken-sign-key-32bytes!!";
+    const TEST_SIGNING_KEY_HEX: &str =
+        "4242424242424242424242424242424242424242424242424242424242424242";
+
+    fn test_key_pair() -> &'static Ed25519KeyPair {
+        use std::sync::OnceLock;
+        static KP: OnceLock<Ed25519KeyPair> = OnceLock::new();
+        KP.get_or_init(|| {
+            Ed25519KeyPair::from_hex(TEST_SIGNING_KEY_HEX)
+                .expect("static test signing key must parse")
+        })
+    }
 
     // ── Test fixture ──────────────────────────────────────────────────────────
 
@@ -689,7 +733,7 @@ mod tests {
         let resp = issue_soultoken(
             &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, TEST_SIGNING_KEY, &bus,
+            TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.expect("issue_soultoken must succeed");
 
         // Display code format: XXXX-XXXX-XXXX
@@ -736,7 +780,7 @@ mod tests {
         let err = issue_soultoken(
             &pool, UserId::from(uid),
             IssueSoultokenRequest { attestation_id: 999, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, TEST_SIGNING_KEY, &bus,
+            TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap_err();
 
         assert!(matches!(err, DomainError::InvalidInput(_)),
@@ -751,13 +795,13 @@ mod tests {
         issue_soultoken(
             &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, TEST_SIGNING_KEY, &bus,
+            TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
 
         let err = issue_soultoken(
             &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, TEST_SIGNING_KEY, &bus,
+            TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap_err();
 
         assert!(matches!(err, DomainError::Conflict(_)),
@@ -799,7 +843,7 @@ mod tests {
         let now    = Utc::now();
         let exp    = now + chrono::Duration::days(365);
         let code   = derive_display_code(&uuid, TEST_HMAC_KEY, 1);
-        let sig    = sign_soultoken(&uuid, 42, &now, &exp, &code, TEST_SIGNING_KEY);
+        let sig    = sign_soultoken(&uuid, 42, &now, &exp, &code, test_key_pair());
         assert!(!sig.is_empty(), "signature must be non-empty");
         assert!(sig.chars().all(|c| c.is_ascii_hexdigit()),
             "signature must be lowercase hex, got: {sig}");
@@ -815,7 +859,7 @@ mod tests {
         issue_soultoken(
             &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, TEST_SIGNING_KEY, &bus,
+            TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
 
         let resp = get_my_soultoken(&pool, user_id).await.unwrap();
@@ -850,7 +894,7 @@ mod tests {
         let token = issue_soultoken(
             &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, TEST_SIGNING_KEY, &bus,
+            TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
 
         revoke_soultoken(
@@ -882,7 +926,7 @@ mod tests {
         let token = issue_soultoken(
             &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, TEST_SIGNING_KEY, &bus,
+            TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
 
         // Attempt surrender with non-existent visit
@@ -909,7 +953,7 @@ mod tests {
         let token = issue_soultoken(
             &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, TEST_SIGNING_KEY, &bus,
+            TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
 
         let before_renewal = token.expires_at;
@@ -917,7 +961,7 @@ mod tests {
         let renewal = renew_soultoken(
             &pool, user_id,
             RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
-            &bus,
+            test_key_pair(), &bus,
         ).await.expect("renew must succeed");
 
         assert!(renewal.new_expires_at > before_renewal,
@@ -941,7 +985,7 @@ mod tests {
         let token = issue_soultoken(
             &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, TEST_SIGNING_KEY, &bus,
+            TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
 
         revoke_soultoken(
@@ -955,7 +999,7 @@ mod tests {
         let err = renew_soultoken(
             &pool, user_id,
             RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
-            &bus,
+            test_key_pair(), &bus,
         ).await.unwrap_err();
 
         assert!(matches!(err, DomainError::NotFound),
@@ -973,7 +1017,7 @@ mod tests {
         let token = issue_soultoken(
             &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, TEST_SIGNING_KEY, &bus,
+            TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
 
         // Attacker is a regular user (no admin or reviewer role)
@@ -1003,7 +1047,7 @@ mod tests {
         let token = issue_soultoken(
             &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, TEST_SIGNING_KEY, &bus,
+            TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
 
         let (attacker_id,): (i32,) = sqlx::query_as(
@@ -1032,7 +1076,7 @@ mod tests {
         issue_soultoken(
             &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, TEST_SIGNING_KEY, &bus,
+            TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
 
         // Backdate expires_at to the past
@@ -1045,11 +1089,196 @@ mod tests {
         let err = renew_soultoken(
             &pool, user_id,
             RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
-            &bus,
+            test_key_pair(), &bus,
         ).await.unwrap_err();
 
         // get_active_soultoken_by_user filters WHERE expires_at > now(), so expired → NotFound
         assert!(matches!(err, DomainError::NotFound),
             "renewing an expired soultoken must be NotFound, got: {err:?}");
+    }
+
+    // ── Hardening Section 1b — Ed25519 signing tests ─────────────────────────
+
+    /// Look up the soultoken row plus its uuid for tests that need to rebuild
+    /// the signing payload. Tests run against a freshly-seeded DB so a single
+    /// `holder_user_id` row uniquely identifies the issued token.
+    async fn fetch_signing_inputs(pool: &PgPool, uid: i32)
+        -> (Uuid, SoultokenRow, String)
+    {
+        let row = repository::get_active_soultoken_by_user(pool, uid)
+            .await.unwrap()
+            .expect("soultoken must exist");
+        let token_uuid = repository::get_soultoken_uuid(pool, row.id)
+            .await.unwrap()
+            .expect("uuid must exist");
+        let signature = row.signature.clone()
+            .expect("signature must be persisted");
+        (token_uuid, row, signature)
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn issue_soultoken_produces_ed25519_signature(pool: PgPool) {
+        let (user_id, attest_id) = setup_attested_user(&pool).await;
+        let bus = EventBus::new();
+        let kp  = Ed25519KeyPair::generate();
+
+        issue_soultoken(
+            &pool, user_id,
+            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+            TEST_HMAC_KEY, &kp, &bus,
+        ).await.expect("issue_soultoken must succeed");
+
+        let uid = i32::from(user_id);
+        let (token_uuid, row, signature) = fetch_signing_inputs(&pool, uid).await;
+
+        assert_eq!(signature.len(), 128,
+            "Ed25519 signature hex must be 128 chars, got {}", signature.len());
+
+        let payload = soultoken_payload(
+            &token_uuid, row.holder_user_id, &row.issued_at, &row.expires_at, &row.display_code,
+        );
+        let ok = crate::crypto::verify_ed25519(
+            &kp.verifying_key_hex(), payload.as_bytes(), &signature,
+        ).expect("verify_ed25519 must not error on well-formed inputs");
+        assert!(ok, "freshly-issued signature must verify");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn tampered_soultoken_payload_fails_verification(pool: PgPool) {
+        let (user_id, attest_id) = setup_attested_user(&pool).await;
+        let bus = EventBus::new();
+        let kp  = Ed25519KeyPair::generate();
+
+        issue_soultoken(
+            &pool, user_id,
+            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+            TEST_HMAC_KEY, &kp, &bus,
+        ).await.unwrap();
+
+        let uid = i32::from(user_id);
+        let (token_uuid, row, signature) = fetch_signing_inputs(&pool, uid).await;
+
+        // Flip holder_user_id by 1 — payload no longer matches what was signed.
+        let tampered = soultoken_payload(
+            &token_uuid,
+            row.holder_user_id + 1,
+            &row.issued_at,
+            &row.expires_at,
+            &row.display_code,
+        );
+        let ok = crate::crypto::verify_ed25519(
+            &kp.verifying_key_hex(), tampered.as_bytes(), &signature,
+        ).expect("verify_ed25519 must not error on well-formed inputs");
+        assert!(!ok, "tampered payload must fail verification");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn renewal_updates_signature(pool: PgPool) {
+        let (user_id, attest_id) = setup_attested_user(&pool).await;
+        let bus = EventBus::new();
+        let kp  = Ed25519KeyPair::generate();
+        let uid = i32::from(user_id);
+
+        issue_soultoken(
+            &pool, user_id,
+            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+            TEST_HMAC_KEY, &kp, &bus,
+        ).await.unwrap();
+
+        let (token_uuid, row_before, sig_before) = fetch_signing_inputs(&pool, uid).await;
+
+        renew_soultoken(
+            &pool, user_id,
+            RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
+            &kp, &bus,
+        ).await.expect("renew must succeed");
+
+        let (_uuid_after, row_after, sig_after) = fetch_signing_inputs(&pool, uid).await;
+
+        assert_ne!(sig_before, sig_after, "renewal must rewrite the signature");
+
+        let new_payload = soultoken_payload(
+            &token_uuid, row_after.holder_user_id,
+            &row_after.issued_at, &row_after.expires_at, &row_after.display_code,
+        );
+        assert!(
+            crate::crypto::verify_ed25519(&kp.verifying_key_hex(), new_payload.as_bytes(), &sig_after).unwrap(),
+            "post-renewal signature must verify against the new expires_at payload",
+        );
+        assert!(
+            !crate::crypto::verify_ed25519(&kp.verifying_key_hex(), new_payload.as_bytes(), &sig_before).unwrap(),
+            "pre-renewal signature must NOT verify against the new expires_at payload",
+        );
+        // Sanity: the old signature still verifies against the old payload.
+        let old_payload = soultoken_payload(
+            &token_uuid, row_before.holder_user_id,
+            &row_before.issued_at, &row_before.expires_at, &row_before.display_code,
+        );
+        assert!(
+            crate::crypto::verify_ed25519(&kp.verifying_key_hex(), old_payload.as_bytes(), &sig_before).unwrap(),
+            "pre-renewal signature must still verify against the original payload",
+        );
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn sign_soultoken_payload_is_correct(_pool: PgPool) {
+        let kp           = Ed25519KeyPair::generate();
+        let token_uuid   = Uuid::new_v4();
+        let issued_at    = Utc::now();
+        let expires_at   = issued_at + chrono::Duration::days(365);
+        let display_code = derive_display_code(&token_uuid, TEST_HMAC_KEY, 1);
+
+        let signature = sign_soultoken(
+            &token_uuid, 7, &issued_at, &expires_at, &display_code, &kp,
+        );
+
+        let expected = soultoken_payload(&token_uuid, 7, &issued_at, &expires_at, &display_code);
+        assert!(
+            crate::crypto::verify_ed25519(&kp.verifying_key_hex(), expected.as_bytes(), &signature).unwrap(),
+            "sign_soultoken output must verify against the canonical payload",
+        );
+
+        let different = soultoken_payload(&token_uuid, 8, &issued_at, &expires_at, &display_code);
+        assert!(
+            !crate::crypto::verify_ed25519(&kp.verifying_key_hex(), different.as_bytes(), &signature).unwrap(),
+            "sign_soultoken output must NOT verify against a payload with a different field",
+        );
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn renewal_old_signature_invalid_after_renewal(pool: PgPool) {
+        let (user_id, attest_id) = setup_attested_user(&pool).await;
+        let bus = EventBus::new();
+        let kp  = Ed25519KeyPair::generate();
+        let uid = i32::from(user_id);
+
+        issue_soultoken(
+            &pool, user_id,
+            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+            TEST_HMAC_KEY, &kp, &bus,
+        ).await.unwrap();
+
+        let (token_uuid, _row_before, sig_before) = fetch_signing_inputs(&pool, uid).await;
+
+        renew_soultoken(
+            &pool, user_id,
+            RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
+            &kp, &bus,
+        ).await.expect("renew must succeed");
+
+        let (_, row_after, sig_after) = fetch_signing_inputs(&pool, uid).await;
+
+        let new_payload = soultoken_payload(
+            &token_uuid, row_after.holder_user_id,
+            &row_after.issued_at, &row_after.expires_at, &row_after.display_code,
+        );
+        assert!(
+            !crate::crypto::verify_ed25519(&kp.verifying_key_hex(), new_payload.as_bytes(), &sig_before).unwrap(),
+            "old signature must not verify against the renewed payload",
+        );
+        assert!(
+            crate::crypto::verify_ed25519(&kp.verifying_key_hex(), new_payload.as_bytes(), &sig_after).unwrap(),
+            "new signature must verify against the renewed payload",
+        );
     }
 }

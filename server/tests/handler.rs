@@ -1336,12 +1336,11 @@ async fn get_soultokens_me_returns_200_with_display_code(pool: PgPool) {
     let state_setup = common::build_state(pool.clone(), None);
     let bus = EventBus::new();
     use secrecy::ExposeSecret;
-    let hmac_key    = state_setup.cfg.soultoken_hmac_key.expose_secret().as_bytes().to_vec();
-    let signing_key = state_setup.cfg.soultoken_signing_key.expose_secret().as_bytes().to_vec();
+    let hmac_key = state_setup.cfg.soultoken_hmac_key.expose_secret().as_bytes().to_vec();
     st_svc::issue_soultoken(
         &state_setup.db, UserId::from(uid),
         IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-        &hmac_key, &signing_key, &bus,
+        &hmac_key, &state_setup.ed25519_key_pair, &bus,
     ).await.expect("issue must succeed for handler test setup");
 
     let state = common::build_state(pool, None);
@@ -1390,12 +1389,11 @@ async fn get_soultokens_me_response_contains_no_uuid(pool: PgPool) {
     let state_setup = common::build_state(pool.clone(), None);
     let bus = EventBus::new();
     use secrecy::ExposeSecret;
-    let hmac_key    = state_setup.cfg.soultoken_hmac_key.expose_secret().as_bytes().to_vec();
-    let signing_key = state_setup.cfg.soultoken_signing_key.expose_secret().as_bytes().to_vec();
+    let hmac_key = state_setup.cfg.soultoken_hmac_key.expose_secret().as_bytes().to_vec();
     st_svc::issue_soultoken(
         &state_setup.db, UserId::from(uid),
         IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-        &hmac_key, &signing_key, &bus,
+        &hmac_key, &state_setup.ed25519_key_pair, &bus,
     ).await.unwrap();
 
     let state = common::build_state(pool, None);
@@ -1885,9 +1883,10 @@ async fn setup_attested_user_with_soultoken_for_handler(
     sqlx::query("UPDATE users SET verification_status = 'attested', attested_at = now() WHERE id = $1")
         .bind(uid).execute(pool).await.unwrap();
 
+    let kp = common::test_ed25519_key_pair();
     st_svc::issue_soultoken(pool, UserId::from(uid),
         IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-        b"test-soultoken-hmac-key-32bytes!!", b"test-soultoken-sign-key-32bytes!!", &bus,
+        b"test-soultoken-hmac-key-32bytes!!", &kp, &bus,
     ).await.unwrap();
 
     (uid, common::valid_token(uid))
@@ -2196,3 +2195,35 @@ async fn patch_configuration_returns_422_for_invalid_type(pool: PgPool) {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Trust registry — public Ed25519 verifying key (Hardening Section 1b)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn trust_registry_returns_verifying_key(pool: PgPool) {
+    let state = common::build_state(pool, None);
+    let configured_pub = state.cfg.soultoken_verifying_key_hex.clone();
+    let app = box_fraise_server::app::build(state);
+
+    // No Authorization header — endpoint must be public.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/trust-registry/public-key")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK,
+        "trust-registry endpoint must be reachable without auth");
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+
+    let vk_hex = body["verifying_key_hex"].as_str().unwrap();
+    assert_eq!(vk_hex.len(), 64, "verifying_key_hex must be 64 chars (32 bytes)");
+    assert_eq!(vk_hex, configured_pub.as_str(),
+        "endpoint must expose the configured SOULTOKEN_VERIFYING_KEY_HEX");
+    assert_eq!(body["algorithm"].as_str().unwrap(), "Ed25519");
+    assert!(body["bfip_version"].as_str().is_some(), "bfip_version must be present");
+    assert!(body["description"].as_str().is_some(), "description must be present");
+}
