@@ -233,6 +233,7 @@ mod proptest_tests {
             soultoken_verifying_key_hex: "4242424242424242424242424242424242424242424242424242424242424242".to_owned(),
             spaces_access_key: None, spaces_secret_key: None, spaces_bucket: None,
             spaces_endpoint: None, spaces_region: None,
+            spaces_presign_expiry_seconds: 900,
             sentry_dsn: None,
             allowed_origins:         vec!["http://localhost:3000".to_string()],
             db_max_connections:      20,

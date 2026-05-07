@@ -300,12 +300,13 @@ procedure callable by `app_user` while reads require `app_admin`.
 
 None. The public surface area is built from projections in service code:
 
-- `GET /api/users/{id}/profile` returns a hand-curated view of `users`.
-- `GET /api/businesses/{id}/profile` returns a hand-curated view of
-  `businesses`.
+- `GET /api/users/{id}/public-profile` returns a hand-curated view of `users`
+  (auth-gated — see Section 8 for the public surface inventory).
+- `GET /api/businesses/{id}` returns a business view (auth-gated; there is
+  **no** unauthenticated public projection of `businesses` today).
 - `GET /api/trust-registry/public-key` returns no row data — only the
   configured Ed25519 verifying key.
-- `GET /healthz` and `GET /api/openapi.json` return no row data.
+- `GET /health` and `GET /api/docs/openapi.json` return no row data.
 
 When the role split lands, keep these endpoints on `app_user` and rely on the
 projection helpers to enforce the column allow-list.
@@ -333,6 +334,59 @@ projection helpers to enforce the column allow-list.
 
 This sequence is reversible at every step — drop the role and revoke the
 RLS policies if a regression is found.
+
+## Section 6 — Privileged and anonymous surfaces
+
+Sections 1–5 catalogue *table* access. This section catalogues *route*
+access for the two non-default principal classes the audit found missing
+from the matrix: routes restricted to `platform_admin`, and routes that
+accept no authentication at all (webhooks and public endpoints). Anything
+not in this table is a normal authenticated user route.
+
+### `platform_admin`-only routes (under `/api/admin/`)
+
+Authorization at the service layer reads `users.is_platform_admin = true`
+(see Section 1 row for `platform_admin` and the anchor doc-comment on
+`domain::domain::auth::types::UserRow::is_platform_admin`).
+
+| Method | Route | Purpose |
+|--------|-------|---------|
+| POST   | `/api/admin/users/{id}/ban` | Ban a user; revokes active soultokens (Hardening §10). |
+| POST   | `/api/admin/users/{id}/unban` | Reverse a ban. |
+| GET    | `/api/admin/audit/{user_id}` | Full `verification_events` audit trail for any user. |
+| GET    | `/api/admin/analytics/funnel` | Verification-funnel metrics. |
+| GET    | `/api/admin/analytics/attestations/daily` | Attestations per day. |
+| GET    | `/api/admin/analytics/attestations/time-to-attest` | Median time from presence-confirmed → attested. |
+| GET    | `/api/admin/analytics/businesses` | Per-business activity rollup. |
+| GET    | `/api/admin/analytics/presence/daily` | Presence events per day. |
+| GET    | `/api/admin/analytics/soultokens` | Soultoken issuance/revocation counts. |
+| GET    | `/api/admin/analytics/background-checks` | Background-check pass/fail counts. |
+| GET    | `/api/admin/analytics/conversion` | Funnel-to-conversion rate. |
+| GET    | `/api/admin/configuration` | List every `platform_configuration` row. |
+| GET    | `/api/admin/configuration/{key}` | Read one config key. |
+| PATCH  | `/api/admin/configuration/{key}` | Update one config key (writes to `platform_configuration_history`). |
+| GET    | `/api/admin/configuration/{key}/history` | Audit history for one key. |
+| GET    | `/api/admin/feature-flags` | List feature flags. |
+| PATCH  | `/api/admin/feature-flags/{flag_name}` | Enable/disable a feature flag globally. |
+| GET    | `/api/admin/billing/subscriptions` | List business subscriptions (scaffolding — webhook ships post-iOS). |
+
+### Anonymous routes (no JWT required)
+
+These routes intentionally accept no auth header. Each has a dedicated
+verification mechanism documented in the row.
+
+| Method | Route | Verification | Notes |
+|--------|-------|--------------|-------|
+| POST   | `/api/identity/webhook/stripe` | `Stripe-Signature` header verified by `integrations::stripe::verify_signature` against `STRIPE_WEBHOOK_SECRET` | Restricted to identity / payment writes only. |
+| POST   | `/api/background-checks/webhook` | Provider-specific HMAC (see `domain/src/domain/background_checks/service.rs::handle_webhook`); provider integration is currently a stub | Webhook signature key configured via `FRAISE_HMAC_SHARED_KEY`. |
+| POST   | `/api/attestation-tokens/verify` | Token presented in body is single-use and signed; replay is structurally rejected by `verified_at`/`revoked_at` checks | Used by third-party verifiers; no caller identity is asserted. |
+| GET    | `/api/trust-registry/public-key` | None — returns the configured Ed25519 verifying key for offline soultoken signature verification | Required for clients to verify soultokens without contacting the API. |
+| GET    | `/health` | None — returns `{status, database, redis, storage, version}` | Used by UptimeRobot. Do not add row data. |
+| GET    | `/api/docs/openapi.json` | None — returns the OpenAPI 3.1 document | Pair with `GET /api/docs` (Swagger UI). |
+| GET    | `/metrics` | None at the application layer — **must be IP-restricted at nginx** (see `deploy/nginx.conf` loopback allow-list) | Prometheus scrape target. Exposes operational counters; not safe on the open internet. |
+| GET    | `/.well-known/apple-app-site-association` | None — required by iOS Universal Links | Static JSON. |
+| GET    | `/go?url=` | None — server-side allow-list of HTTPS destinations | Privacy-preserving redirect hop for transactional emails. |
+| GET    | `/api/auth/magic-link/open` | None — deep-link redirect carrying the single-use magic-link token in the query string | Token is consumed by the subsequent `POST /api/auth/magic-link/verify`. |
 
 ### Discrepancies surfaced while writing this doc
 

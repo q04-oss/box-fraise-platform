@@ -71,6 +71,9 @@ pub struct Config {
     pub spaces_bucket:               Option<String>,
     pub spaces_endpoint:             Option<String>,
     pub spaces_region:               Option<String>,
+    /// Default expiry for presigned `GET` URLs (seconds). DigitalOcean
+    /// recommends ≤ 15 minutes (900s) to limit URL-leak blast radius.
+    pub spaces_presign_expiry_seconds: u64,
     /// Sentry error-tracking DSN (Hardening §4). When set, Sentry captures
     /// panics, error-level tracing events, and a 10% sample of request
     /// traces. When unset, Sentry is disabled and the server logs locally only.
@@ -186,6 +189,7 @@ impl Config {
             spaces_bucket:               optional("SPACES_BUCKET"),
             spaces_endpoint:             optional("SPACES_ENDPOINT"),
             spaces_region:               optional("SPACES_REGION"),
+            spaces_presign_expiry_seconds: optional_parse("SPACES_PRESIGN_EXPIRY_SECONDS", 900u64)?,
             sentry_dsn:                  optional("SENTRY_DSN"),
             allowed_origins:             optional("ALLOWED_ORIGINS")
                                             .map(|s| s.split(',').map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect::<Vec<_>>())
@@ -210,7 +214,7 @@ impl Config {
         let region     = self.spaces_region.clone().unwrap_or_else(|| "nyc3".to_owned());
         Some(box_fraise_integrations::storage::StorageConfig {
             access_key, secret_key, bucket, endpoint, region,
-            presign_expiry_seconds: 900,
+            presign_expiry_seconds: self.spaces_presign_expiry_seconds,
         })
     }
 }

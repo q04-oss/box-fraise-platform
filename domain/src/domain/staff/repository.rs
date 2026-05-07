@@ -4,8 +4,8 @@ use sqlx::PgPool;
 
 use crate::error::{AppResult, DomainError};
 use super::types::{
-    QualityAssessmentRow, StaffRoleRow, StaffVisitRow, VisitSignatureRow,
-    QUALITY_ASSESSMENT_COLS, STAFF_ROLE_COLS, STAFF_VISIT_COLS, VISIT_SIGNATURE_COLS,
+    QualityAssessmentRow, StaffRoleRow, StaffVisitRow,
+    QUALITY_ASSESSMENT_COLS, STAFF_ROLE_COLS, STAFF_VISIT_COLS,
 };
 
 // ── Staff roles ───────────────────────────────────────────────────────────────
@@ -341,47 +341,3 @@ pub async fn record_assessment_history(
     Ok(new_fail_count)
 }
 
-// ── Visit signatures ──────────────────────────────────────────────────────────
-
-pub async fn assign_reviewer(
-    pool:        &PgPool,
-    visit_id:    i32,
-    reviewer_id: i32,
-    deadline:    DateTime<Utc>,
-) -> AppResult<VisitSignatureRow> {
-    sqlx::query_as(&format!(
-        "INSERT INTO visit_signatures (visit_id, reviewer_id, assigned_at, deadline) \
-         VALUES ($1, $2, now(), $3) \
-         RETURNING {VISIT_SIGNATURE_COLS}"
-    ))
-    .bind(visit_id)
-    .bind(reviewer_id)
-    .bind(deadline)
-    .fetch_one(pool)
-    .await
-    .map_err(DomainError::Db)
-}
-
-pub async fn record_signature(
-    pool:                  &PgPool,
-    visit_id:              i32,
-    reviewer_id:           i32,
-    signature:             &str,
-    evidence_hash_reviewed: &str,
-) -> AppResult<VisitSignatureRow> {
-    sqlx::query_as(&format!(
-        "UPDATE visit_signatures SET \
-         signature              = $3, \
-         evidence_hash_reviewed = $4, \
-         signed_at              = now() \
-         WHERE visit_id = $1 AND reviewer_id = $2 \
-         RETURNING {VISIT_SIGNATURE_COLS}"
-    ))
-    .bind(visit_id)
-    .bind(reviewer_id)
-    .bind(signature)
-    .bind(evidence_hash_reviewed)
-    .fetch_one(pool)
-    .await
-    .map_err(DomainError::Db)
-}

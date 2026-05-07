@@ -54,8 +54,12 @@ pub struct VisitSignatureRow {
     pub id:                    i32,
     pub visit_id:              i32,
     pub reviewer_id:           i32,
-    pub signature:             Option<String>,
-    pub evidence_hash_reviewed: Option<String>,
+    // signature and evidence_hash_reviewed are NOT NULL in the schema;
+    // rows are only ever inserted at sign-time via
+    // `attestations::repository::record_reviewer_signature`, which provides
+    // both. There is no two-phase "assign then sign" path.
+    pub signature:             String,
+    pub evidence_hash_reviewed: String,
     pub assigned_at:           DateTime<Utc>,
     pub deadline:              DateTime<Utc>,
     pub signed_at:             Option<DateTime<Utc>>,
