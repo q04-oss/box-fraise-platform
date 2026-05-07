@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 // ── Database rows ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, utoipa::ToSchema)]
 pub struct VisitAttestationRow {
     pub id:                       i32,
     pub visit_id:                 i32,
@@ -71,7 +71,7 @@ pub const REVIEWER_ASSIGNMENT_COLS: &str =
 
 // ── Request bodies ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct InitiateAttestationRequest {
     pub visit_id:              i32,
     pub user_id:               i32,
@@ -80,7 +80,7 @@ pub struct InitiateAttestationRequest {
     pub photo_storage_uri:     Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct StaffSignAttestationRequest {
     /// Ed25519 signature (128 hex chars) over the canonical attestation payload
     /// — see `service::attestation_payload`.
@@ -93,7 +93,7 @@ pub struct StaffSignAttestationRequest {
     pub user_present_confirmed: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ReviewerSignAttestationRequest {
     /// Ed25519 signature (128 hex chars) over the canonical attestation payload
     /// — see `service::attestation_payload`.
@@ -105,7 +105,7 @@ pub struct ReviewerSignAttestationRequest {
     pub evidence_hash_reviewed: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RejectAttestationRequest {
     pub rejection_reason: String,
 }

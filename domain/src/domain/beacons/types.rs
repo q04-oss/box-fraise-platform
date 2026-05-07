@@ -87,7 +87,7 @@ pub const BEACON_COLS_WITH_SECRET: &str =
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 /// Request body for `POST /api/beacons`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateBeaconRequest {
     /// The business this beacon belongs to.
     pub business_id: i32,
@@ -100,7 +100,7 @@ pub struct CreateBeaconRequest {
 // ── Response bodies ───────────────────────────────────────────────────────────
 
 /// Response returned by beacon endpoints. Never includes secret_key.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct BeaconResponse {
     /// Beacon database ID.
     pub id:                     i32,
@@ -119,7 +119,7 @@ pub struct BeaconResponse {
 }
 
 /// Daily UUID response for `GET /api/beacons/:id/daily-uuid`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DailyUuidResponse {
     /// Beacon database ID.
     pub beacon_id:     i32,

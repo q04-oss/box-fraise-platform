@@ -25,7 +25,14 @@ pub fn router() -> Router<AppState> {
 /// when the event is a broadcast (target_user_id == 0). Lagged receivers
 /// (slow clients) silently skip the dropped events; the stream itself
 /// stays alive because we map `Lagged` errors to `None` in `filter_map`.
-async fn stream(
+#[utoipa::path(
+    get, path = "/api/notifications/stream", tag = "notifications",
+    responses(
+        (status = 200, description = "Server-Sent Events stream", content_type = "text/event-stream"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn stream(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {

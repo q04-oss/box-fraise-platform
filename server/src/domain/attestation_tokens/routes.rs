@@ -35,7 +35,16 @@ pub fn router() -> Router<AppState> {
 /// Issue a short-lived scoped attestation token.
 /// Returns 201 with the raw_token — this is the ONLY time it is returned.
 /// Returns 404 if the user has no active soultoken.
-async fn issue(
+#[utoipa::path(
+    post, path = "/api/attestation-tokens/issue", tag = "attestation-tokens",
+    request_body = IssueAttestationTokenRequest,
+    responses(
+        (status = 201, description = "Token issued; raw_token returned ONCE", body = AttestationTokenResponse),
+        (status = 404, description = "User has no active soultoken"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn issue(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<IssueAttestationTokenRequest>,
@@ -49,7 +58,14 @@ async fn issue(
 /// Verify a presented raw token. No auth required — third parties call this.
 /// Always returns 200; the `valid` and `outcome` fields signal the result.
 /// Never reveals token existence via status code.
-async fn verify(
+#[utoipa::path(
+    post, path = "/api/attestation-tokens/verify", tag = "attestation-tokens",
+    request_body = VerifyAttestationTokenRequest,
+    responses(
+        (status = 200, description = "Verification result; check `valid` and `outcome` fields", body = VerificationResultResponse),
+    ),
+)]
+pub async fn verify(
     State(state): State<AppState>,
     headers:      HeaderMap,
     AppJson(body): AppJson<VerifyAttestationTokenRequest>,
@@ -72,7 +88,14 @@ async fn verify(
 ///
 /// Return the authenticated user's issued tokens.
 /// raw_token is never included in list responses.
-async fn get_my_tokens(
+#[utoipa::path(
+    get, path = "/api/attestation-tokens/me", tag = "attestation-tokens",
+    responses(
+        (status = 200, description = "List of caller's attestation tokens (metadata only)", body = [AttestationTokenMeta]),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn get_my_tokens(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<AttestationTokenMeta>>> {
@@ -83,7 +106,16 @@ async fn get_my_tokens(
 ///
 /// Revoke an attestation token before it expires.
 /// Returns 403 if the caller does not own the token.
-async fn revoke(
+#[utoipa::path(
+    post, path = "/api/attestation-tokens/{id}/revoke", tag = "attestation-tokens",
+    params(("id" = i32, Path, description = "Attestation token id to revoke")),
+    responses(
+        (status = 200, description = "Token revoked"),
+        (status = 403, description = "Caller does not own the token"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn revoke(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(token_id):       Path<i32>,

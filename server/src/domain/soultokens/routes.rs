@@ -33,7 +33,13 @@ pub fn router() -> Router<AppState> {
 ///
 /// Issue a soultoken after attestation is approved.
 /// Requesting user must have `verification_status = 'attested'`.
-async fn issue(
+#[utoipa::path(
+    post, path = "/api/soultokens/issue", tag = "soultokens",
+    request_body = IssueSoultokenRequest,
+    responses((status = 201, description = "Soultoken issued")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn issue(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<IssueSoultokenRequest>,
@@ -49,7 +55,12 @@ async fn issue(
 ///
 /// Return the active soultoken for the authenticated user.
 /// Response contains `display_code`, never `uuid`.
-async fn get_mine(
+#[utoipa::path(
+    get, path = "/api/soultokens/me", tag = "soultokens",
+    responses((status = 200, description = "Active soultoken for the authenticated user")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn get_mine(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<SoultokenResponse>> {
@@ -59,7 +70,13 @@ async fn get_mine(
 /// POST /api/soultokens/renew
 ///
 /// Renew the authenticated user's active soultoken for 12 more months.
-async fn renew(
+#[utoipa::path(
+    post, path = "/api/soultokens/renew", tag = "soultokens",
+    request_body = RenewSoultokenRequest,
+    responses((status = 200, description = "Soultoken renewed")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn renew(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<RenewSoultokenRequest>,
@@ -75,7 +92,11 @@ async fn renew(
 ///
 /// Public endpoint — no auth required. Publishes the Ed25519 verifying key
 /// any third party can use to verify Box Fraise soultoken signatures offline.
-async fn trust_registry_public_key(
+#[utoipa::path(
+    get, path = "/api/trust-registry/public-key", tag = "soultokens",
+    responses((status = 200, description = "Ed25519 verifying key for offline soultoken signature verification")),
+)]
+pub async fn trust_registry_public_key(
     State(state): State<AppState>,
 ) -> Json<serde_json::Value> {
     Json(json!({
@@ -90,7 +111,14 @@ async fn trust_registry_public_key(
 /// POST /api/soultokens/:id/revoke
 ///
 /// Revoke a soultoken. Requires platform_admin or attestation_reviewer role.
-async fn revoke(
+#[utoipa::path(
+    post, path = "/api/soultokens/{id}/revoke", tag = "soultokens",
+    params(("id" = i32, Path, description = "Soultoken ID to revoke")),
+    request_body = RevokeSoultokenRequest,
+    responses((status = 200, description = "Soultoken revoked")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn revoke(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(soultoken_id):   Path<i32>,
@@ -104,7 +132,14 @@ async fn revoke(
 /// POST /api/soultokens/:id/surrender
 ///
 /// Voluntary surrender by the soultoken holder. Requires in-person visit and staff witness.
-async fn surrender(
+#[utoipa::path(
+    post, path = "/api/soultokens/{id}/surrender", tag = "soultokens",
+    params(("id" = i32, Path, description = "Soultoken ID to surrender")),
+    request_body = SurrenderSoultokenRequest,
+    responses((status = 200, description = "Soultoken surrendered")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn surrender(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(soultoken_id):   Path<i32>,

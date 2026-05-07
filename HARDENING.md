@@ -143,7 +143,6 @@ not by section:
 | `constant_time_eq` shared utility crate                       | §11     | `integrations/src/stripe.rs` doc-comment                        |
 | `SOULTOKEN_HMAC_KEY` multi-version key rotation               | §1c     | `domain/src/domain/soultokens/service.rs::derive_display_code`  |
 | Stripe billing subscription webhook                           | §10     | `business_subscriptions` table left empty                       |
-| OpenAPI proc-macro annotations (15/89 routes documented; full migration deferred — see `server/src/openapi.rs` header) | n/a     | `server/src/openapi.rs` doc-comment                             |
 | Per-endpoint rate-limit tuning (config rows seeded in migration 009; per-user keying requires post-auth middleware refactor) | §6 / §10 | `server/src/http/middleware/rate_limit.rs`                      |
 
 None of the above block production launch — they're either operational

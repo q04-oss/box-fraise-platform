@@ -68,7 +68,7 @@ pub struct VisitSignatureRow {
     pub reassigned_reviewer_id: Option<i32>,
 }
 
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, utoipa::ToSchema)]
 pub struct QualityAssessmentRow {
     pub id:                       i32,
     pub visit_id:                 i32,
@@ -111,7 +111,7 @@ pub const VISIT_SIGNATURE_COLS: &str =
 
 // ── Request bodies ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct GrantRoleRequest {
     pub user_id:      i32,
     /// delivery_staff | attestation_reviewer | platform_admin
@@ -122,7 +122,7 @@ pub struct GrantRoleRequest {
     pub confirmed_by: Option<i32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ScheduleVisitRequest {
     pub location_id:               i32,
     /// delivery | support | quality | combined
@@ -133,13 +133,13 @@ pub struct ScheduleVisitRequest {
     pub expected_box_count:        Option<i32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ArriveAtVisitRequest {
     pub arrived_latitude:  Option<f64>,
     pub arrived_longitude: Option<f64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CompleteVisitRequest {
     pub actual_box_count:   i32,
     pub delivery_signature: Option<String>,
@@ -147,7 +147,7 @@ pub struct CompleteVisitRequest {
     pub evidence_storage_uri: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct QualityAssessmentRequest {
     pub business_id:               i32,
     pub beacon_functioning:        bool,
@@ -158,7 +158,7 @@ pub struct QualityAssessmentRequest {
 
 // ── Response bodies ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct StaffRoleResponse {
     pub id:          i32,
     pub user_id:     i32,
@@ -169,7 +169,7 @@ pub struct StaffRoleResponse {
     pub is_active:   bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct StaffVisitResponse {
     pub id:                 i32,
     pub location_id:        i32,

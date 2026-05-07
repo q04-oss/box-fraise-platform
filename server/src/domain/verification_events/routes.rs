@@ -29,7 +29,12 @@ pub fn router() -> Router<AppState> {
 ///
 /// Return the authenticated user's complete audit trail (BFIP Section 17.1).
 /// Records the access request in `audit_request_log` for compliance.
-async fn my_trail(
+#[utoipa::path(
+    get, path = "/api/audit/trail", tag = "verification",
+    responses((status = 200, description = "Authenticated user's full audit trail", body = UserAuditTrailResponse)),
+    security(("bearer_auth" = [])),
+)]
+pub async fn my_trail(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<UserAuditTrailResponse>> {
@@ -40,7 +45,12 @@ async fn my_trail(
 ///
 /// Return the authenticated user's verification journey events only.
 /// Lighter than the full audit trail — suitable for in-app status display.
-async fn my_journey(
+#[utoipa::path(
+    get, path = "/api/audit/journey", tag = "verification",
+    responses((status = 200, description = "Authenticated user's verification journey events", body = [VerificationEventResponse])),
+    security(("bearer_auth" = [])),
+)]
+pub async fn my_journey(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<VerificationEventResponse>>> {
@@ -51,7 +61,16 @@ async fn my_journey(
 ///
 /// Return any user's full audit trail. Requires platform_admin.
 /// Returns 403 if the caller is not a platform admin.
-async fn admin_trail(
+#[utoipa::path(
+    get, path = "/api/admin/audit/{user_id}", tag = "verification",
+    params(("user_id" = i32, Path, description = "Target user whose audit trail to fetch")),
+    responses(
+        (status = 200, description = "Target user's full audit trail", body = UserAuditTrailResponse),
+        (status = 403, description = "Forbidden — caller is not a platform_admin"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn admin_trail(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(target_id):      Path<i32>,

@@ -25,8 +25,9 @@ pub fn router() -> Router<AppState> {
         .layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT))
 }
 
-#[derive(Deserialize)]
-pub(crate) struct AskBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct AskBody {
+    /// User question to send to Dorotka.
     query: String,
     // context is intentionally absent — derived server-side from the Host header
     // so callers cannot select a system prompt that doesn't belong to their surface.
@@ -38,7 +39,18 @@ pub(crate) struct AskResponse {
     context: String,
 }
 
-pub(crate) async fn ask(
+#[utoipa::path(
+    post, path = "/api/dorotka/ask", tag = "dorotka",
+    request_body = AskBody,
+    responses(
+        (status = 200, description = "Dorotka response with answer and resolved context"),
+        (status = 400, description = "Empty or oversized query"),
+        (status = 403, description = "No active soultoken"),
+        (status = 429, description = "Rate limited"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn ask(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     ConnectInfo(addr):    ConnectInfo<SocketAddr>,

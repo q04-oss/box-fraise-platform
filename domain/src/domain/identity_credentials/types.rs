@@ -48,13 +48,13 @@ pub const COOLING_PERIOD_EVENT_COLS: &str =
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 /// Request body for `POST /api/identity/verify`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct InitiateVerificationRequest {
     pub stripe_session_id: String,
 }
 
 /// Request body for `POST /api/identity/cooling/app-open`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RecordAppOpenRequest {
     pub credential_id:        i32,
     pub device_identifier:    Option<String>,
@@ -64,7 +64,7 @@ pub struct RecordAppOpenRequest {
 // ── Response bodies ───────────────────────────────────────────────────────────
 
 /// Response from `POST /api/identity/verify`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct IdentityCredentialResponse {
     pub id:                         i32,
     pub credential_type:            String,
@@ -78,7 +78,7 @@ pub struct IdentityCredentialResponse {
 }
 
 /// Response from cooling-period endpoints.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct CoolingStatusResponse {
     pub credential_id:        i32,
     pub days_completed:       i64,

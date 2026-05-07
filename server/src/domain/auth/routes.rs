@@ -36,6 +36,11 @@ pub fn router() -> Router<AppState> {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    post, path = "/api/auth/apple", tag = "auth",
+    request_body = AppleAuthBody,
+    responses((status = 200, description = "Authenticated; returns JWT")),
+)]
 pub async fn apple(
     State(state):      State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -51,6 +56,11 @@ pub async fn apple(
     Ok(Json(resp))
 }
 
+#[utoipa::path(
+    get, path = "/api/auth/me", tag = "auth",
+    responses((status = 200, description = "Authenticated user profile")),
+    security(("bearer_auth" = [])),
+)]
 pub async fn me(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
@@ -59,6 +69,12 @@ pub async fn me(
     Ok(Json(MeResponse { user }))
 }
 
+#[utoipa::path(
+    patch, path = "/api/auth/push-token", tag = "auth",
+    request_body = PushTokenBody,
+    responses((status = 200, description = "Push token registered")),
+    security(("bearer_auth" = [])),
+)]
 pub async fn push_token(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
@@ -68,6 +84,15 @@ pub async fn push_token(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    patch, path = "/api/auth/display-name", tag = "auth",
+    request_body = DisplayNameBody,
+    responses(
+        (status = 200, description = "Display name updated"),
+        (status = 400, description = "display_name must be 1–50 characters"),
+    ),
+    security(("bearer_auth" = [])),
+)]
 pub async fn display_name(
     State(state): State<AppState>,
     RequireUser(user_id): RequireUser,
@@ -82,6 +107,11 @@ pub async fn display_name(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post, path = "/api/auth/logout", tag = "auth",
+    responses((status = 200, description = "Token revoked")),
+    security(("bearer_auth" = [])),
+)]
 pub async fn logout(
     State(state): State<AppState>,
     RequireClaims(claims): RequireClaims,
@@ -90,6 +120,14 @@ pub async fn logout(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post, path = "/api/auth/magic-link", tag = "auth",
+    request_body = MagicLinkBody,
+    responses(
+        (status = 200, description = "Magic link sent (or silently skipped for unknown email)"),
+        (status = 429, description = "Rate limited"),
+    ),
+)]
 pub async fn magic_link_request(
     State(state):      State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -106,10 +144,23 @@ pub async fn magic_link_request(
 #[derive(Deserialize)]
 struct MagicLinkOpenParams { token: String }
 
+#[utoipa::path(
+    get, path = "/api/auth/magic-link/open", tag = "auth",
+    params(("token" = String, Query, description = "Single-use magic-link token")),
+    responses((status = 307, description = "Redirect to whisked://auth?token=…")),
+)]
 async fn magic_link_open(Query(params): Query<MagicLinkOpenParams>) -> Response {
     Redirect::temporary(&format!("whisked://auth?token={}", params.token)).into_response()
 }
 
+#[utoipa::path(
+    post, path = "/api/auth/magic-link/verify", tag = "auth",
+    request_body = MagicLinkVerifyBody,
+    responses(
+        (status = 200, description = "Token verified; returns JWT"),
+        (status = 401, description = "Token invalid, expired, or already consumed"),
+    ),
+)]
 pub async fn magic_link_verify(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,

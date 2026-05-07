@@ -25,7 +25,16 @@ pub fn router() -> Router<AppState> {
 ///
 /// Record a BLE beacon dwell event. Validates witness HMAC, RSSI, and
 /// dwell duration per BFIP Section 5. Returns the current presence threshold state.
-async fn beacon_dwell(
+#[utoipa::path(
+    post, path = "/api/presence/beacon-dwell", tag = "presence",
+    request_body = RecordBeaconDwellRequest,
+    responses(
+        (status = 200, description = "Presence event recorded; returns current threshold state"),
+        (status = 400, description = "dwell_minutes must be positive"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn beacon_dwell(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<RecordBeaconDwellRequest>,
@@ -41,7 +50,16 @@ async fn beacon_dwell(
 ///
 /// Record an NFC tap of a visit box. Single-use — a box may only be tapped once.
 /// Returns 409 if the box has already been tapped.
-async fn nfc_tap(
+#[utoipa::path(
+    post, path = "/api/presence/nfc-tap", tag = "presence",
+    request_body = RecordNfcTapRequest,
+    responses(
+        (status = 200, description = "NFC tap recorded; returns current threshold state"),
+        (status = 409, description = "Box has already been tapped"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn nfc_tap(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<RecordNfcTapRequest>,
@@ -54,7 +72,15 @@ async fn nfc_tap(
 ///
 /// Return the current presence threshold state for the authenticated user.
 /// Returns 404 if the user has not started any presence verification.
-async fn status(
+#[utoipa::path(
+    get, path = "/api/presence/status", tag = "presence",
+    responses(
+        (status = 200, description = "Current presence threshold state"),
+        (status = 404, description = "No presence verification started"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn status(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<PresenceStatusResponse>> {

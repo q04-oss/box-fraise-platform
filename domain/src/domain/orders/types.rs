@@ -64,7 +64,7 @@ pub const VISIT_BOX_COLS: &str =
 
 // ── Request bodies ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateOrderRequest {
     pub business_id:         i32,
     pub variety_description: Option<String>,
@@ -74,21 +74,21 @@ pub struct CreateOrderRequest {
     pub amount_cents:        i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ActivateBoxRequest {
     pub nfc_chip_uid:       String,
     pub delivery_signature: String,
     pub expires_at:         DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CollectOrderRequest {
     pub nfc_chip_uid: String,
 }
 
 // ── Response bodies ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct OrderResponse {
     pub id:                   i32,
     pub business_id:          i32,
@@ -101,7 +101,7 @@ pub struct OrderResponse {
     pub created_at:           DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct VisitBoxResponse {
     pub id:          i32,
     pub nfc_chip_uid: String,

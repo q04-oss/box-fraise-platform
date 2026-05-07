@@ -25,7 +25,19 @@ pub fn router() -> Router<AppState> {
 ///
 /// Register a new partner business. The requesting user must be attested
 /// (BFIP Section 12). Returns 403 if not attested, 422 if validation fails.
-async fn create(
+#[utoipa::path(
+    post, path = "/api/businesses", tag = "businesses",
+    request_body = CreateBusinessRequest,
+    responses(
+        (status = 200, description = "Business registered"),
+        (status = 400, description = "name must be 1–100 characters"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "User is not attested"),
+        (status = 422, description = "address is required"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn create(
     State(state):           State<AppState>,
     RequireUser(user_id):   RequireUser,
     AppJson(body):          AppJson<CreateBusinessRequest>,
@@ -48,7 +60,15 @@ async fn create(
 /// GET /api/businesses/me
 ///
 /// List all businesses where the authenticated user is the primary holder.
-async fn list_mine(
+#[utoipa::path(
+    get, path = "/api/businesses/me", tag = "businesses",
+    responses(
+        (status = 200, description = "Businesses owned by the authenticated user"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn list_mine(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<BusinessResponse>>> {
@@ -58,7 +78,17 @@ async fn list_mine(
 /// GET /api/businesses/:id
 ///
 /// Fetch a single business by ID. Returns 404 if not found.
-async fn get_one(
+#[utoipa::path(
+    get, path = "/api/businesses/{id}", tag = "businesses",
+    params(("id" = i32, Path, description = "Business database ID")),
+    responses(
+        (status = 200, description = "Business detail"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Business not found"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn get_one(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(business_id):    Path<i32>,

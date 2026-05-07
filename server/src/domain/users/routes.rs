@@ -27,16 +27,26 @@ pub fn router() -> Router<AppState> {
         .route("/api/admin/users/{id}/unban",    post(unban_user))
 }
 
-#[derive(Deserialize)]
-struct BanRequest {
-    reason: String,
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct BanRequest {
+    pub reason: String,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    get, path = "/api/users/search", tag = "users",
+    params(("q" = String, Query, description = "Free-text search term (1–50 chars), matched against display name and email")),
+    responses(
+        (status = 200, description = "Matching users", body = [UserSearchResult]),
+        (status = 400, description = "q must be 1-50 characters"),
+        (status = 401, description = "Authentication required"),
+    ),
+    security(("bearer_auth" = [])),
+)]
 pub async fn search(
     State(state): State<AppState>,
-    RequireUser(_): RequireUser,
+    RequireUser(_user_id): RequireUser,
     Query(q): Query<SearchQuery>,
 ) -> AppResult<Json<Vec<UserSearchResult>>> {
     let trimmed = q.q.trim();
@@ -46,6 +56,16 @@ pub async fn search(
     Ok(Json(service::search_users(&state.db, trimmed).await?))
 }
 
+#[utoipa::path(
+    get, path = "/api/users/{id}/public-profile", tag = "users",
+    params(("id" = i32, Path, description = "Target user identifier")),
+    responses(
+        (status = 200, description = "Public-safe profile of the requested user", body = PublicProfile),
+        (status = 401, description = "Authentication required"),
+        (status = 404, description = "User not found"),
+    ),
+    security(("bearer_auth" = [])),
+)]
 pub async fn public_profile(
     State(state): State<AppState>,
     Path(user_id): Path<UserId>,
@@ -55,6 +75,14 @@ pub async fn public_profile(
 
 /// `DELETE /api/users/me` — request erasure. Returns the per-row anonymisation
 /// summary plus the retention rules that left a trace behind.
+#[utoipa::path(
+    delete, path = "/api/users/me", tag = "users",
+    responses(
+        (status = 200, description = "Erasure completed; returns retention summary", body = ErasureResponse),
+        (status = 401, description = "Authentication required"),
+    ),
+    security(("bearer_auth" = [])),
+)]
 pub async fn erase_me(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
@@ -64,6 +92,14 @@ pub async fn erase_me(
 
 /// `GET /api/users/me/export` — full export of the caller's data
 /// (GDPR Article 20).
+#[utoipa::path(
+    get, path = "/api/users/me/export", tag = "users",
+    responses(
+        (status = 200, description = "Full GDPR Article 20 export of the caller's data", body = UserDataExport),
+        (status = 401, description = "Authentication required"),
+    ),
+    security(("bearer_auth" = [])),
+)]
 pub async fn export_me(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
@@ -72,6 +108,18 @@ pub async fn export_me(
 }
 
 /// `POST /api/admin/users/:id/ban` — Hardening §10. platform_admin only.
+#[utoipa::path(
+    post, path = "/api/admin/users/{id}/ban", tag = "users",
+    params(("id" = i32, Path, description = "Target user to ban")),
+    request_body = BanRequest,
+    responses(
+        (status = 200, description = "User banned"),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "platform_admin only"),
+        (status = 404, description = "User not found"),
+    ),
+    security(("bearer_auth" = [])),
+)]
 pub async fn ban_user(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
@@ -83,6 +131,17 @@ pub async fn ban_user(
 }
 
 /// `POST /api/admin/users/:id/unban`.
+#[utoipa::path(
+    post, path = "/api/admin/users/{id}/unban", tag = "users",
+    params(("id" = i32, Path, description = "Target user to unban")),
+    responses(
+        (status = 200, description = "User unbanned"),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "platform_admin only"),
+        (status = 404, description = "User not found"),
+    ),
+    security(("bearer_auth" = [])),
+)]
 pub async fn unban_user(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,

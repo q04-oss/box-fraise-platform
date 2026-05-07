@@ -36,7 +36,15 @@ pub fn router() -> Router<AppState> {
 /// GET /api/admin/configuration
 ///
 /// Return all platform configuration values. Requires platform_admin.
-async fn list_all(
+#[utoipa::path(
+    get, path = "/api/admin/configuration", tag = "platform-config",
+    responses(
+        (status = 200, description = "All platform configuration values", body = [PlatformConfigurationResponse]),
+        (status = 403, description = "Caller is not a platform admin"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn list_all(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<PlatformConfigurationResponse>>> {
@@ -46,7 +54,17 @@ async fn list_all(
 /// GET /api/admin/configuration/:key
 ///
 /// Return a single configuration value. Requires platform_admin.
-async fn get_one(
+#[utoipa::path(
+    get, path = "/api/admin/configuration/{key}", tag = "platform-config",
+    params(("key" = String, Path, description = "Configuration key to fetch")),
+    responses(
+        (status = 200, description = "Configuration value", body = PlatformConfigurationResponse),
+        (status = 403, description = "Caller is not a platform admin"),
+        (status = 404, description = "Unknown configuration key"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn get_one(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(key):            Path<String>,
@@ -65,7 +83,19 @@ async fn get_one(
 ///
 /// Update a configuration value. Requires platform_admin.
 /// Returns 400 if value fails type validation.
-async fn update_one(
+#[utoipa::path(
+    patch, path = "/api/admin/configuration/{key}", tag = "platform-config",
+    params(("key" = String, Path, description = "Configuration key to update")),
+    request_body = UpdateConfigurationRequest,
+    responses(
+        (status = 200, description = "Configuration updated", body = PlatformConfigurationResponse),
+        (status = 400, description = "Value failed type validation"),
+        (status = 403, description = "Caller is not a platform admin"),
+        (status = 404, description = "Unknown configuration key"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn update_one(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(key):            Path<String>,
@@ -77,7 +107,16 @@ async fn update_one(
 /// GET /api/admin/configuration/:key/history
 ///
 /// Return full change history for a configuration key. Requires platform_admin.
-async fn get_history(
+#[utoipa::path(
+    get, path = "/api/admin/configuration/{key}/history", tag = "platform-config",
+    params(("key" = String, Path, description = "Configuration key whose history is requested")),
+    responses(
+        (status = 200, description = "Change history for the configuration key", body = [PlatformConfigurationHistoryResponse]),
+        (status = 403, description = "Caller is not a platform admin"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn get_history(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(key):            Path<String>,
@@ -86,7 +125,15 @@ async fn get_history(
 }
 
 /// GET /api/admin/feature-flags — list every flag (Hardening §10).
-async fn list_flags(
+#[utoipa::path(
+    get, path = "/api/admin/feature-flags", tag = "platform-config",
+    responses(
+        (status = 200, description = "All feature flags", body = [FeatureFlagRow]),
+        (status = 403, description = "Caller is not a platform admin"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn list_flags(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<FeatureFlagRow>>> {
@@ -96,7 +143,15 @@ async fn list_flags(
 /// GET /api/admin/billing/subscriptions — Hardening §10 read-only surface.
 /// Sized for the admin dashboard to inspect existing rows; future write
 /// paths will land alongside Stripe webhook integration.
-async fn list_subscriptions(
+#[utoipa::path(
+    get, path = "/api/admin/billing/subscriptions", tag = "platform-config",
+    responses(
+        (status = 200, description = "All business subscription rows"),
+        (status = 403, description = "Caller is not a platform admin"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn list_subscriptions(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<serde_json::Value>>> {
@@ -124,7 +179,18 @@ async fn list_subscriptions(
 }
 
 /// PATCH /api/admin/feature-flags/:flag_name — flip global enabled.
-async fn update_flag(
+#[utoipa::path(
+    patch, path = "/api/admin/feature-flags/{flag_name}", tag = "platform-config",
+    params(("flag_name" = String, Path, description = "Feature flag name to toggle")),
+    request_body = UpdateFeatureFlagRequest,
+    responses(
+        (status = 200, description = "Flag enabled state updated"),
+        (status = 403, description = "Caller is not a platform admin"),
+        (status = 404, description = "Unknown feature flag"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn update_flag(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(flag_name):      Path<String>,

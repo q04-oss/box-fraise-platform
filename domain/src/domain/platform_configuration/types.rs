@@ -25,12 +25,12 @@ pub struct PlatformConfigurationHistoryRow {
     pub changed_at:       DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateConfigurationRequest {
     pub value: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct PlatformConfigurationResponse {
     pub key:               String,
     pub value:             String,
@@ -40,7 +40,7 @@ pub struct PlatformConfigurationResponse {
     pub updated_at:        DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct PlatformConfigurationHistoryResponse {
     pub key:            String,
     pub previous_value: String,
@@ -82,7 +82,7 @@ pub const DEFAULTS: &[(&str, &str, &str, &str)] = &[
 
 // ── Feature flags (Hardening §10) ────────────────────────────────────────────
 
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, utoipa::ToSchema)]
 pub struct FeatureFlagRow {
     pub id:                   i32,
     pub flag_name:            String,
@@ -94,7 +94,7 @@ pub struct FeatureFlagRow {
     pub updated_at:           DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateFeatureFlagRequest {
     pub enabled: bool,
 }

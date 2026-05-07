@@ -29,7 +29,13 @@ pub fn router() -> Router<AppState> {
 ///
 /// Initiate a staff attestation for a presence-confirmed user during a visit.
 /// Requesting user must be the assigned delivery staff for the visit.
-async fn initiate(
+#[utoipa::path(
+    post, path = "/api/attestations", tag = "attestations",
+    request_body = InitiateAttestationRequest,
+    responses((status = 201, description = "Attestation initiated", body = VisitAttestationRow)),
+    security(("bearer_auth" = [])),
+)]
+pub async fn initiate(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<InitiateAttestationRequest>,
@@ -41,7 +47,12 @@ async fn initiate(
 /// GET /api/attestations
 ///
 /// List all attestations for the authenticated user (as the person being attested).
-async fn list_mine(
+#[utoipa::path(
+    get, path = "/api/attestations", tag = "attestations",
+    responses((status = 200, description = "Attestations for the authenticated user", body = [VisitAttestationRow])),
+    security(("bearer_auth" = [])),
+)]
+pub async fn list_mine(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<VisitAttestationRow>>> {
@@ -51,7 +62,12 @@ async fn list_mine(
 /// GET /api/attestations/pending
 ///
 /// List attestations in `co_sign_pending` status assigned to the requesting reviewer.
-async fn list_pending(
+#[utoipa::path(
+    get, path = "/api/attestations/pending", tag = "attestations",
+    responses((status = 200, description = "Pending attestations awaiting reviewer signature", body = [VisitAttestationRow])),
+    security(("bearer_auth" = [])),
+)]
+pub async fn list_pending(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<VisitAttestationRow>>> {
@@ -61,7 +77,14 @@ async fn list_pending(
 /// POST /api/attestations/:id/staff-sign
 ///
 /// Record the delivery staff's signature — transitions attestation to `co_sign_pending`.
-async fn staff_sign(
+#[utoipa::path(
+    post, path = "/api/attestations/{id}/staff-sign", tag = "attestations",
+    params(("id" = i32, Path, description = "Attestation id")),
+    request_body = StaffSignAttestationRequest,
+    responses((status = 200, description = "Staff signature recorded", body = VisitAttestationRow)),
+    security(("bearer_auth" = [])),
+)]
+pub async fn staff_sign(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(attestation_id): Path<i32>,
@@ -75,7 +98,14 @@ async fn staff_sign(
 /// POST /api/attestations/:id/reviewer-sign
 ///
 /// Record a reviewer co-signature. Approves the attestation when both reviewers have signed.
-async fn reviewer_sign(
+#[utoipa::path(
+    post, path = "/api/attestations/{id}/reviewer-sign", tag = "attestations",
+    params(("id" = i32, Path, description = "Attestation id")),
+    request_body = ReviewerSignAttestationRequest,
+    responses((status = 200, description = "Reviewer signature recorded", body = VisitAttestationRow)),
+    security(("bearer_auth" = [])),
+)]
+pub async fn reviewer_sign(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(attestation_id): Path<i32>,
@@ -90,7 +120,14 @@ async fn reviewer_sign(
 ///
 /// Reject an attestation. Only an assigned reviewer may reject.
 /// Returns the user to `presence_confirmed` status.
-async fn reject(
+#[utoipa::path(
+    post, path = "/api/attestations/{id}/reject", tag = "attestations",
+    params(("id" = i32, Path, description = "Attestation id")),
+    request_body = RejectAttestationRequest,
+    responses((status = 200, description = "Attestation rejected", body = VisitAttestationRow)),
+    security(("bearer_auth" = [])),
+)]
+pub async fn reject(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(attestation_id): Path<i32>,

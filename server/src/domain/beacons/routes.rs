@@ -26,7 +26,17 @@ pub fn router() -> Router<AppState> {
 ///
 /// Register a new beacon at a business location.
 /// The requesting user must be attested and the primary holder of the business.
-async fn create(
+#[utoipa::path(
+    post, path = "/api/beacons", tag = "beacons",
+    request_body = CreateBeaconRequest,
+    responses(
+        (status = 201, description = "Beacon created"),
+        (status = 401, description = "Unauthenticated"),
+        (status = 403, description = "Caller is not the primary holder of the business or is not attested"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn create(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<CreateBeaconRequest>,
@@ -39,7 +49,17 @@ async fn create(
 ///
 /// List all active beacons for a business.
 /// Only the business owner or a platform admin may call this endpoint.
-async fn list(
+#[utoipa::path(
+    get, path = "/api/beacons/business/{business_id}", tag = "beacons",
+    params(("business_id" = i32, Path, description = "Business ID to list beacons for")),
+    responses(
+        (status = 200, description = "List of active beacons for the business"),
+        (status = 401, description = "Unauthenticated"),
+        (status = 403, description = "Caller is not the business owner or a platform admin"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn list(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(business_id):    Path<i32>,
@@ -51,7 +71,18 @@ async fn list(
 ///
 /// Return today's HMAC-derived UUID for a beacon (UTC day).
 /// Only the business owner or a platform admin may call this endpoint.
-async fn daily_uuid(
+#[utoipa::path(
+    get, path = "/api/beacons/{id}/daily-uuid", tag = "beacons",
+    params(("id" = i32, Path, description = "Beacon ID")),
+    responses(
+        (status = 200, description = "Today's HMAC-derived UUID for the beacon"),
+        (status = 401, description = "Unauthenticated"),
+        (status = 403, description = "Caller is not the business owner or a platform admin"),
+        (status = 404, description = "Beacon not found"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn daily_uuid(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(beacon_id):      Path<i32>,
@@ -63,7 +94,18 @@ async fn daily_uuid(
 ///
 /// Rotate the secret key for a beacon. The old key is preserved as
 /// `previous_secret_key` for a 24-hour grace period. Returns the updated beacon.
-async fn rotate_key(
+#[utoipa::path(
+    post, path = "/api/beacons/{id}/rotate-key", tag = "beacons",
+    params(("id" = i32, Path, description = "Beacon ID")),
+    responses(
+        (status = 200, description = "Beacon key rotated; returns updated beacon"),
+        (status = 401, description = "Unauthenticated"),
+        (status = 403, description = "Caller is not the business owner or a platform admin"),
+        (status = 404, description = "Beacon not found"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn rotate_key(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(beacon_id):      Path<i32>,

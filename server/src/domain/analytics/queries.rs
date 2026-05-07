@@ -10,7 +10,7 @@ use sqlx::PgPool;
 
 // ── Verification funnel ─────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct FunnelStage {
     pub stage:              String,
     pub user_count:         i64,
@@ -45,7 +45,7 @@ pub async fn verification_funnel(pool: &PgPool) -> Result<Vec<FunnelStage>, sqlx
 
 // ── Daily counts (shared shape) ─────────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct DailyCount {
     pub date:  NaiveDate,
     pub count: i64,
@@ -84,7 +84,7 @@ pub async fn daily_presence_events(pool: &PgPool) -> Result<Vec<DailyCount>, sql
 
 // ── Time to attest ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct TimeToAttest {
     pub avg_days:    Option<f64>,
     pub median_days: Option<f64>,
@@ -114,7 +114,7 @@ pub async fn time_to_attest(pool: &PgPool) -> Result<TimeToAttest, sqlx::Error> 
 
 // ── Business stats ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct BusinessStats {
     pub total_active: i64,
     pub with_beacon:  i64,
@@ -140,7 +140,7 @@ pub async fn business_stats(pool: &PgPool) -> Result<BusinessStats, sqlx::Error>
 
 // ── Soultoken stats ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct SoultokenStats {
     pub total_issued:     i64,
     pub currently_active: i64,
@@ -170,7 +170,7 @@ pub async fn soultoken_stats(pool: &PgPool) -> Result<SoultokenStats, sqlx::Erro
 
 // ── Background-check pass rate ──────────────────────────────────────────────
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct BackgroundCheckStats {
     pub check_type: String,
     pub total:      i64,
@@ -198,7 +198,7 @@ pub async fn background_check_stats(pool: &PgPool) -> Result<Vec<BackgroundCheck
 
 // ── Conversion drop-off ─────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DropOff {
     pub from_stage:      String,
     pub to_stage:        String,

@@ -59,26 +59,26 @@ pub const SOULTOKEN_RENEWAL_COLS: &str =
 
 // ── Request bodies ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct IssueSoultokenRequest {
     pub attestation_id: i32,
     /// `user` | `business` | `cleared`
     pub token_type:     String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RevokeSoultokenRequest {
     pub revocation_reason:   String,
     pub revocation_visit_id: Option<i32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SurrenderSoultokenRequest {
     pub revocation_visit_id:   i32,
     pub surrender_witnessed_by: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RenewSoultokenRequest {
     /// Optional FK to presence_events — None when renewing without a qualifying event reference.
     pub presence_event_id: Option<i32>,
@@ -88,7 +88,7 @@ pub struct RenewSoultokenRequest {
 // ── Response bodies ───────────────────────────────────────────────────────────
 
 /// Public soultoken response — never includes `uuid`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SoultokenResponse {
     pub id:              i32,
     pub display_code:    String,
@@ -102,7 +102,7 @@ pub struct SoultokenResponse {
     pub is_active:       bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SoultokenRenewalResponse {
     pub soultoken_id:      i32,
     pub renewal_type:      String,

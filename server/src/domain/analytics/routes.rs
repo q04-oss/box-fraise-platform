@@ -50,7 +50,12 @@ async fn require_platform_admin(pool: &PgPool, user_id: UserId) -> Result<(), Ap
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-async fn funnel(
+#[utoipa::path(
+    get, path = "/api/admin/analytics/funnel", tag = "analytics",
+    responses((status = 200, description = "Verification funnel snapshot")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn funnel(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<FunnelStage>>> {
@@ -58,7 +63,12 @@ async fn funnel(
     Ok(Json(verification_funnel(&state.db).await?))
 }
 
-async fn attestations_daily(
+#[utoipa::path(
+    get, path = "/api/admin/analytics/attestations/daily", tag = "analytics",
+    responses((status = 200, description = "Soultokens issued per day (last 30 days)")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn attestations_daily(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<DailyCount>>> {
@@ -66,7 +76,12 @@ async fn attestations_daily(
     Ok(Json(daily_attestations(&state.db).await?))
 }
 
-async fn attestations_time_to_attest(
+#[utoipa::path(
+    get, path = "/api/admin/analytics/attestations/time-to-attest", tag = "analytics",
+    responses((status = 200, description = "Days from identity_confirmed to soultoken_issued")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn attestations_time_to_attest(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<TimeToAttest>> {
@@ -74,7 +89,12 @@ async fn attestations_time_to_attest(
     Ok(Json(time_to_attest(&state.db).await?))
 }
 
-async fn businesses(
+#[utoipa::path(
+    get, path = "/api/admin/analytics/businesses", tag = "analytics",
+    responses((status = 200, description = "Business activation stats")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn businesses(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<BusinessStats>> {
@@ -82,7 +102,12 @@ async fn businesses(
     Ok(Json(business_stats(&state.db).await?))
 }
 
-async fn presence_daily(
+#[utoipa::path(
+    get, path = "/api/admin/analytics/presence/daily", tag = "analytics",
+    responses((status = 200, description = "Presence events per day (last 14 days)")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn presence_daily(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<DailyCount>>> {
@@ -90,7 +115,12 @@ async fn presence_daily(
     Ok(Json(daily_presence_events(&state.db).await?))
 }
 
-async fn soultokens(
+#[utoipa::path(
+    get, path = "/api/admin/analytics/soultokens", tag = "analytics",
+    responses((status = 200, description = "Soultoken issuance and renewal stats")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn soultokens(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<SoultokenStats>> {
@@ -98,7 +128,12 @@ async fn soultokens(
     Ok(Json(soultoken_stats(&state.db).await?))
 }
 
-async fn background_checks(
+#[utoipa::path(
+    get, path = "/api/admin/analytics/background-checks", tag = "analytics",
+    responses((status = 200, description = "Background-check pass rate by check type")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn background_checks(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<BackgroundCheckStats>>> {
@@ -106,7 +141,12 @@ async fn background_checks(
     Ok(Json(background_check_stats(&state.db).await?))
 }
 
-async fn conversion(
+#[utoipa::path(
+    get, path = "/api/admin/analytics/conversion", tag = "analytics",
+    responses((status = 200, description = "Adjacent-stage conversion rates")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn conversion(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<DropOff>>> {

@@ -50,6 +50,10 @@ jsonwebtoken = "9"
 ciborium    = "0.2"
 x509-parser = "0.16"
 
+# OpenAPI — request/response types in this crate derive `ToSchema` so the
+# server-side `#[derive(OpenApi)]` aggregator can pull them in (cleanup #7).
+utoipa = { version = "5", features = ["chrono", "uuid"] }
+
 # Integrations
 box-fraise-integrations = { path = "../integrations" }
 

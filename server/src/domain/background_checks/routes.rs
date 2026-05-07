@@ -28,7 +28,18 @@ pub fn router() -> Router<AppState> {
 /// Requires identity_confirmed status and completed cooling period.
 /// Returns 403 if cooling is not complete or required checks are missing.
 /// Returns 409 if a pending check of this type already exists.
-async fn initiate(
+#[utoipa::path(
+    post, path = "/api/background-checks/initiate", tag = "background-checks",
+    request_body = InitiateCheckRequest,
+    responses(
+        (status = 201, description = "Background check initiated", body = BackgroundCheckResponse),
+        (status = 400, description = "check_type or provider missing"),
+        (status = 403, description = "Cooling period incomplete or required checks missing"),
+        (status = 409, description = "Pending check of this type already exists"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn initiate(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<InitiateCheckRequest>,
@@ -48,7 +59,15 @@ async fn initiate(
 /// Provider webhook endpoint — no authentication required.
 /// The HMAC of the raw payload is stored as response_hash for integrity.
 /// Always returns 200 (unknown external_check_ids are silently ignored).
-async fn webhook(
+#[utoipa::path(
+    post, path = "/api/background-checks/webhook", tag = "background-checks",
+    request_body = CheckWebhookPayload,
+    responses(
+        (status = 200, description = "Webhook accepted"),
+        (status = 400, description = "Invalid JSON in webhook body"),
+    ),
+)]
+pub async fn webhook(
     State(state): State<AppState>,
     body:         axum::body::Bytes,
 ) -> AppResult<StatusCode> {
@@ -67,7 +86,14 @@ async fn webhook(
 /// GET /api/background-checks/status
 ///
 /// Return the aggregate background check status for the authenticated user.
-async fn status(
+#[utoipa::path(
+    get, path = "/api/background-checks/status", tag = "background-checks",
+    responses(
+        (status = 200, description = "Aggregate background check status", body = BackgroundCheckStatusResponse),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn status(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<BackgroundCheckStatusResponse>> {

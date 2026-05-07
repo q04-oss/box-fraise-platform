@@ -27,7 +27,16 @@ pub fn router() -> Router<AppState> {
 ///
 /// Record a successful Stripe Identity verification. Called by the iOS app
 /// after Stripe confirms identity on the client. Starts the 7-day cooling period.
-async fn initiate_verification(
+#[utoipa::path(
+    post, path = "/api/identity/verify", tag = "identity",
+    request_body = InitiateVerificationRequest,
+    responses(
+        (status = 201, description = "Verification recorded; cooling period started"),
+        (status = 400, description = "stripe_session_id is required"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn initiate_verification(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<InitiateVerificationRequest>,
@@ -43,7 +52,20 @@ async fn initiate_verification(
 ///
 /// Stripe Identity webhook endpoint. No authentication — validated by HMAC
 /// signature in the `Stripe-Signature` header.
-async fn stripe_webhook(
+#[utoipa::path(
+    post, path = "/api/identity/webhook/stripe", tag = "identity",
+    request_body(
+        content = String,
+        content_type = "application/json",
+        description = "Raw Stripe webhook payload (signature verified server-side via STRIPE_WEBHOOK_SECRET)",
+    ),
+    responses(
+        (status = 200, description = "Webhook accepted"),
+        (status = 400, description = "Missing Stripe-Signature header"),
+        (status = 401, description = "Stripe signature invalid"),
+    ),
+)]
+pub async fn stripe_webhook(
     State(state): State<AppState>,
     headers:      HeaderMap,
     body:         axum::body::Bytes,
@@ -62,7 +84,13 @@ async fn stripe_webhook(
 /// POST /api/identity/cooling/app-open
 ///
 /// Record a cooling-period app open. Idempotent within the same calendar day.
-async fn app_open(
+#[utoipa::path(
+    post, path = "/api/identity/cooling/app-open", tag = "identity",
+    request_body = RecordAppOpenRequest,
+    responses((status = 200, description = "App open recorded; returns updated cooling status")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn app_open(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<RecordAppOpenRequest>,
@@ -75,7 +103,15 @@ async fn app_open(
 ///
 /// Return the current cooling period status. Returns 404 if the user has
 /// not yet initiated identity verification.
-async fn cooling_status(
+#[utoipa::path(
+    get, path = "/api/identity/cooling/status", tag = "identity",
+    responses(
+        (status = 200, description = "Current cooling status"),
+        (status = 404, description = "User has not initiated identity verification"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn cooling_status(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<CoolingStatusResponse>> {

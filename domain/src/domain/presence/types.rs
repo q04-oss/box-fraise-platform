@@ -86,7 +86,7 @@ pub const PRESENCE_THRESHOLD_COLS: &str =
 
 /// Request body for `POST /api/presence/beacon-dwell`.
 #[allow(missing_docs)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RecordBeaconDwellRequest {
     pub beacon_id:             i32,
     pub business_id:           i32,
@@ -101,7 +101,7 @@ pub struct RecordBeaconDwellRequest {
 
 /// Request body for `POST /api/presence/nfc-tap`.
 #[allow(missing_docs)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RecordNfcTapRequest {
     pub box_id:               i32,
     pub business_id:          i32,
@@ -114,7 +114,7 @@ pub struct RecordNfcTapRequest {
 
 /// Summary of a single qualifying presence event within a PresenceStatusResponse.
 #[allow(missing_docs)]
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PresenceEventSummary {
     pub id:               i32,
     pub event_type:       String,
@@ -126,7 +126,7 @@ pub struct PresenceEventSummary {
 
 /// Response from all presence endpoints — reflects the current threshold state.
 #[allow(missing_docs)]
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PresenceStatusResponse {
     pub user_id:          i32,
     pub business_id:      i32,

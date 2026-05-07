@@ -30,7 +30,7 @@ pub struct AuditRequestLogRow {
 // ── Response types ────────────────────────────────────────────────────────────
 
 /// A single verification journey event — internal fields (actor_id, reference_id) excluded.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VerificationEventResponse {
     pub id:             i32,
     pub event_type:     String,
@@ -42,7 +42,7 @@ pub struct VerificationEventResponse {
 }
 
 /// Soultoken summary — uuid never exposed.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SoultokenSummary {
     pub display_code:      String,
     pub token_type:        String,
@@ -52,7 +52,7 @@ pub struct SoultokenSummary {
     pub revocation_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PresenceEventSummary {
     pub event_type:       String,
     pub business_id:      i32,
@@ -62,7 +62,7 @@ pub struct PresenceEventSummary {
     pub occurred_at:      DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AttestationSummary {
     pub status:         String,
     pub attempt_number: i32,
@@ -71,7 +71,7 @@ pub struct AttestationSummary {
 }
 
 /// Attestation token summary — token_hash never exposed.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AttestationTokenSummary {
     pub scope:       String,
     pub issued_at:   DateTime<Utc>,
@@ -81,7 +81,7 @@ pub struct AttestationTokenSummary {
 }
 
 /// Full BFIP Section 17 audit trail response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct UserAuditTrailResponse {
     pub user_id:              i32,
     pub verification_journey: Vec<VerificationEventResponse>,

@@ -47,7 +47,7 @@ pub const USER_COLS: &str =
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 /// Request body for `POST /api/auth/apple`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AppleAuthBody {
     /// Apple identity token (JWT) returned by Sign in with Apple.
     pub identity_token: String,
@@ -56,28 +56,28 @@ pub struct AppleAuthBody {
 }
 
 /// Request body for `PATCH /api/auth/push-token`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct PushTokenBody {
     /// Expo push token to register for this device.
     pub push_token: String,
 }
 
 /// Request body for `PATCH /api/auth/display-name`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct DisplayNameBody {
     /// New display name (1–50 characters, trimmed).
     pub display_name: String,
 }
 
 /// Request body for `POST /api/auth/magic-link`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct MagicLinkBody {
     /// Email address to send the magic link to.
     pub email: String,
 }
 
 /// Request body for `POST /api/auth/magic-link/verify`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct MagicLinkVerifyBody {
     /// Single-use token extracted from the magic link URL.
     pub token: String,

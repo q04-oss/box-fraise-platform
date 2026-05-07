@@ -23,6 +23,7 @@ macro_rules! int_id {
         #[serde(transparent)]
         #[derive(sqlx::Type)]
         #[sqlx(transparent)]
+        #[derive(utoipa::ToSchema)]
         pub struct $name(i32);
 
         impl $name {

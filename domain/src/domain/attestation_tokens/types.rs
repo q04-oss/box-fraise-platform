@@ -37,7 +37,7 @@ pub struct ThirdPartyVerificationAttemptRow {
     pub attempted_at:                     DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct IssueAttestationTokenRequest {
     pub scope:                            String,
     pub requesting_business_soultoken_id: Option<i32>,
@@ -46,7 +46,7 @@ pub struct IssueAttestationTokenRequest {
     pub presentation_longitude:           Option<f64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct VerifyAttestationTokenRequest {
     pub raw_token:                        String,
     pub requesting_business_soultoken_id: Option<i32>,
@@ -54,7 +54,7 @@ pub struct VerifyAttestationTokenRequest {
 }
 
 /// Returned ONCE on issuance — raw_token is never stored or returned again.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AttestationTokenResponse {
     pub raw_token:  String,
     pub scope:      String,
@@ -62,7 +62,7 @@ pub struct AttestationTokenResponse {
     pub issued_at:  DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct VerificationResultResponse {
     pub valid:       bool,
     pub scope:       Option<String>,
@@ -71,7 +71,7 @@ pub struct VerificationResultResponse {
 }
 
 /// Token metadata returned for list endpoints — never includes raw_token.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct AttestationTokenMeta {
     pub id:         i32,
     pub scope:      String,

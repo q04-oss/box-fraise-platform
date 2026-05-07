@@ -60,7 +60,7 @@ pub const LOCATION_COLS: &str =
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 /// Request body for `POST /api/businesses`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateBusinessRequest {
     /// Business name — 1 to 100 characters.
     pub name:          String,
@@ -81,7 +81,7 @@ pub struct CreateBusinessRequest {
 // ── Response bodies ───────────────────────────────────────────────────────────
 
 /// Nested location detail within a [`BusinessResponse`].
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct LocationResponse {
     /// Location database ID.
     pub id:        i32,
@@ -98,7 +98,7 @@ pub struct LocationResponse {
 }
 
 /// Response returned by the businesses endpoints.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct BusinessResponse {
     /// Business database ID.
     pub id:                  i32,

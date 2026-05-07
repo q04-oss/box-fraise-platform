@@ -38,7 +38,13 @@ pub fn router() -> Router<AppState> {
 /// POST /api/staff/roles
 ///
 /// Grant a staff role to a user. Requires platform_admin.
-async fn grant_role(
+#[utoipa::path(
+    post, path = "/api/staff/roles", tag = "staff",
+    request_body = GrantRoleRequest,
+    responses((status = 201, description = "Staff role granted")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn grant_role(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<GrantRoleRequest>,
@@ -50,7 +56,12 @@ async fn grant_role(
 /// GET /api/staff/roles/me
 ///
 /// List the authenticated user's own active staff roles.
-async fn my_roles(
+#[utoipa::path(
+    get, path = "/api/staff/roles/me", tag = "staff",
+    responses((status = 200, description = "Caller's active staff roles")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn my_roles(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<StaffRoleResponse>>> {
@@ -60,7 +71,13 @@ async fn my_roles(
 /// POST /api/staff/visits
 ///
 /// Schedule a new staff visit. Requires delivery_staff or platform_admin.
-async fn schedule_visit(
+#[utoipa::path(
+    post, path = "/api/staff/visits", tag = "staff",
+    request_body = ScheduleVisitRequest,
+    responses((status = 201, description = "Visit scheduled")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn schedule_visit(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<ScheduleVisitRequest>,
@@ -72,7 +89,12 @@ async fn schedule_visit(
 /// GET /api/staff/visits
 ///
 /// List visits. Platform admins see all; delivery staff see only their own.
-async fn list_visits(
+#[utoipa::path(
+    get, path = "/api/staff/visits", tag = "staff",
+    responses((status = 200, description = "Visit list")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn list_visits(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<StaffVisitResponse>>> {
@@ -83,7 +105,14 @@ async fn list_visits(
 ///
 /// Record arrival at a scheduled visit — sets status to in_progress.
 /// Only the assigned staff member may call this.
-async fn arrive(
+#[utoipa::path(
+    post, path = "/api/staff/visits/{id}/arrive", tag = "staff",
+    params(("id" = i32, Path, description = "Visit ID")),
+    request_body = ArriveAtVisitRequest,
+    responses((status = 200, description = "Arrival recorded")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn arrive(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(visit_id):       Path<i32>,
@@ -96,7 +125,14 @@ async fn arrive(
 ///
 /// Mark a visit completed with box count and evidence.
 /// Only the assigned staff member or a platform_admin may call this.
-async fn complete(
+#[utoipa::path(
+    post, path = "/api/staff/visits/{id}/complete", tag = "staff",
+    params(("id" = i32, Path, description = "Visit ID")),
+    request_body = CompleteVisitRequest,
+    responses((status = 200, description = "Visit completed")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn complete(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(visit_id):       Path<i32>,
@@ -109,7 +145,14 @@ async fn complete(
 ///
 /// Submit a quality assessment for a business during a staff visit.
 /// Returns 201 on success.
-async fn quality_assessment(
+#[utoipa::path(
+    post, path = "/api/staff/visits/{id}/quality-assessment", tag = "staff",
+    params(("id" = i32, Path, description = "Visit ID")),
+    request_body = QualityAssessmentRequest,
+    responses((status = 201, description = "Quality assessment submitted")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn quality_assessment(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(visit_id):       Path<i32>,
@@ -137,7 +180,13 @@ struct EvidenceUrlQuery {
 /// The server SHA-256s the bytes itself; the returned `evidence_hash` is the
 /// canonical replacement for the client-supplied hash that
 /// `complete_visit` previously trusted.
-async fn upload_evidence(
+#[utoipa::path(
+    post, path = "/api/staff/visits/{id}/evidence", tag = "staff",
+    params(("id" = i32, Path, description = "Visit ID")),
+    responses((status = 201, description = "Evidence uploaded")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn upload_evidence(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(visit_id):       Path<i32>,
@@ -215,7 +264,16 @@ async fn upload_evidence(
 /// Issue a 15-minute presigned `GET` URL so an assigned reviewer can view
 /// the previously-uploaded evidence object. Auth: assigned staff,
 /// platform_admin, or any reviewer on an attestation tied to this visit.
-async fn evidence_url(
+#[utoipa::path(
+    get, path = "/api/staff/visits/{id}/evidence/url", tag = "staff",
+    params(
+        ("id"   = i32,    Path,  description = "Visit ID"),
+        ("path" = String, Query, description = "Storage object path returned from upload"),
+    ),
+    responses((status = 200, description = "Presigned GET URL (15-minute expiry)")),
+    security(("bearer_auth" = [])),
+)]
+pub async fn evidence_url(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
     Path(visit_id):       Path<i32>,

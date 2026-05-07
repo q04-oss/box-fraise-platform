@@ -6,7 +6,7 @@ use crate::types::UserId;
 // ── Public-safe user projection ───────────────────────────────────────────────
 
 /// Public-facing user profile — contains no private or sensitive fields.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PublicProfile {
     /// User identifier.
     pub id:                  UserId,
@@ -21,7 +21,7 @@ pub struct PublicProfile {
 }
 
 /// Compact user result returned by the search endpoint.
-#[derive(Debug, sqlx::FromRow, Serialize)]
+#[derive(Debug, sqlx::FromRow, Serialize, utoipa::ToSchema)]
 pub struct UserSearchResult {
     /// User identifier.
     pub id:                  UserId,
@@ -46,7 +46,7 @@ pub struct SearchQuery {
 
 /// Response from `DELETE /api/users/me`. Records what was anonymised in
 /// place and what is retained for legal evidence.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ErasureResponse {
     /// Erased user's id.
     pub user_id:              i32,
@@ -60,7 +60,7 @@ pub struct ErasureResponse {
 }
 
 /// Top-level `GET /api/users/me/export` response (GDPR Article 20).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct UserDataExport {
     /// When the export was generated (server-side).
     pub exported_at:          DateTime<Utc>,
@@ -79,7 +79,7 @@ pub struct UserDataExport {
 }
 
 /// Identity profile section of the export.
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct UserProfileExport {
     /// User identifier.
     pub id:                  i32,
@@ -94,7 +94,7 @@ pub struct UserProfileExport {
 }
 
 /// Verification-event row in the export.
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct VerificationEventExport {
     /// Event identifier.
     pub id:           i32,
@@ -105,7 +105,7 @@ pub struct VerificationEventExport {
 }
 
 /// Presence event summary — no GPS, just business + timestamp.
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct PresenceEventSummary {
     /// Event identifier.
     pub id:           i32,
@@ -118,7 +118,7 @@ pub struct PresenceEventSummary {
 }
 
 /// Order row in the export.
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct OrderExport {
     /// Order identifier.
     pub id:           i32,
@@ -135,7 +135,7 @@ pub struct OrderExport {
 }
 
 /// Consent record in the export.
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct ConsentExport {
     /// Consent type (`platform_terms`, `privacy_policy`, ...).
     pub consent_type:    String,
@@ -150,7 +150,7 @@ pub struct ConsentExport {
 }
 
 /// Soultoken summary row in the export. Excludes the internal UUID.
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct SoultokenSummary {
     /// Soultoken identifier.
     pub id:            i32,

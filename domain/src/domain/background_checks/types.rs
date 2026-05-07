@@ -29,7 +29,7 @@ pub const BACKGROUND_CHECK_COLS: &str =
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 /// Request body for `POST /api/background-checks/initiate`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct InitiateCheckRequest {
     /// One of: sanctions, identity_fraud, criminal
     pub check_type: String,
@@ -38,7 +38,7 @@ pub struct InitiateCheckRequest {
 }
 
 /// Incoming webhook payload from background check providers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CheckWebhookPayload {
     pub external_check_id: String,
     /// One of: passed, failed, review_required
@@ -50,7 +50,7 @@ pub struct CheckWebhookPayload {
 // ── Response bodies ───────────────────────────────────────────────────────────
 
 /// Individual check result returned from the API.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct BackgroundCheckResponse {
     pub id:         i32,
     pub check_type: String,
@@ -62,7 +62,7 @@ pub struct BackgroundCheckResponse {
 }
 
 /// Aggregate status across all check types for a user.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct BackgroundCheckStatusResponse {
     pub user_id:               i32,
     pub sanctions_status:      Option<String>,

@@ -37,14 +37,14 @@ pub struct GiftBoxHistoryRow {
     pub gifted_at:   DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateBookingRequest {
     pub visit_id:          i32,
     pub issue_description: Option<String>,
     pub priority:          Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ResolveBookingRequest {
     pub resolution_description: String,
     pub resolution_signature:   String,
@@ -52,12 +52,12 @@ pub struct ResolveBookingRequest {
     pub gift_box_id:            Option<i32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CancelBookingRequest {
     pub cancellation_reason: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct SupportBookingResponse {
     pub id:                i32,
     pub visit_id:          i32,
