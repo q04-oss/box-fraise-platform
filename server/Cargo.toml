@@ -32,6 +32,8 @@ tower-http  = { version = "0.6", features = [
     "set-header",
 ] }
 tokio       = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures      = "0.3"
 
 # ── Database ──────────────────────────────────────────────────────────────────
 sqlx = { workspace = true }

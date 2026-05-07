@@ -21,6 +21,9 @@ use box_fraise_integrations::storage::StorageClient;
 use axum_prometheus::PrometheusMetricLayer;
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::OnceLock;
+use tokio::sync::broadcast;
+
+use crate::notifications::NotificationEvent;
 
 /// The `metrics-exporter-prometheus` crate registers a global recorder; the
 /// pair must therefore be constructed exactly once per process. Tests run
@@ -66,6 +69,12 @@ pub struct AppState {
     /// Prometheus metric handle (Hardening §4). The same handle that the
     /// metrics layer registered with — call `.render()` from `/metrics`.
     pub metric_handle:    PrometheusHandle,
+    /// SSE broadcast channel (Hardening §7). The events handler in
+    /// `events.rs` publishes `NotificationEvent`s here; subscribers come
+    /// and go via `/api/notifications/stream`. Buffer size 1024 — slow
+    /// receivers get dropped events (the SSE handler simply skips
+    /// `Lagged` errors so the stream survives).
+    pub event_tx:         broadcast::Sender<NotificationEvent>,
 }
 
 impl AppState {
@@ -147,6 +156,7 @@ impl AppState {
             ed25519_key_pair: Arc::new(ed25519_key_pair),
             storage_client,
             metric_handle,
+            event_tx: broadcast::channel(1024).0,
         }
     }
 }
@@ -179,6 +189,7 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::verification_events::routes::router())
         .merge(crate::domain::platform_configuration::routes::router())
         .merge(crate::domain::analytics::routes::router())
+        .merge(crate::domain::notifications::routes::router())
         // ── Security middleware (innermost — runs first) ───────────────────────
         //
         // TODO(rls-enforcement, Hardening 2d): wire `set_rls_user_context`

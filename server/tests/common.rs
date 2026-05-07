@@ -108,6 +108,7 @@ pub fn build_state_with_config(db: PgPool, redis: Option<RedisPool>, cfg: Config
         ed25519_key_pair: Arc::new(test_ed25519_key_pair()),
         storage_client:   None,
         metric_handle,
+        event_tx:         tokio::sync::broadcast::channel(64).0,
     }
 }
 

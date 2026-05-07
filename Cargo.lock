@@ -1070,6 +1070,7 @@ dependencies = [
  "deadpool-redis",
  "dotenvy",
  "fake",
+ "futures",
  "hex",
  "jsonwebtoken",
  "metrics",
@@ -1089,6 +1090,7 @@ dependencies = [
  "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tower 0.5.3",
  "tower-cookies",
  "tower-http 0.6.8",
@@ -5243,6 +5245,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

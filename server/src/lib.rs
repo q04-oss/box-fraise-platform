@@ -3,6 +3,7 @@ pub mod domain;
 pub mod error;
 pub mod events;
 pub mod http;
+pub mod notifications;
 pub mod openapi;
 
 // Re-export shared infrastructure from the domain crate so that:
@@ -147,12 +148,13 @@ pub async fn run() -> anyhow::Result<()> {
     let mut event_rx = state.event_bus.subscribe();
     let event_pool   = state.db.clone();
     let event_http   = state.http.clone();
+    let notif_tx     = state.event_tx.clone();
     tokio::spawn(async move {
         use tokio::sync::broadcast::error::RecvError;
         loop {
             match event_rx.recv().await {
                 Ok(event) => {
-                    events::handle(&event_pool, &event_http, event).await;
+                    events::handle(&event_pool, &event_http, &notif_tx, event).await;
                 }
                 Err(RecvError::Lagged(n)) => {
                     tracing::warn!(dropped = n, "event bus consumer lagged — events dropped");

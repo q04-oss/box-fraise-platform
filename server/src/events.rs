@@ -1,10 +1,24 @@
 use box_fraise_domain::{audit, events::DomainEvent};
 use metrics::counter;
 use sqlx::PgPool;
+use tokio::sync::broadcast;
+
+use crate::notifications::NotificationEvent;
 
 /// Consume one domain event and write durable side-effects:
 /// - audit trail row for every event kind
-pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) {
+/// - SSE notification (Hardening §7) for variants the UI cares about
+///
+/// `event_tx.send` returns `Err(SendError)` when no receivers are connected;
+/// that's fine — drop with `let _ =`. Slow receivers see lagged events
+/// dropped at the channel boundary; the SSE handler skips `Lagged` errors
+/// so the stream survives.
+pub async fn handle(
+    pool:     &PgPool,
+    _http:    &reqwest::Client,
+    event_tx: &broadcast::Sender<NotificationEvent>,
+    event:    DomainEvent,
+) {
     match event {
         DomainEvent::UserRegistered { user_id, email: _ } => {
             audit::write(
@@ -152,6 +166,11 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
 
         DomainEvent::OrderCollected { order_id, user_id, box_id } => {
             counter!("bfip_orders_collected_total").increment(1);
+            // Hardening §7 — surface to the user's SSE stream. business_id
+            // requires a join (orders.business_id) — TODO: fetch and emit.
+            let _ = event_tx.send(NotificationEvent::OrderReady {
+                order_id, user_id, business_id: 0,
+            });
             tracing::info!(order_id, user_id, box_id, "order.collected");
             audit::write(
                 pool,
@@ -168,6 +187,12 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
 
         DomainEvent::SoultokenIssued { soultoken_id, user_id, ref token_type } => {
             counter!("bfip_soultokens_issued_total").increment(1);
+            // Hardening §7 — display_code requires a soultokens lookup;
+            // emitting empty for now and TODO'd until we extend the
+            // domain event with the display code at issuance time.
+            let _ = event_tx.send(NotificationEvent::SoultokenIssued {
+                user_id, display_code: String::new(),
+            });
             tracing::info!(soultoken_id, user_id, token_type, "soultoken.issued");
             audit::write(
                 pool,
@@ -227,6 +252,9 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
 
         DomainEvent::AttestationApproved { attestation_id, user_id } => {
             counter!("bfip_attestations_approved_total").increment(1);
+            let _ = event_tx.send(NotificationEvent::AttestationApproved {
+                attestation_id, user_id,
+            });
             tracing::info!(attestation_id, user_id, "attestation.approved");
             audit::write(
                 pool,
@@ -240,6 +268,12 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
 
         DomainEvent::AttestationRejected { attestation_id, user_id, rejection_reviewer_id } => {
             counter!("bfip_attestations_rejected_total").increment(1);
+            // The DomainEvent doesn't carry the human-readable rejection
+            // reason — only the reviewer id. Emit `reason: None` for now;
+            // future work can fetch from `attestation_attempts` if needed.
+            let _ = event_tx.send(NotificationEvent::AttestationRejected {
+                attestation_id, user_id, reason: None,
+            });
             tracing::info!(attestation_id, user_id, rejection_reviewer_id, "attestation.rejected");
             audit::write(
                 pool,
@@ -320,6 +354,11 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
 
         DomainEvent::BackgroundCheckPassed { user_id, check_id, ref check_type } => {
             counter!("bfip_background_checks_passed_total").increment(1);
+            let _ = event_tx.send(NotificationEvent::BackgroundCheckResult {
+                user_id,
+                check_type: check_type.clone(),
+                status:     "passed".to_string(),
+            });
             tracing::info!(user_id, check_id, check_type, "background_check.passed");
             audit::write(
                 pool,
@@ -368,6 +407,9 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
         }
 
         DomainEvent::SupportBookingCreated { booking_id, user_id, visit_id } => {
+            let _ = event_tx.send(NotificationEvent::SupportBookingConfirmed {
+                booking_id, user_id, visit_id,
+            });
             tracing::info!(booking_id, user_id, visit_id, "support.booking_created");
             audit::write(
                 pool,

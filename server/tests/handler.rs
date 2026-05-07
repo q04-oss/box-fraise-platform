@@ -2566,6 +2566,46 @@ async fn response_includes_security_headers(pool: PgPool) {
     assert!(csp.contains("nonce-"), "CSP must include a per-request nonce, got: {csp}");
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Real-time notifications (Hardening §7) — SSE stream
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn sse_stream_returns_200_with_correct_content_type(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+    let token = common::valid_token(uid);
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/notifications/stream", &token))
+        .await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
+    assert!(ct.starts_with("text/event-stream"),
+        "SSE response must be text/event-stream, got: {ct}");
+}
+
+#[sqlx::test]
+async fn sse_stream_requires_auth(pool: PgPool) {
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/notifications/stream")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[sqlx::test]
 async fn retry_after_header_present_on_429(pool: PgPool) {
     use fake::{Fake, faker::internet::en::SafeEmail};
