@@ -178,6 +178,7 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::attestation_tokens::routes::router())
         .merge(crate::domain::verification_events::routes::router())
         .merge(crate::domain::platform_configuration::routes::router())
+        .merge(crate::domain::analytics::routes::router())
         // ── Security middleware (innermost — runs first) ───────────────────────
         //
         // TODO(rls-enforcement, Hardening 2d): wire `set_rls_user_context`

@@ -2380,3 +2380,90 @@ async fn get_evidence_url_returns_503_when_storage_not_configured(pool: PgPool) 
         .await.unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Analytics (Hardening §5) — admin-only aggregate endpoints
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn get_analytics_funnel_returns_200_for_admin(pool: PgPool) {
+    let (_, admin_token) = create_platform_admin_user(&pool).await;
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/admin/analytics/funnel", &admin_token))
+        .await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json.is_array(), "funnel response must be a JSON array");
+}
+
+#[sqlx::test]
+async fn get_analytics_funnel_returns_403_for_non_admin(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+    let token = common::valid_token(uid);
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/admin/analytics/funnel", &token))
+        .await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn get_analytics_businesses_returns_200_for_admin(pool: PgPool) {
+    let (_, admin_token) = create_platform_admin_user(&pool).await;
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/admin/analytics/businesses", &admin_token))
+        .await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["total_active"].is_i64(), "businesses response must carry total_active");
+}
+
+#[sqlx::test]
+async fn get_analytics_soultokens_returns_200_for_admin(pool: PgPool) {
+    let (_, admin_token) = create_platform_admin_user(&pool).await;
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/admin/analytics/soultokens", &admin_token))
+        .await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["total_issued"].is_i64(), "soultokens response must carry total_issued");
+}
+
+#[sqlx::test]
+async fn get_analytics_conversion_returns_200_for_admin(pool: PgPool) {
+    let (_, admin_token) = create_platform_admin_user(&pool).await;
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/admin/analytics/conversion", &admin_token))
+        .await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json.is_array(), "conversion response must be a JSON array");
+}
