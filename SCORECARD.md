@@ -445,3 +445,124 @@ The box-fraise-platform backend now implements:
 - **Platform config** (§15): Runtime-configurable protocol parameters
 - **User audit trail** (§17): GDPR Article 15 right of access, compliance log
 - **Businesses, beacons, users, presence, Dorotka**: Full domain coverage
+
+---
+## [2026-05-07] Scorecard — post 12-section hardening pass
+
+| Dimension | Score | Weight | Weighted |
+|-----------|-------|--------|---------|
+| Security | 9.0/10 | 1.5x | 13.50 |
+| Architecture | 8.6/10 | 1.0x | 8.60 |
+| Engineer Usability | 8.7/10 | 1.0x | 8.70 |
+| Protocol Conformance | 9.0/10 | 1.5x | 13.50 |
+| Operational Readiness | 8.0/10 | 1.0x | 8.00 |
+| Product Completeness | 9.0/10 | 1.0x | 9.00 |
+| **Overall (straight)** | **8.72/10** | | |
+| **Overall (weighted)** | **8.76/10** | | |
+| **Grade** | **B+** | | |
+
+### What changed since 2026-05-03
+
+The 12-section hardening pass shipped between the previous scorecard and this run (commits `90aa1e4` → `aea9569`). Material movements vs. the 2026-05-03 platform_configuration baseline (8.22 / 8.29):
+
+- **§1 cryptographic upgrades** — Ed25519 replaces HMAC-SHA256 for soultoken signing (`domain/src/crypto/ed25519.rs`); aggregated Ed25519 attestation co-signing (`verify_aggregated_ed25519`); `constant_time_eq` consolidated to `domain::crypto`; `subtle` and `bcrypt` dropped as unused. The §1 audit closes the previous-scorecard top-1 gap.
+- **§2 RLS** — 73 RLS policies on 34 tables (`server/migrations/002_rls.sql`, 586 lines), three roles (`app_user`, `app_readonly`, `app_admin`), `app_user_prod` runtime user (`003_app_user.sql`). Enforcement gated on `APP_USER_DATABASE_URL` + per-request transaction wiring (the latter tracked as §2d TODO in `server/src/app.rs:195-209`).
+- **§3 evidence storage** — DigitalOcean Spaces `StorageClient`, multipart upload route at `/api/staff/visits/:id/evidence`, presigned URLs.
+- **§4 observability** — `axum-prometheus` middleware, `/metrics` endpoint, 7 BFIP domain counters in `server/src/events.rs`, Sentry via `sentry-tracing`, `/health` returns `{status, database, redis, storage, version}` with healthy/degraded/unhealthy mapping (`server/src/http/routes/meta.rs:48-87`).
+- **§5 analytics** — 8 admin-only routes in `server/src/domain/analytics/routes.rs`, 3 Metabase views (`004_analytics_views.sql`).
+- **§6 API hardening** — CORS lockdown via explicit `allowed_origins`, global 30s `TimeoutLayer`, Dorotka soultoken gating, `Retry-After: 60` on every 429 (`server/src/error.rs:96-99` and `server/src/http/middleware/rate_limit.rs:88-95`), per-response CSP nonce middleware (`server/src/http/middleware/security_headers.rs`). Both CSP nonce and Retry-After were the 2026-05-03 deferred items #3 and #5 — both now landed.
+- **§7 SSE notifications** — `NotificationEvent` enum (7 variants), `broadcast::Sender` in `AppState`, `/api/notifications/stream` SSE handler, 6 domain-event match arms publish notifications.
+- **§8 infrastructure** — multi-stage `Dockerfile` (`rust:1.95-slim-bookworm` → `debian:bookworm-slim`), `deploy/nginx.conf`, `deploy/box-fraise-platform.service` systemd unit with security hardening, `deploy/DEPLOY.md`, GHA `docker-build` job.
+- **§9 data compliance** — `consent_records` table (`005_compliance.sql`), `DELETE /api/users/me`, `GET /api/users/me/export`, daily retention pruning daemon (`server/src/tasks/retention.rs`), `deploy/BACKUP.md`.
+- **§10 operational** — feature flags (`006_feature_flags.sql`), billing scaffolding (`007_billing.sql`), admin ban/unban that revokes active soultokens, `deploy/SECRETS_ROTATION.md`, `deploy/INCIDENT_RESPONSE.md`.
+- **§11 protocol** — BFIP v0.2.0 published (`bfip/PROTOCOL.md`), BFAP v0.1.0 stub (`bfap/PROTOCOL.md`), trust-registry endpoint reports `bfip_version: "0.2.0"`.
+- **§12 documentation** — `ROADMAP.md`, `PRODUCTION.md`, `HARDENING.md`, refreshed `README.md`.
+
+Test count: **390 passing** (up from 325). Routes: **82** registered (excl. OpenAPI + meta), across 18 server-side domain modules.
+
+### Justifications
+
+**Security 9.0** — files read: `server/src/http/middleware/{hmac,rate_limit,security_headers,correlation_id,log_rejections,tracing,mod}.rs`, `server/src/http/extractors/auth.rs`, `domain/src/audit.rs`, `domain/src/crypto/{mod,ed25519}.rs`, `domain/src/auth/mod.rs`, `domain/src/auth/apple_attest.rs`, `domain/src/domain/auth/service.rs`, `domain/src/domain/auth/repository.rs`, `.github/workflows/ci.yml`, `server/migrations/{002_rls,003_app_user}.sql`, `server/src/error.rs`. Ed25519 keypair fully wired (`Ed25519KeyPair::from_hex` at `app.rs:114-136` with verifying-key cross-check that fails fast); HMAC iOS request signing rejects 401/400/409 in correct order with replay-prevention via Redis SET NX EX (`hmac.rs:201-248`) and fails closed on Redis failure; constant-time comparison consolidated (`hmac.rs:282-285` re-exports `domain::crypto::constant_time_eq`); audit table append-only via DB trigger; magic links DB-first single-use via `UPDATE … WHERE used_at IS NULL` (`auth/service.rs:245-256`); banned-user check on every `RequireUser` extraction (`extractors/auth.rs:73-86`); CSP per-response nonce, `Retry-After: 60` on 429s, per-IP Redis rate limit with in-process fallback. Stops at 9.0 because the deferred items in `HARDENING.md` are real: RLS per-request transaction wiring is documented but not landed (so RLS policies are inert in dev/test and any deployment that hasn't set `APP_USER_DATABASE_URL`); evidence-hash enforcement still trusts the client-supplied hash at `complete_visit`; per-endpoint rate-limit tuning is a TODO block in `rate_limit.rs:9-18`; App Attest assertion verification is implemented in `domain/src/auth/apple_attest.rs` (`parse_attestation` + `verify_assertion`) but not wired to any route — `hmac.rs:174-177` accepts and ignores `x-fraise-attest-key`. Above 8.5 because every previously-deferred top-3 security item (Ed25519 PKI, CSP nonce, Retry-After) now ships.
+
+**Architecture 8.6** — files read: workspace `Cargo.toml`, `domain/Cargo.toml`, `server/Cargo.toml`, `domain/src/lib.rs`, `domain/src/event_bus.rs`, `domain/src/events.rs`, `domain/src/error.rs`, `server/src/error.rs`, `server/src/lib.rs`, `server/src/app.rs`, `server/src/events.rs`, `domain/src/types/mod.rs`, `CONTRIBUTING.md` (layer rules). Three-crate workspace (server, domain, integrations) with strict layer rule documented in `CONTRIBUTING.md:37-60`; domain has zero `axum` imports (verified by Grep); CQRS-style routes → service → repository → types per directory; 31 `DomainEvent` variants in `domain/src/events.rs` all match-armed in `server/src/events.rs:22-438` with audit + counter + SSE notification side-effects; error boundary clean (`AppError` only in server, `From<DomainError> for AppError` exhaustive at `server/src/error.rs:105-121`); `types/mod.rs` dead exports flagged in earlier scorecard runs are gone (`UserId`, `OrderId`, `StripeCustomerId` only). Stops at 8.6 because: two `DomainEvent` payload TODOs ship as data gaps (`OrderCollected` arm sends `business_id: 0` at `server/src/events.rs:171-173`; `SoultokenIssued` arm sends empty `display_code` at `server/src/events.rs:188-195`); two parallel `platform_admin` paths persist (`is_platform_admin` boolean column vs. `staff_roles` row, called out in `docs/ACCESS_CONTROL_MATRIX.md` matrix Section 5); OpenAPI is a hand-built `PathsBuilder` in `server/src/openapi.rs` covering only ~12 paths despite `utoipa` being in the dependency tree.
+
+**Engineer Usability 8.7** — files read: `server/tests/{auth,common,contracts,handler,integration}.rs`, `Justfile`, `.github/workflows/ci.yml`, `README.md`, `CONTRIBUTING.md`, `WORKFLOW.md`, `HARDENING.md`, `PRODUCTION.md`, `ROADMAP.md`, `fuzz/Cargo.toml`, `fuzz/fuzz_targets/{hmac_verify,sanitise}.rs`, sample of `server/src/domain/*/routes.rs`. 390 tests workspace-wide (per user); test categories visible: 109 test functions in `handler.rs` (handler-level w/ `sqlx::test` per-test isolated DB), 24 in `integration.rs`, 15 in `contracts.rs` (compile-time service-signature contracts), 393 `#[sqlx::test|tokio::test|test]|proptest!` markers across 26 files; property tests via `proptest!` in `domain/src/auth/mod.rs`, `domain/src/crypto/{mod,ed25519}.rs`, `server/src/http/middleware/hmac.rs`; 2 fuzz targets (`hmac_verify`, `sanitise`); CI has 7 jobs (check + clippy, test, audit, gitleaks, schema-drift, docker-build, docs) plus a Monday weekly cron; Justfile has 8 recipes covering test/check/audit/ci/drift/docs/fuzz; doc set is comprehensive (5 top-level + 4 deploy runbooks). Stops at 8.7 because OpenAPI is hand-built rather than `utoipa::path` proc-macro on routes (HARDENING.md flags this as a deferred item), so the spec drifts from handler signatures by hand; some test categories sit in only one file (`handler.rs` is 2987 LOC).
+
+**Protocol Conformance 9.0** — files read: `server/migrations/001_bfip_schema.sql` (38 tables), every `domain/src/domain/*/` directory listing (16 modules), `bfip/PROTOCOL.md`, `bfap/PROTOCOL.md`, `ROADMAP.md` Phase 1 mapping, `HARDENING.md` §11. Mapping (denominator 19 per rubric):
+
+| § | Name | Status | Files |
+|---|------|--------|-------|
+| 1 | Auth (Apple + magic link + JWT rotation/revocation) | **Implemented** | `domain/src/auth/`, `domain/src/domain/auth/` |
+| 3 | Identity verification (Stripe Identity) | **Implemented** | `domain/src/domain/identity_credentials/` |
+| 3b | Background checks (sanctions/identity-fraud/criminal) | **Implemented** | `domain/src/domain/background_checks/` |
+| 4 | Cooling period (3 distinct calendar days + time elapsed) | **Implemented** | `domain/src/domain/identity_credentials/`, tests at `auth/service.rs:865-995` |
+| 5 | Presence (beacon dwell + NFC tap thresholds) | **Implemented** | `domain/src/domain/presence/` |
+| 6 | Attestation (Ed25519 aggregated co-sign) | **Implemented** | `domain/src/domain/attestations/`, `domain/src/crypto/ed25519.rs` |
+| 6.1 | Staff visit attestation | **Implemented** | `domain/src/domain/staff/`, `attestations/` |
+| 7 | Soultokens (Ed25519 signing + HMAC display code) | **Implemented** | `domain/src/domain/soultokens/` |
+| 7b | Background re-checks | **Implemented** | `domain/src/domain/background_checks/` |
+| 8 | Beacons (daily UUID PRF + key rotation) | **Implemented** | `domain/src/domain/beacons/` |
+| 9 | Orders (strawberry purchase + NFC box collection) | **Implemented** | `domain/src/domain/orders/` |
+| 10 | Support (bookings + platform gift coverage) | **Implemented** | `domain/src/domain/support/` |
+| 11 | Attestation tokens (one-time scoped) | **Implemented** | `domain/src/domain/attestation_tokens/` |
+| 12.1 | Business reporting | **Partial** (analytics queries cover `businesses`, `funnel`, `presence_daily`) | `server/src/domain/analytics/` |
+| 12.2 | Business commerce reporting | **Partial** (orders + soultokens analytics; no Stripe billing webhook) | `server/src/domain/analytics/`, `007_billing.sql` |
+| 12.3 | Staff (quality assessments + beacon suspension) | **Implemented** | `domain/src/domain/staff/` |
+| 13 | Users (search + erasure + export) | **Implemented** | `domain/src/domain/users/` |
+| 14 | Notifications (SSE + push token storage) | **Implemented** (2 payload TODOs) | `server/src/domain/notifications/`, `server/src/notifications.rs` |
+| 15 | Platform configuration | **Implemented** | `domain/src/domain/platform_configuration/` |
+| 17 | Verification events / right of access | **Implemented** | `domain/src/domain/verification_events/` |
+| 22 | BFAP stub (counts as 20th, not in denominator) | **Stub spec only** | `bfap/PROTOCOL.md` |
+
+17 sections fully implemented + 12.1/12.2 partial = effective 18/19 → 9.0 (rounded down for the partial). Stops at 9.0 because §12.1/12.2 are analytics-query coverage rather than first-class domain modules with route surfaces, the §14 push integration ships SSE only (iOS push-token storage exists but Apple Push Notifications wiring is out of scope), and BFAP §22 is a stub spec. Above 8.5 because the platform now covers the entire BFIP identity loop end-to-end including right-of-access, runtime configuration, and the privacy-preserving third-party verification flow.
+
+**Operational Readiness 8.0** — files read: `server/src/main.rs`, `server/src/lib.rs`, `server/src/app.rs`, `server/src/http/middleware/correlation_id.rs`, `server/.env.example`, `domain/src/config.rs`, `server/src/http/routes/meta.rs`, `Dockerfile`, `docker-compose.yml`, `deploy/{box-fraise-platform.service,nginx.conf,DEPLOY.md,BACKUP.md,INCIDENT_RESPONSE.md,SECRETS_ROTATION.md}`, `server/src/tasks/retention.rs`. Structured logging via `tracing-subscriber` registry with `EnvFilter` + `sentry-tracing` (`server/src/lib.rs:37-44`); correlation ID middleware generates server-side UUID, strips client-supplied values, instruments every span (`correlation_id.rs:36-80`); `/health` checks DB + Redis + storage (`meta.rs:48-87`); graceful shutdown via `with_graceful_shutdown(ctrl_c)` at `lib.rs:187-189`; fail-fast `Config::load` returns from main with `eprintln! + process::exit(1)` (`lib.rs:50-54`); Sentry initialised when DSN set; Prometheus metrics registered via `OnceLock`-memoised pair (`app.rs:35-38`); retention pruning daemon spawned on boot (`lib.rs:156-157`); 4 runbooks (DEPLOY 157 lines, BACKUP 118, INCIDENT_RESPONSE 88, SECRETS_ROTATION 112); multi-stage Dockerfile w/ sqlx-cli for migrations; nginx config with SSE long-timeout + `/metrics` allow-list; systemd unit with `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`. Stops at 8.0 because: VPS not yet provisioned (HARDENING.md §8 lists Grafana, Prometheus daemon, UptimeRobot, alert rules as "post-VPS"); RLS enforcement is inert until per-request transaction scaffolding lands; per-route timeouts are TODO (only the global 30s `TimeoutLayer` ships); per-endpoint rate-limit tuning is TODO; some startup paths use `eprintln! + std::process::exit(1)` rather than structured Err propagation (`app.rs:117-121, 131-135`); Stripe billing webhook scaffolded but unwired. Above 7.0 because every previously-flagged operational gap (Retry-After, structured error response, retention daemon, runbooks) now ships.
+
+**Product Completeness 9.0** — files read: `server/src/app.rs` (every `merge` line), every `server/src/domain/*/routes.rs`. Counted **82 distinct routes** registered across 18 modules. Intended user flows + status:
+
+| Flow | Status |
+|------|--------|
+| Sign in (Apple Sign-In) | Working e2e |
+| Sign in (magic link request + verify) | Working e2e |
+| Logout (JWT revoke) | Working e2e |
+| Profile (display name + push token + me) | Working e2e |
+| User search + public profile | Working e2e |
+| Identity verification (Stripe Identity init + webhook) | Working e2e |
+| Cooling period (app-open + status) | Working e2e |
+| Background check (initiate + webhook + status) | Working e2e |
+| Presence (beacon dwell + NFC tap + status) | Working e2e |
+| Attestation (initiate + staff sign + reviewer sign + reject) | Working e2e |
+| Soultoken (issue + me + renew + revoke + surrender + trust-registry) | Working e2e |
+| Trust registry public-key fetch | Working e2e |
+| Beacon (create + list + daily UUID + rotate key) | Working e2e |
+| Order (create + list + collect + cancel + box activate + box list) | Working e2e |
+| Business (create + list mine + get) | Working e2e |
+| Staff visit (schedule + arrive + complete + quality assessment + evidence upload + presigned URL) | Working e2e |
+| Staff role (grant + my roles) | Working e2e |
+| Support booking (create + me + cancel + attend + resolve + list per visit) | Working e2e |
+| Attestation tokens (issue + verify + me + revoke) | Working e2e |
+| Verification events / audit trail (mine + journey + admin) | Working e2e |
+| Platform configuration admin (list + get + update + history) | Working e2e |
+| Feature flags admin (list + update) | Working e2e |
+| User compliance (erase + export) | Working e2e |
+| Admin ban / unban | Working e2e |
+| Analytics (8 admin dashboards) | Working e2e |
+| Notifications SSE stream | Working e2e |
+| Dorotka AI (gated by soultoken) | Working e2e |
+| Stripe billing subscription (list endpoint exists, write path absent) | Partial |
+| Apple Push Notifications | Schema only (push_token column exists; APN wiring out of scope) |
+| iOS App Attest assertion verification | Schema only (functions exist in `apple_attest.rs`, not wired to middleware) |
+
+≈ 27 of ≈ 30 intended flows working e2e → 9.0. Stops at 9.0 because Stripe billing webhook + APN wiring + App Attest enforcement are real product gaps even though the protocol covers them in scaffolding. Above 8.0 because the platform now satisfies a complete user lifecycle: register → verify identity → cool → establish presence → get attested → carry soultoken → place order → collect strawberry box → request support → issue third-party verification token → exercise right of access.
+
+### Top 6 improvements
+
+1. **RLS per-request transaction wiring** (HARDENING.md §2d) — service-layer refactor so `SET LOCAL app.user_id` is bound to a per-request transaction. Today RLS policies are inert in any deployment without `APP_USER_DATABASE_URL`. → Security +0.3, Operational +0.4, **+0.13 weighted overall**.
+2. **OpenAPI proc-macro annotations** — replace hand-built `openapi.rs` with `utoipa::path` decorators on every route handler so the spec stays in lock-step with handler signatures. → Usability +0.5, **+0.07 overall**.
+3. **Apple App Attest enforcement** — wire `apple_attest::verify_assertion` to the HMAC middleware once `identity_credentials` carries the per-device public key. The functions exist; only the call site is missing. → Security +0.3, Product +0.2, **+0.10 weighted**.
+4. **Per-endpoint rate-limit tuning** — implement the per-route bucket TODOs in `rate_limit.rs:9-18` (attestations 10/h, background-check init 5/d, magic-link 5/h/email, Dorotka 20/h). Closes the last §6 deferred item. → Security +0.2, Operational +0.2, **+0.07 weighted**.
+5. **Evidence-hash enforcement** at `complete_visit` — reject client-supplied evidence hashes that don't match the server-computed hash from the upload endpoint. Today the server stores whatever the client sent. → Security +0.2, **+0.04 weighted**.
+6. **`OrderReady.business_id` + `SoultokenIssued.display_code` in SSE payloads** — fetch the joined row in the events handler before publishing, and remove the two TODO placeholders in `server/src/events.rs:171-173, 188-195`. → Architecture +0.2, Product +0.2, **+0.06 overall**.
+
+### Summary
+The 12-section hardening pass moves the grade from B+ (8.29 weighted) on 2026-05-03 to B+ (8.76 weighted) on 2026-05-07, with every previously-flagged top-3 security gap (Ed25519 PKI, CSP nonce, Retry-After) shipped. The platform now covers 17 BFIP sections fully + 2 partially, ships 82 routes across 18 server domains with 390 passing tests, and has a complete operational stack (Docker + nginx + systemd + 4 runbooks); the residual gaps are operational rather than architectural — RLS enforcement is gated on per-request transaction wiring, App Attest is implemented but unwired, and OpenAPI is hand-built rather than proc-macro generated.
