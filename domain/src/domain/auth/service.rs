@@ -300,7 +300,8 @@ mod tests {
 
     fn test_cfg() -> Arc<Config> {
         Arc::new(Config {
-            database_url:    s("postgres://localhost/test"),
+            database_url:          s("postgres://localhost/test"),
+            app_user_database_url: None,
             jwt_secret:      s("test-jwt-secret-minimum-32-characters!!"),
             jwt_secret_previous: None,
             staff_jwt_secret: s("test-staff-secret-minimum-32-chars!!"),

@@ -147,6 +147,22 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::verification_events::routes::router())
         .merge(crate::domain::platform_configuration::routes::router())
         // ── Security middleware (innermost — runs first) ───────────────────────
+        //
+        // TODO(rls-enforcement, Hardening 2d): wire `set_rls_user_context`
+        // (domain/src/db.rs) into the request lifecycle. A naive middleware
+        // that calls `set_config('app.user_id', ..., true)` on a freshly
+        // acquired pool connection is unsafe — outside an explicit
+        // transaction, Postgres downgrades the setting to session scope and
+        // the next request to pick up the same pooled connection inherits
+        // the previous user's context. The correct shape is per-request
+        // transactions: `pool.begin()` once, set the RLS context on that
+        // connection, run all handler queries on the same connection,
+        // commit/rollback at request end. That's a service-layer refactor
+        // (every `&PgPool` parameter becomes `&mut PgConnection` or similar)
+        // and is deferred until the transaction-per-request scaffolding
+        // lands. Until then, RLS enforcement only applies when
+        // APP_USER_DATABASE_URL is set AND the application explicitly opens
+        // a transaction before calling RLS-protected paths.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::http::middleware::hmac::validate,

@@ -43,7 +43,24 @@ pub async fn run() -> anyhow::Result<()> {
         std::process::exit(1);
     });
     let port = cfg.port;
-    let pool = db::connect(cfg.database_url.expose_secret()).await?;
+    // Hardening Section 2c — connection role routing.
+    // If APP_USER_DATABASE_URL is set, the main pool connects as the
+    // non-superuser `app_user` role, and the RLS policies in migration
+    // 002 actually enforce. Otherwise we fall back to DATABASE_URL,
+    // which in dev/test is the `fraise` superuser (BYPASSRLS).
+    let (pool_url, rls_active) = match cfg.app_user_database_url.as_ref() {
+        Some(url) => (url.expose_secret().to_owned(), true),
+        None      => (cfg.database_url.expose_secret().to_owned(), false),
+    };
+    if rls_active {
+        info!("RLS enforcement active — connecting as app_user");
+    } else {
+        tracing::warn!(
+            "RLS enforcement inactive — connecting as superuser. \
+             Set APP_USER_DATABASE_URL for production.",
+        );
+    }
+    let pool = db::connect(&pool_url).await?;
 
     // Seed BFIP Section 15 defaults — ON CONFLICT DO NOTHING so custom values are preserved.
     if let Err(e) = box_fraise_domain::domain::platform_configuration::service::initialize_defaults(&pool).await {

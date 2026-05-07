@@ -39,7 +39,8 @@ pub fn test_ed25519_key_pair() -> Ed25519KeyPair {
 
 pub fn test_config() -> Config {
     Config {
-        database_url:    SecretString::from("postgres://localhost/test".to_string()),
+        database_url:          SecretString::from("postgres://localhost/test".to_string()),
+        app_user_database_url: None,
         jwt_secret:               SecretString::from("test-jwt-secret-minimum-32-characters!!".to_string()),
         jwt_secret_previous:      None,
         staff_jwt_secret:         SecretString::from("test-staff-secret-minimum-32-chars!!".to_string()),

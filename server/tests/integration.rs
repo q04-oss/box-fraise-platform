@@ -51,7 +51,8 @@ async fn magic_link_flow_fires_user_logged_in_event(pool: PgPool) {
     };
 
     let cfg    = std::sync::Arc::new(box_fraise_server::config::Config {
-        database_url:    "".to_string().into(),
+        database_url:          "".to_string().into(),
+        app_user_database_url: None,
         jwt_secret:      "test-jwt-secret-minimum-32-characters!!".to_string().into(),
         jwt_secret_previous: None,
         staff_jwt_secret:    "test-staff-secret-minimum-32-chars!!".to_string().into(),

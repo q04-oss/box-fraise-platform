@@ -17,6 +17,12 @@ use secrecy::SecretString;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url:             SecretString,
+    /// Optional production-only DATABASE_URL that connects as the non-superuser
+    /// `app_user` role (Hardening Section 2c). When set, the main connection
+    /// pool uses this URL and RLS policies in migration 002 actually enforce.
+    /// When unset, the server falls back to `database_url` (typically the
+    /// `fraise` superuser locally), which bypasses RLS via `BYPASSRLS`.
+    pub app_user_database_url:    Option<SecretString>,
     pub jwt_secret:               SecretString,
     pub jwt_secret_previous:      Option<SecretString>,
     pub port:                     u16,
@@ -117,6 +123,7 @@ impl Config {
 
         Ok(Self {
             database_url:          require_secret("DATABASE_URL")?,
+            app_user_database_url: optional_secret("APP_USER_DATABASE_URL"),
             jwt_secret:            jwt_secret_raw.into(),
             jwt_secret_previous:   optional_secret("JWT_SECRET_PREVIOUS"),
             staff_jwt_secret:      staff_jwt_secret_raw.into(),
