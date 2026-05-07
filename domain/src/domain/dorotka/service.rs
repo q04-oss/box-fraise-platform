@@ -41,14 +41,55 @@ use std::net::IpAddr;
 use sqlx::PgPool;
 use box_fraise_integrations::anthropic;
 
-use crate::{audit, error::AppResult, event_bus::EventBus, events::DomainEvent};
+use crate::{
+    audit,
+    error::{AppResult, DomainError},
+    event_bus::EventBus,
+    events::DomainEvent,
+    types::UserId,
+};
+
+/// Hardening §6 — Dorotka soultoken gate.
+///
+/// Returns `Ok(())` when the user has a non-revoked, non-expired soultoken;
+/// returns `DomainError::Forbidden` otherwise. Called from the route handler
+/// (`server/src/domain/dorotka/routes.rs`) BEFORE any cross-service work
+/// (LLM key resolution, prompt building, etc.) so a denied request can't be
+/// short-circuited by an upstream config error.
+pub async fn require_active_soultoken(pool: &PgPool, user_id: UserId) -> AppResult<()> {
+    let row: Option<(Option<i32>,)> = sqlx::query_as(
+        "SELECT soultoken_id FROM users WHERE id = $1 AND deleted_at IS NULL"
+    )
+    .bind(i32::from(user_id))
+    .fetch_optional(pool)
+    .await
+    .map_err(DomainError::Db)?;
+    let soultoken_id = row.and_then(|(opt,)| opt).ok_or(DomainError::Forbidden)?;
+    let still_valid: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+            SELECT 1 FROM soultokens \
+            WHERE id = $1 AND revoked_at IS NULL AND expires_at > now() \
+         )"
+    )
+    .bind(soultoken_id)
+    .fetch_one(pool)
+    .await
+    .map_err(DomainError::Db)?;
+    if !still_valid {
+        return Err(DomainError::Forbidden);
+    }
+    Ok(())
+}
 
 /// Ask the Dorotka AI assistant and return the answer.
 ///
-/// This is the service-layer entry point for the Dorotka domain. It:
-/// 1. Writes an audit event before the API call (records even if Anthropic fails)
-/// 2. Calls the Anthropic API
-/// 3. Publishes [`DomainEvent::DorotkaQueried`] so consumers can react
+/// Soultoken gating happens at the route handler via
+/// [`require_active_soultoken`] so it short-circuits before any LLM-config
+/// resolution. This function trusts that the caller has already gated.
+///
+/// 1. Writes an audit event before the API call (records even if Anthropic fails).
+/// 2. Calls the Anthropic API.
+/// 3. Publishes [`DomainEvent::DorotkaQueried`] so consumers can react.
 pub async fn ask_dorotka(
     pool:      &PgPool,
     http:      &reqwest::Client,

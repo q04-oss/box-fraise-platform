@@ -75,6 +75,15 @@ pub struct Config {
     /// panics, error-level tracing events, and a 10% sample of request
     /// traces. When unset, Sentry is disabled and the server logs locally only.
     pub sentry_dsn:                  Option<String>,
+    /// Hardening §6 — explicit CORS allow-list. Defaults to
+    /// `["http://localhost:3000"]` when `ALLOWED_ORIGINS` is unset.
+    pub allowed_origins:             Vec<String>,
+    /// Hardening §6 — Postgres pool max connections (default 20).
+    pub db_max_connections:          u32,
+    /// Hardening §6 — Postgres pool min warm connections (default 2).
+    pub db_min_connections:          u32,
+    /// Hardening §6 — Postgres pool acquire-timeout seconds (default 5).
+    pub db_acquire_timeout_secs:     u64,
 }
 
 impl Config {
@@ -178,6 +187,12 @@ impl Config {
             spaces_endpoint:             optional("SPACES_ENDPOINT"),
             spaces_region:               optional("SPACES_REGION"),
             sentry_dsn:                  optional("SENTRY_DSN"),
+            allowed_origins:             optional("ALLOWED_ORIGINS")
+                                            .map(|s| s.split(',').map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect::<Vec<_>>())
+                                            .unwrap_or_else(|| vec!["http://localhost:3000".to_string()]),
+            db_max_connections:          optional_parse("DB_MAX_CONNECTIONS", 20u32)?,
+            db_min_connections:          optional_parse("DB_MIN_CONNECTIONS", 2u32)?,
+            db_acquire_timeout_secs:     optional_parse("DB_ACQUIRE_TIMEOUT_SECS", 5u64)?,
         })
     }
 

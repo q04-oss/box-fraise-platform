@@ -81,6 +81,10 @@ async fn magic_link_flow_fires_user_logged_in_event(pool: PgPool) {
         spaces_access_key: None, spaces_secret_key: None, spaces_bucket: None,
         spaces_endpoint: None, spaces_region: None,
         sentry_dsn: None,
+        allowed_origins:         vec!["http://localhost:3000".to_string()],
+        db_max_connections:      20,
+        db_min_connections:      2,
+        db_acquire_timeout_secs: 5,
     });
     let _http = reqwest::Client::new();
 
@@ -282,6 +286,9 @@ async fn create_business_end_to_end(pool: PgPool) {
 
 /// POST /api/dorotka/ask with a wiremock Anthropic server returns 200, a
 /// non-empty answer, and writes an audit_event row with event_kind = 'dorotka.ask'.
+///
+/// Hardening §6 — Dorotka is now gated to users with an active soultoken,
+/// so the test fixtures the full attestation chain before issuing the request.
 #[sqlx::test]
 async fn dorotka_ask_returns_response_for_authenticated_user(pool: PgPool) {
     use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
@@ -297,6 +304,73 @@ async fn dorotka_ask_returns_response_for_authenticated_user(pool: PgPool) {
         .mount(&mock_server)
         .await;
 
+    // Fixture the soultoken chain: user → identity_credential → location →
+    // business → presence_threshold → staff_visit → visit_attestation →
+    // soultokens (with all FKs populated to satisfy the user-soultoken
+    // CHECK constraints).
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    // Create as `presence_confirmed` first — the bf_prevent_double_attestation
+    // trigger refuses INSERT INTO visit_attestations for a user already at
+    // `attested`. Promote AFTER the chain is in place.
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ($1, true, 'presence_confirmed') RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+    let (cred_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO identity_credentials \
+         (user_id, credential_type, verified_at, cooling_ends_at, cooling_completed_at) \
+         VALUES ($1, 'stripe_identity', now(), now() + interval '7 days', now()) RETURNING id",
+    ).bind(uid).fetch_one(&pool).await.unwrap();
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('L', 'box_fraise_store', 'A', 'America/Edmonton') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'B', 'active') RETURNING id",
+    ).bind(loc_id).bind(uid).fetch_one(&pool).await.unwrap();
+    let (thresh_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO presence_thresholds \
+         (user_id, business_id, event_count, days_count, threshold_met_at) \
+         VALUES ($1, $2, 3, 3, now()) RETURNING id",
+    ).bind(uid).bind(biz_id).fetch_one(&pool).await.unwrap();
+    let (s_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+    let (r1_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+    let (r2_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+    let (visit_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO staff_visits (location_id, staff_id, visit_type, status, scheduled_at) \
+         VALUES ($1, $2, 'combined', 'completed', now()) RETURNING id",
+    ).bind(loc_id).bind(s_id).fetch_one(&pool).await.unwrap();
+    let (attest_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO visit_attestations \
+         (visit_id, user_id, staff_id, presence_threshold_id, \
+          assigned_reviewer_1_id, assigned_reviewer_2_id, status) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'approved') RETURNING id",
+    ).bind(visit_id).bind(uid).bind(s_id).bind(thresh_id).bind(r1_id).bind(r2_id)
+     .fetch_one(&pool).await.unwrap();
+    let (st_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO soultokens \
+         (display_code, holder_user_id, token_type, \
+          identity_credential_id, presence_threshold_id, attestation_id, expires_at) \
+         VALUES ('AAAA-BBBB-CCCC', $1, 'user', $2, $3, $4, now() + interval '1 year') \
+         RETURNING id",
+    ).bind(uid).bind(cred_id).bind(thresh_id).bind(attest_id)
+     .fetch_one(&pool).await.unwrap();
+    sqlx::query("UPDATE users SET soultoken_id = $1, \
+                                    verification_status = 'attested', \
+                                    attested_at = now() \
+                  WHERE id = $2")
+        .bind(st_id).bind(uid).execute(&pool).await.unwrap();
+    let user_token = common::valid_token(uid);
+
     let pool_clone = pool.clone();
     let base_url   = format!("{}/v1/messages", mock_server.uri());
     let state = common::build_state_with_anthropic(pool, None, "test-api-key", &base_url);
@@ -305,6 +379,7 @@ async fn dorotka_ask_returns_response_for_authenticated_user(pool: PgPool) {
     let mut req = Request::builder()
         .method("POST")
         .uri("/api/dorotka/ask")
+        .header("authorization", format!("Bearer {user_token}"))
         .header("content-type", "application/json")
         .body(Body::from(br#"{"query":"What is box fraise?"}"#.to_vec()))
         .unwrap();

@@ -91,7 +91,14 @@ impl IntoResponse for AppError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "internal error".to_owned())
             }
         };
-        (status, Json(json!({ "error": error_slug, "message": message }))).into_response()
+        // Hardening §6 — Retry-After on 429 lets clients schedule retries
+        // instead of busy-looping. 60 s matches the global rate-limit window.
+        let body = Json(json!({ "error": error_slug, "message": message }));
+        if matches!(self, Self::TooManyRequests) {
+            (status, [(axum::http::header::RETRY_AFTER, "60")], body).into_response()
+        } else {
+            (status, body).into_response()
+        }
     }
 }
 

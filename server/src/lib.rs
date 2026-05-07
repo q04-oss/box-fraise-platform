@@ -95,7 +95,14 @@ pub async fn run() -> anyhow::Result<()> {
              Set APP_USER_DATABASE_URL for production.",
         );
     }
-    let pool = db::connect(&pool_url).await?;
+    let pool = db::connect(
+        &pool_url,
+        db::PoolOptions {
+            max_connections: cfg.db_max_connections,
+            min_connections: cfg.db_min_connections,
+            acquire_timeout: std::time::Duration::from_secs(cfg.db_acquire_timeout_secs),
+        },
+    ).await?;
 
     // Seed BFIP Section 15 defaults — ON CONFLICT DO NOTHING so custom values are preserved.
     if let Err(e) = box_fraise_domain::domain::platform_configuration::service::initialize_defaults(&pool).await {

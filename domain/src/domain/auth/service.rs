@@ -341,6 +341,10 @@ mod tests {
             spaces_access_key: None, spaces_secret_key: None, spaces_bucket: None,
             spaces_endpoint: None, spaces_region: None,
             sentry_dsn: None,
+            allowed_origins:         vec!["http://localhost:3000".to_string()],
+            db_max_connections:      20,
+            db_min_connections:      2,
+            db_acquire_timeout_secs: 5,
         })
     }
 

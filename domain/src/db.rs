@@ -53,18 +53,31 @@ pub async fn set_rls_admin_context(
 
 // ── Connection pool ──────────────────────────────────────────────────────────
 
+/// Pool sizing parameters (Hardening §6). The first three come from
+/// `Config` (`DB_MAX_CONNECTIONS`, `DB_MIN_CONNECTIONS`,
+/// `DB_ACQUIRE_TIMEOUT_SECS`); the idle/lifetime values stay hardcoded —
+/// they are recycle hints for whatever pooler sits in front of Postgres
+/// (PgBouncer, Supavisor) and aren't worth env-tuning.
+pub struct PoolOptions {
+    /// Upper bound on concurrent Postgres connections.
+    pub max_connections:  u32,
+    /// Connections kept warm so post-idle requests don't wait on TCP+TLS.
+    pub min_connections:  u32,
+    /// Fail-fast deadline when the pool is saturated.
+    pub acquire_timeout:  Duration,
+}
+
 /// Create and return a Postgres connection pool.
 ///
-/// Pool is configured for the typical Axum single-binary deployment:
-/// - max 20 connections (headroom for concurrent requests)
-/// - min 2 connections (warm connections at startup)
-/// - 5-second acquire timeout (fail fast rather than queue indefinitely)
-/// - 10-minute idle timeout and 30-minute max lifetime (recycle behind PgBouncer)
-pub async fn connect(url: &str) -> anyhow::Result<PgPool> {
+/// `acquire_timeout` is "fail-fast under load" — saturated pool returns
+/// `PoolTimedOut` rather than queuing indefinitely. Idle (10 min) and max
+/// lifetime (30 min) ensure connections behind a pooler don't get stuck on
+/// stale state.
+pub async fn connect(url: &str, opts: PoolOptions) -> anyhow::Result<PgPool> {
     PgPoolOptions::new()
-        .max_connections(20)
-        .min_connections(2)
-        .acquire_timeout(Duration::from_secs(5))
+        .max_connections(opts.max_connections)
+        .min_connections(opts.min_connections)
+        .acquire_timeout(opts.acquire_timeout)
         .idle_timeout(Duration::from_secs(600))
         .max_lifetime(Duration::from_secs(1800))
         .connect(url)

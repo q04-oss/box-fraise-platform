@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use crate::{
     app::AppState,
     error::{AppError, AppResult},
+    http::extractors::auth::RequireUser,
     http::middleware::rate_limit::client_ip,
 };
 use super::service;
@@ -38,17 +39,25 @@ pub(crate) struct AskResponse {
 }
 
 pub(crate) async fn ask(
-    State(state):      State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers:           HeaderMap,
-    Json(body):        Json<AskBody>,
+    State(state):         State<AppState>,
+    RequireUser(user_id): RequireUser,
+    ConnectInfo(addr):    ConnectInfo<SocketAddr>,
+    headers:              HeaderMap,
+    Json(body):           Json<AskBody>,
 ) -> AppResult<Json<AskResponse>> {
     // Use X-Forwarded-For (set by Railway's proxy) — ConnectInfo gives the
     // proxy's IP, not the client's.
     let ip = client_ip(&headers, Some(&ConnectInfo(addr)));
 
-    // Rate check before any other work — prevents wasted Anthropic spend
+    // Rate check first — caps abuse cost and matches the per-IP semantics
+    // applied across the codebase. Even denied users contribute to the
+    // bucket, so an unauthenticated bot can't sneak past via 403s.
     rate_check(&state, ip)?;
+
+    // Hardening §6 — soultoken gate. Runs before any LLM-config access so
+    // a missing ANTHROPIC_API_KEY can't downgrade a forbidden response to
+    // a 500.
+    service::require_active_soultoken(&state.db, user_id).await?;
 
     // Sanitise input — returns 400 for empty or oversized queries
     let query = service::sanitise(&body.query)

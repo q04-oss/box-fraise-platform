@@ -293,15 +293,31 @@ async fn users_public_profile_unknown_returns_404(pool: PgPool) {
 // Dorotka rate limit
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Build an authenticated Dorotka request — `RequireUser` now runs before
+/// `rate_check`, so any caller exercising the rate limiter must hold a JWT.
+/// The test user does NOT need an active soultoken because `rate_check`
+/// fires before `ask_dorotka` (where the soultoken gate lives).
+fn authed_dorotka_request(query: &str, token: &str) -> Request<Body> {
+    authed_json_req("POST", "/api/dorotka/ask", token, serde_json::json!({ "query": query }))
+}
+
 #[sqlx::test]
 async fn dorotka_rate_limit_21st_request_returns_429(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+    let token = common::valid_token(uid);
+
     let state = common::build_state(pool.clone(), None);
     let app   = box_fraise_server::app::build(state);
 
     for i in 1..=20u8 {
         let resp = app
             .clone()
-            .oneshot(dorotka_request(&format!("query {i}")))
+            .oneshot(authed_dorotka_request(&format!("query {i}"), &token))
             .await
             .unwrap();
         assert_ne!(
@@ -311,27 +327,35 @@ async fn dorotka_rate_limit_21st_request_returns_429(pool: PgPool) {
         );
     }
 
-    let resp = app.oneshot(dorotka_request("query 21")).await.unwrap();
+    let resp = app.oneshot(authed_dorotka_request("query 21", &token)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[sqlx::test]
 async fn dorotka_sliding_window_resets_after_window_elapses(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+    let token = common::valid_token(uid);
+
     let state = common::build_state_with_dorotka_rate(pool.clone(), None, 3, 1);
     let app   = box_fraise_server::app::build(state);
 
     for i in 1..=3u8 {
-        let resp = app.clone().oneshot(dorotka_request(&format!("fill {i}"))).await.unwrap();
+        let resp = app.clone().oneshot(authed_dorotka_request(&format!("fill {i}"), &token)).await.unwrap();
         assert_ne!(resp.status(), StatusCode::TOO_MANY_REQUESTS,
             "request {i} must pass while window has capacity");
     }
 
-    let resp = app.clone().oneshot(dorotka_request("overflow")).await.unwrap();
+    let resp = app.clone().oneshot(authed_dorotka_request("overflow", &token)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
 
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
 
-    let resp = app.oneshot(dorotka_request("after window")).await.unwrap();
+    let resp = app.oneshot(authed_dorotka_request("after window", &token)).await.unwrap();
     assert_ne!(resp.status(), StatusCode::TOO_MANY_REQUESTS,
         "request after window elapses must not be rate-limited");
 }
@@ -2450,6 +2474,122 @@ async fn get_analytics_soultokens_returns_200_for_admin(pool: PgPool) {
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(json["total_issued"].is_i64(), "soultokens response must carry total_issued");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API hardening (§6) — CORS lockdown, Dorotka soultoken gate,
+// security headers, Retry-After on 429.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn cors_rejects_disallowed_origin(pool: PgPool) {
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let req = Request::builder()
+        .method("OPTIONS")
+        .uri("/api/auth/me")
+        .header("origin", "https://evil.com")
+        .header("access-control-request-method", "GET")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let cors = resp.headers().get("access-control-allow-origin").map(|v| v.to_str().unwrap_or("").to_string());
+    assert_ne!(cors.as_deref(), Some("https://evil.com"),
+        "preflight from disallowed origin must not reflect the origin in ACAO");
+}
+
+#[sqlx::test]
+async fn cors_allows_configured_origin(pool: PgPool) {
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let req = Request::builder()
+        .method("OPTIONS")
+        .uri("/api/auth/me")
+        .header("origin", "http://localhost:3000")
+        .header("access-control-request-method", "GET")
+        .header("access-control-request-headers", "authorization")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let cors = resp.headers().get("access-control-allow-origin")
+        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    assert_eq!(cors, "http://localhost:3000",
+        "preflight from configured origin must reflect the origin in ACAO");
+}
+
+#[sqlx::test]
+async fn dorotka_requires_active_soultoken(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ($1, true, 'registered') RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+    let token = common::valid_token(uid);
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_json_req(
+            "POST", "/api/dorotka/ask", &token,
+            serde_json::json!({ "query": "hi" }),
+        ))
+        .await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn response_includes_security_headers(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+    let token = common::valid_token(uid);
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req("GET", "/api/auth/me", &token))
+        .await.unwrap();
+    let headers = resp.headers();
+    assert_eq!(headers.get("x-content-type-options").and_then(|v| v.to_str().ok()), Some("nosniff"));
+    assert_eq!(headers.get("x-frame-options").and_then(|v| v.to_str().ok()), Some("DENY"));
+    let csp = headers.get("content-security-policy")
+        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    assert!(csp.contains("nonce-"), "CSP must include a per-request nonce, got: {csp}");
+}
+
+#[sqlx::test]
+async fn retry_after_header_present_on_429(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+    let token = common::valid_token(uid);
+
+    // Tight Dorotka rate limit so we can exhaust it cheaply.
+    let state = common::build_state_with_dorotka_rate(pool, None, 2, 60);
+    let app   = box_fraise_server::app::build(state);
+
+    for i in 1..=2u8 {
+        let _ = app.clone()
+            .oneshot(authed_dorotka_request(&format!("warmup {i}"), &token))
+            .await.unwrap();
+    }
+    let resp = app.oneshot(authed_dorotka_request("overflow", &token)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry_after = resp.headers().get("retry-after")
+        .and_then(|v| v.to_str().ok());
+    assert!(retry_after.is_some(), "429 must include a Retry-After header");
 }
 
 #[sqlx::test]

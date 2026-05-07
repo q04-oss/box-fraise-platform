@@ -5,6 +5,17 @@
 /// sliding-window HashMap when Redis is absent (single-instance only).
 ///
 /// IP resolution: X-Forwarded-For first (Railway proxy), then socket peer address.
+///
+/// Hardening §6 — intended per-endpoint rate limits (TODO: implement):
+///   - POST /api/attestations                    → max 10  per hour  per user
+///   - POST /api/background-checks/initiate      → max  5  per day   per user
+///   - POST /api/identity/initiate               → max  3  per day   per user
+///   - POST /api/dorotka/ask                     → max 20  per hour  per user
+///   - POST /api/auth/magic-link/request         → max  5  per hour  per email
+///   - All other routes                          → existing 120/min/IP global
+/// TODO(hardening): implement per-route rate limits — likely a Redis-backed
+/// keyed counter middleware that runs after JWT validation so the user_id /
+/// email is available as the bucket key.
 use std::{
     collections::{HashMap, VecDeque},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -73,9 +84,13 @@ pub async fn check(
     };
 
     if !allowed {
+        // Hardening §6 — Retry-After tells well-behaved clients exactly when
+        // to retry instead of beating on the limiter with exponential backoff.
+        // Value matches the fixed-window length above.
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({ "error": "rate limited" })),
+            [(axum::http::header::RETRY_AFTER, WINDOW_SECS.to_string())],
+            Json(json!({ "error": "rate_limited", "message": "rate limit exceeded" })),
         )
             .into_response();
     }

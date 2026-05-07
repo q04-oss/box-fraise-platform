@@ -215,6 +215,15 @@ pub fn build(state: AppState) -> Router {
         // Request timeout — returns 408 after 30 s. Inside correlation_id so
         // the request_id is available in timeout logs. Configurable via
         // TIMEOUT_SECS env var (default 30).
+        //
+        // Per-route timeout intentions (Hardening §6 — TODO):
+        //   - POST /api/identity/webhook/stripe          → 60s (Stripe slow)
+        //   - POST /api/background-checks/webhook        → 60s
+        //   - POST /api/dorotka/ask                      → 120s (LLM)
+        //   - everything else                             → 30s (current global)
+        // Implementing per-route timeouts requires wrapping the affected
+        // routes individually with a `TimeoutLayer` of a different value;
+        // deferred to a follow-up — the global 30s is the immediate win.
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
         // ── Observability (Hardening §4) ──────────────────────────────────────
         // Prometheus middleware records http_requests_total,
@@ -233,54 +242,56 @@ pub fn build(state: AppState) -> Router {
         // when sentry-tower releases an axum-0.8-compatible variant.
         // ── Transport ─────────────────────────────────────────────────────────
         .layer(CompressionLayer::new())
-        // CORS posture — review before production launch
-        // Currently: permissive (allow all origins, no credentials)
-        // Allowed origins: wildcard (*) — iOS native app does not send Origin;
-        //   web clients (Swagger UI, future web app) use any origin
-        // Credentials: not allowed (wildcard origin is incompatible with credentials)
-        // Allowed methods: GET, POST, PATCH, PUT, DELETE, OPTIONS
-        // Exposed headers: X-Request-Id (correlation ID for client-side tracing)
-        // TODO: restrict to known iOS app origins before web app launch
-        .layer(
-            CorsLayer::permissive()
-                .expose_headers([axum::http::HeaderName::from_static("x-request-id")]),
-        )
+        // ── CORS lockdown (Hardening §6) ─────────────────────────────────────
+        // Origins: explicit allow-list from `cfg.allowed_origins`
+        //   (set via ALLOWED_ORIGINS, comma-separated; default
+        //   http://localhost:3000 in dev).
+        // Methods: GET, POST, PATCH, DELETE, OPTIONS.
+        // Headers: Authorization, Content-Type, Accept, X-Request-Id.
+        // Credentials: true (paired with explicit origins — wildcard +
+        //   credentials is forbidden by spec).
+        // Max-age: 3600 s — caches the preflight result for an hour.
+        // Exposed headers: X-Request-Id (correlation ID for client tracing).
+        .layer({
+            use axum::http::{HeaderName, Method};
+            use tower_http::cors::AllowOrigin;
+            let origins: Vec<axum::http::HeaderValue> = state
+                .cfg
+                .allowed_origins
+                .iter()
+                .filter_map(|o| axum::http::HeaderValue::from_str(o).ok())
+                .collect();
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_methods([
+                    Method::GET, Method::POST, Method::PATCH, Method::DELETE, Method::OPTIONS,
+                ])
+                .allow_headers([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::ACCEPT,
+                    HeaderName::from_static("x-request-id"),
+                ])
+                .allow_credentials(true)
+                .max_age(std::time::Duration::from_secs(3600))
+                .expose_headers([HeaderName::from_static("x-request-id")])
+        })
         // ── Security headers ──────────────────────────────────────────────────
+        // HSTS + X-Permitted-Cross-Domain-Policies stay static — neither
+        // varies per request and they predate Hardening §6.
         .layer(SetResponseHeaderLayer::overriding(
             header::STRICT_TRANSPORT_SECURITY,
             HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
         ))
         .layer(SetResponseHeaderLayer::overriding(
-            header::X_CONTENT_TYPE_OPTIONS,
-            HeaderValue::from_static("nosniff"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            header::X_FRAME_OPTIONS,
-            HeaderValue::from_static("DENY"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("x-permitted-cross-domain-policies"),
             HeaderValue::from_static("none"),
         ))
-        .layer(SetResponseHeaderLayer::overriding(
-            header::REFERRER_POLICY,
-            HeaderValue::from_static("strict-origin-when-cross-origin"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            HeaderName::from_static("permissions-policy"),
-            HeaderValue::from_static("geolocation=(), microphone=()"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(
-                "default-src 'self'; \
-                 script-src 'self'; \
-                 style-src 'self' 'unsafe-inline'; \
-                 img-src 'self' data: blob:; \
-                 connect-src 'self'; \
-                 frame-ancestors 'none'",
-            ),
-        ))
+        // Per-response security headers (Hardening §6) — CSP nonce, plus
+        // X-Content-Type-Options, X-Frame-Options, Referrer-Policy, and
+        // Permissions-Policy. The middleware runs AFTER the inner pipeline
+        // (request → response) so its headers stick to the final response.
+        .layer(middleware::from_fn(crate::http::middleware::security_headers::apply))
         // ── State ─────────────────────────────────────────────────────────────
         .with_state(state)
 }
