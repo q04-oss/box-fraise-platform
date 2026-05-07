@@ -81,7 +81,7 @@ async fn trust_registry_public_key(
     Json(json!({
         "verifying_key_hex": state.cfg.soultoken_verifying_key_hex,
         "algorithm":         "Ed25519",
-        "bfip_version":      "0.1.2",
+        "bfip_version":      "0.2.0",
         "description":       "Use this key to verify Box Fraise \
                               soultoken signatures offline",
     }))

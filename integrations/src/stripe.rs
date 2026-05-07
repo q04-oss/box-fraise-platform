@@ -240,6 +240,12 @@ struct Customer {
     id: String,
 }
 
+// Hardening §11 — duplicates `box_fraise_domain::crypto::constant_time_eq`.
+// We can't import the canonical version because `domain` already depends
+// on this crate (`integrations`); reversing the direction would cycle. If
+// a third utility crate ever lands (e.g. `box-fraise-common`), move both
+// copies there. The implementation is identical XOR-fold by design — keep
+// them in sync if either is ever changed.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() { return false; }
     a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0

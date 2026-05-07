@@ -279,11 +279,10 @@ fn shared_key(state: &AppState) -> Option<Vec<u8>> {
     state.cfg.hmac_shared_key.as_ref().map(|k| k.expose_secret().as_bytes().to_vec())
 }
 
-/// Constant-time byte comparison — prevents timing oracle on HMAC tags.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() { return false; }
-    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
+// Hardening §11 — constant_time_eq is now canonical in
+// `box_fraise_domain::crypto::constant_time_eq`. Re-exported here as a
+// pub(crate) alias so the test module's existing imports keep working.
+pub(crate) use box_fraise_domain::crypto::constant_time_eq;
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 

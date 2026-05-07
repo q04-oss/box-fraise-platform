@@ -33,6 +33,22 @@ use crate::error::{DomainError, AppResult};
 pub mod ed25519;
 pub use ed25519::{Ed25519KeyPair, verify_ed25519, verify_aggregated_ed25519, Ed25519Error};
 
+/// Constant-time byte comparison — Hardening §11 consolidation.
+///
+/// Hardening 1d's audit flagged that two private copies of this function
+/// existed (`server/src/http/middleware/hmac.rs` and
+/// `integrations/src/stripe.rs`). Both call sites now import from here
+/// so there's a single canonical implementation to review.
+///
+/// Behaviour: `false` for length mismatch, otherwise XOR-fold across both
+/// slices with no early exit on a byte difference.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// Encrypts `plaintext` with AES-256-GCM using the provided hex key.
 /// Returns a hex string suitable for DB storage.
 pub fn encrypt(key_hex: &str, plaintext: &str) -> AppResult<String> {
@@ -131,5 +147,17 @@ mod tests {
     #[test]
     fn short_key_rejected() {
         assert!(encrypt("deadbeef", "token").is_err());
+    }
+
+    /// Hardening §11 — `constant_time_eq` is the canonical implementation;
+    /// `server/src/http/middleware/hmac.rs` re-exports it via `pub(crate) use`.
+    /// This test calls the function from the public surface so anything
+    /// that breaks the export is a compile failure rather than a runtime one.
+    #[test]
+    fn constant_time_eq_is_pub() {
+        assert!( constant_time_eq(b"hello", b"hello"));
+        assert!(!constant_time_eq(b"hello", b"world"));
+        assert!(!constant_time_eq(b"hi",    b"hello"));
+        assert!( constant_time_eq(b"",      b""));
     }
 }

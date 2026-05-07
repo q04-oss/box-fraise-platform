@@ -2260,6 +2260,27 @@ async fn trust_registry_returns_verifying_key(pool: PgPool) {
     assert!(body["description"].as_str().is_some(), "description must be present");
 }
 
+#[sqlx::test]
+async fn trust_registry_returns_v0_2_0(pool: PgPool) {
+    // Hardening §11 — the trust-registry endpoint reports the BFIP protocol
+    // version it conforms to. Bumped from 0.1.2 → 0.2.0 with the §22 stub.
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri("/api/trust-registry/public-key")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["bfip_version"].as_str(), Some("0.2.0"),
+        "trust registry must advertise BFIP v0.2.0");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Evidence storage — 503 when SPACES_* not configured (Hardening §3)
 // ─────────────────────────────────────────────────────────────────────────────

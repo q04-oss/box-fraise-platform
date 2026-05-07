@@ -12,6 +12,8 @@
 ### v0.2.0
 - Section 4: Ed25519 soultoken signing replaces HMAC-SHA256.
 - Section 5: Aggregated Ed25519 attestation co-signing.
+- Section 22 (new): Agent Delegation Credentials stub — full specification
+  in `q04-oss/bfap` (forthcoming).
 - Cryptographic reference: formal PRF security statement for beacon UUID
   derivation (Bellare et al. 1996).
 - Cryptographic reference: formal security statements for all six primitive
@@ -30,8 +32,28 @@
 
 ## Sections
 
-This file currently carries only the changelog and the version header. The
-authoritative full-text protocol lives in the protocol repository; the
-cryptographic-primitives appendix is mirrored here at
-`bfip/reference/cryptography.md` so the implementation can be reviewed
-against a formal description without leaving this codebase.
+This file currently carries only the changelog, the version header, and
+the Section 22 stub below. The authoritative full-text protocol lives in
+the protocol repository; the cryptographic-primitives appendix is mirrored
+here at `bfip/reference/cryptography.md` so the implementation can be
+reviewed against a formal description without leaving this codebase.
+
+## Section 22 — Agent Delegation Credentials (BFAP Stub)
+
+This section is reserved for BFAP v0.1.0.
+
+BFIP-attested humans may issue signed delegation credentials to AI agents
+authorising them to act on the human's behalf within defined capability
+constraints.
+
+Agent credentials depend on:
+
+- A valid BFIP soultoken held by the issuing human.
+- Hardware-bound agent identity (HSM / TPM / Secure Enclave).
+- Capability certificate with formal semantics.
+- Cryptographic hash chain provenance log.
+
+Full specification: see `q04-oss/bfap` (forthcoming).
+
+Implementation status: reserved — not yet implemented.
+Target version: BFAP v0.1.0.
