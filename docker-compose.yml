@@ -25,5 +25,53 @@ services:
       timeout: 3s
       retries: 5
 
+  # Hardening §8 — Dockerised server for full-stack smoke tests.
+  #
+  # Skipped by default (`profiles: [full]`); start with:
+  #   docker compose --profile full up
+  #
+  # NOTE: `Config::load` fails fast on any missing required env var
+  # (DATABASE_URL, JWT_SECRET, STAFF_JWT_SECRET, ADMIN_PIN /
+  # CHOCOLATIER_PIN / SUPPLIER_PIN, STRIPE_SECRET_KEY,
+  # STRIPE_WEBHOOK_SECRET, SOULTOKEN_HMAC_KEY,
+  # SOULTOKEN_SIGNING_KEY_HEX, SOULTOKEN_VERIFYING_KEY_HEX) AND on a
+  # SOULTOKEN_VERIFYING_KEY_HEX that doesn't match the public key
+  # derived from the signing key. The values below are PLACEHOLDERS so
+  # the YAML parses; the server will warn-then-exit until you replace
+  # them. Run `scripts/generate_ed25519_key.sh` to mint a real Ed25519
+  # pair, then paste the public key into SOULTOKEN_VERIFYING_KEY_HEX.
+  server:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL:                 postgresql://fraise:fraise@postgres:5432/fraise
+      REDIS_URL:                    redis://redis:6379
+      RUST_LOG:                     info
+      # The placeholder secrets below are NOT secure — replace before exposing
+      # the container to anything beyond a local docker network.
+      JWT_SECRET:                   dev-jwt-secret-min-32-chars-long-here
+      STAFF_JWT_SECRET:             dev-staff-jwt-secret-min-32-chars-x
+      FRAISE_HMAC_SHARED_KEY:       dev-hmac-secret-min-32-chars-long-x
+      ADMIN_PIN:                    devadmin1
+      CHOCOLATIER_PIN:              devchoc12
+      SUPPLIER_PIN:                 devsupp34
+      STRIPE_SECRET_KEY:            sk_test_placeholder
+      STRIPE_WEBHOOK_SECRET:        whsec_placeholder_dev_only
+      SOULTOKEN_HMAC_KEY:           dev-soultoken-hmac-key-min-32-chars
+      # TODO: replace both of the below with a real key pair from
+      #   scripts/generate_ed25519_key.sh — the empty/placeholder values
+      #   here will trigger AppState::new()'s fail-fast validation.
+      SOULTOKEN_SIGNING_KEY_HEX:    "0000000000000000000000000000000000000000000000000000000000000000"
+      SOULTOKEN_VERIFYING_KEY_HEX:  "0000000000000000000000000000000000000000000000000000000000000000"
+      ALLOWED_ORIGINS:              http://localhost:3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles:
+      - full
+
 volumes:
   postgres_data:

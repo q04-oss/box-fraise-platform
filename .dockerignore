@@ -1,0 +1,18 @@
+# Hardening §8 — keep the build context lean. Anything excluded here doesn't
+# get COPY'd in, which speeds up `docker build` and shrinks layer churn.
+
+target/
+.git/
+.github/
+*.md
+.env
+.env.local
+.env.*.local
+docker-compose*.yml
+docs/
+scripts/
+bfip/
+.claude/
+node_modules/
+fuzz/
+deploy/

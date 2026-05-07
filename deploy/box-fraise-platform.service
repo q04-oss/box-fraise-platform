@@ -1,0 +1,25 @@
+[Unit]
+Description=Box Fraise Platform API
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=boxfraise
+WorkingDirectory=/opt/box-fraise-platform
+EnvironmentFile=/opt/box-fraise-platform/.env
+ExecStart=/opt/box-fraise-platform/server
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=box-fraise-platform
+
+# Security hardening — least-privilege defaults from systemd-analyze security.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/box-fraise-platform
+
+[Install]
+WantedBy=multi-user.target

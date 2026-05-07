@@ -123,6 +123,37 @@ jobs:
       - run: cargo install sqlx-cli --no-default-features --features postgres --locked
       - run: bash scripts/check_schema_drift.sh
 
+  docker-build:
+    name: docker image build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: false
+          tags: box-fraise-platform:ci
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+  # ── Staging deploy (TODO — Hardening §8) ──────────────────────────────────────
+  # Wire up once a VPS / Railway / DO project is provisioned. Likely shape:
+  # staging-deploy:
+  #   runs-on: ubuntu-latest
+  #   needs: [test, docker-build]
+  #   if: github.ref == 'refs/heads/main'
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Deploy
+  #       env:
+  #         DEPLOY_TOKEN: ${{ secrets.STAGING_DEPLOY_TOKEN }}
+  #       run: ./deploy/deploy_staging.sh
+  # See deploy/DEPLOY.md for the manual procedure that this job will automate.
+
   docs:
     name: documentation check
     runs-on: ubuntu-latest
