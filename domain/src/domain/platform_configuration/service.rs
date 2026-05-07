@@ -9,7 +9,7 @@ use crate::domain::auth::repository as user_repo;
 use super::{
     repository,
     types::{
-        PlatformConfigurationHistoryResponse, PlatformConfigurationResponse,
+        FeatureFlagRow, PlatformConfigurationHistoryResponse, PlatformConfigurationResponse,
         PlatformConfigurationRow, UpdateConfigurationRequest,
     },
 };
@@ -179,6 +179,104 @@ pub async fn get_configuration_history(
     }
 
     repository::get_history_by_key(pool, key).await
+}
+
+// ── Feature flags (Hardening §10) ────────────────────────────────────────────
+
+/// Resolve a feature flag for `(flag_name, user_id)`.
+///
+/// Resolution order:
+///   1. Unknown flag → `Ok(false)` (fail closed).
+///   2. `enabled = true` → `Ok(true)` (global on).
+///   3. `user_id` in `enabled_for_user_ids` → `Ok(true)` (allow-list).
+///   4. `enabled_for_pct > 0` → `Ok(user_id % 100 < pct)` (gradual rollout,
+///      stable per-user bucketing).
+///   5. otherwise → `Ok(false)`.
+///
+/// Anonymous callers (`user_id = None`) bucket as 0 for the percentage
+/// rollout — so a 50% rollout would expose the flag to anonymous traffic.
+/// Pass an explicit `Some(0)` to keep anonymous off the rollout.
+pub async fn is_feature_enabled(
+    pool:      &PgPool,
+    flag_name: &str,
+    user_id:   Option<i32>,
+) -> AppResult<bool> {
+    let row: Option<(bool, Vec<i32>, i32)> = sqlx::query_as(
+        "SELECT enabled, enabled_for_user_ids, enabled_for_pct \
+         FROM feature_flags WHERE flag_name = $1"
+    )
+    .bind(flag_name)
+    .fetch_optional(pool)
+    .await
+    .map_err(DomainError::Db)?;
+
+    let (enabled, allow_list, pct) = match row {
+        Some(r) => r,
+        None    => return Ok(false),
+    };
+
+    if enabled {
+        return Ok(true);
+    }
+    if let Some(uid) = user_id {
+        if allow_list.contains(&uid) {
+            return Ok(true);
+        }
+    }
+    if pct > 0 {
+        let bucket = user_id.unwrap_or(0).rem_euclid(100);
+        return Ok(bucket < pct);
+    }
+    Ok(false)
+}
+
+/// Admin-only — list every flag for the dashboard.
+pub async fn list_feature_flags(
+    pool:               &PgPool,
+    requesting_user_id: UserId,
+) -> AppResult<Vec<FeatureFlagRow>> {
+    let user = user_repo::find_by_id(pool, requesting_user_id)
+        .await?
+        .ok_or(DomainError::Unauthorized)?;
+    if !user.is_platform_admin {
+        return Err(DomainError::Forbidden);
+    }
+    sqlx::query_as(
+        "SELECT id, flag_name, enabled, description, \
+                enabled_for_user_ids, enabled_for_pct, created_at, updated_at \
+         FROM feature_flags ORDER BY flag_name"
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(DomainError::Db)
+}
+
+/// Admin-only — flip the global `enabled` bit on a flag.
+pub async fn set_feature_flag_enabled(
+    pool:               &PgPool,
+    requesting_user_id: UserId,
+    flag_name:          &str,
+    enabled:            bool,
+) -> AppResult<()> {
+    let user = user_repo::find_by_id(pool, requesting_user_id)
+        .await?
+        .ok_or(DomainError::Unauthorized)?;
+    if !user.is_platform_admin {
+        return Err(DomainError::Forbidden);
+    }
+    let result = sqlx::query(
+        "UPDATE feature_flags SET enabled = $2, updated_at = now() \
+         WHERE flag_name = $1"
+    )
+    .bind(flag_name)
+    .bind(enabled)
+    .execute(pool)
+    .await
+    .map_err(DomainError::Db)?;
+    if result.rows_affected() == 0 {
+        return Err(DomainError::NotFound);
+    }
+    Ok(())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

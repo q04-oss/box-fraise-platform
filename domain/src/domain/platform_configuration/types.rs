@@ -71,3 +71,22 @@ pub const DEFAULTS: &[(&str, &str, &str, &str)] = &[
     ("background_check_expiry_months",   "12",    "integer", "Months before background check expires"),
     ("cleared_requires_all_checks",      "true",  "boolean", "All five check types required for cleared"),
 ];
+
+// ── Feature flags (Hardening §10) ────────────────────────────────────────────
+
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct FeatureFlagRow {
+    pub id:                   i32,
+    pub flag_name:            String,
+    pub enabled:              bool,
+    pub description:          String,
+    pub enabled_for_user_ids: Vec<i32>,
+    pub enabled_for_pct:      i32,
+    pub created_at:           DateTime<Utc>,
+    pub updated_at:           DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateFeatureFlagRequest {
+    pub enabled: bool,
+}

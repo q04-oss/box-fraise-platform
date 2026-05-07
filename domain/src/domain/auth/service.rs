@@ -73,6 +73,22 @@ pub async fn authenticate_apple(
     }
 
     if is_new {
+        // Hardening §10 — implicit consent recorded at account creation.
+        // By signing in the user accepts the platform terms and privacy
+        // policy. Explicit re-consent flow is a future product requirement.
+        // record_consent failure is logged but does not block sign-in;
+        // the consent rows are recoverable from the audit trail.
+        let uid = i32::from(user.id);
+        if let Err(e) = crate::domain::users::service::record_consent(
+            pool, uid, "platform_terms", true, None,
+        ).await {
+            tracing::warn!(error = %e, "platform_terms consent record failed");
+        }
+        if let Err(e) = crate::domain::users::service::record_consent(
+            pool, uid, "privacy_policy", true, None,
+        ).await {
+            tracing::warn!(error = %e, "privacy_policy consent record failed");
+        }
         event_bus.publish(DomainEvent::UserRegistered {
             user_id: user.id,
             email:   user.email.clone(),
@@ -135,8 +151,24 @@ pub async fn request_magic_link(
         }
     }
 
-    let (user, _) = repository::find_or_create_magic_link_user(pool, email).await?;
+    let (user, is_new) = repository::find_or_create_magic_link_user(pool, email).await?;
     if user.is_banned { return Ok(()); }
+
+    if is_new {
+        // Hardening §10 — implicit consent at account creation. Same shape
+        // as the Apple Sign In path; failures are logged but non-blocking.
+        let uid = i32::from(user.id);
+        if let Err(e) = crate::domain::users::service::record_consent(
+            pool, uid, "platform_terms", true, None,
+        ).await {
+            tracing::warn!(error = %e, "platform_terms consent record failed");
+        }
+        if let Err(e) = crate::domain::users::service::record_consent(
+            pool, uid, "privacy_policy", true, None,
+        ).await {
+            tracing::warn!(error = %e, "privacy_policy consent record failed");
+        }
+    }
 
     let token      = Uuid::new_v4().to_string();
     let token_hash = sha256_hex(token.as_bytes());

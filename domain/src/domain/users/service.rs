@@ -234,6 +234,141 @@ pub async fn record_consent(
     Ok(())
 }
 
+// ── Admin dispute tooling — Hardening §10 ────────────────────────────────────
+
+/// `POST /api/admin/users/:id/ban` — platform-admin-only ban.
+///
+/// Atomic shape: mark the row banned, revoke any active soultoken, and
+/// audit. Cannot ban another platform_admin (defence against compromised
+/// admin accounts ban-blasting the team).
+pub async fn admin_ban_user(
+    pool:               &PgPool,
+    requesting_user_id: i32,
+    target_user_id:     i32,
+    reason:             String,
+) -> AppResult<()> {
+    // 1. Requester must be platform_admin.
+    let requester_admin: Option<bool> = sqlx::query_scalar(
+        "SELECT is_platform_admin FROM users WHERE id = $1 AND deleted_at IS NULL"
+    )
+    .bind(requesting_user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(DomainError::Db)?;
+    if !matches!(requester_admin, Some(true)) {
+        return Err(DomainError::Forbidden);
+    }
+
+    // 2. Target must exist and not be a platform_admin.
+    let target_admin: Option<bool> = sqlx::query_scalar(
+        "SELECT is_platform_admin FROM users WHERE id = $1"
+    )
+    .bind(target_user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(DomainError::Db)?;
+    match target_admin {
+        None              => return Err(DomainError::NotFound),
+        Some(true)        => return Err(DomainError::Forbidden),
+        Some(false)       => {}
+    }
+
+    // 3. Mark banned. is_banned remains the source of truth; banned_at +
+    //    banned_reason are audit display fields only.
+    sqlx::query(
+        "UPDATE users SET \
+            is_banned     = true, \
+            banned_at     = now(), \
+            banned_reason = $2, \
+            updated_at    = now() \
+         WHERE id = $1"
+    )
+    .bind(target_user_id)
+    .bind(&reason)
+    .execute(pool)
+    .await
+    .map_err(DomainError::Db)?;
+
+    // 4. Revoke active soultoken if present. We use the soultokens service so
+    //    its full audit + verification_event chain runs.
+    let active_st: Option<i32> = sqlx::query_scalar(
+        "SELECT s.id FROM soultokens s \
+         JOIN users u ON u.soultoken_id = s.id \
+         WHERE u.id = $1 \
+           AND s.revoked_at IS NULL \
+           AND s.expires_at > now()"
+    )
+    .bind(target_user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(DomainError::Db)?;
+    if let Some(st_id) = active_st {
+        let _ = crate::domain::soultokens::service::revoke_soultoken(
+            pool,
+            st_id,
+            UserId::from(requesting_user_id),
+            crate::domain::soultokens::types::RevokeSoultokenRequest {
+                revocation_reason:   "platform_ban".to_string(),
+                revocation_visit_id: None,
+            },
+        ).await;
+    }
+
+    audit::write(
+        pool,
+        Some(requesting_user_id),
+        None,
+        "admin.user_banned",
+        serde_json::json!({ "target_user_id": target_user_id, "reason": reason }),
+    ).await;
+    Ok(())
+}
+
+/// `POST /api/admin/users/:id/unban` — clears the ban. Soultokens that were
+/// revoked by `admin_ban_user` are NOT automatically reissued; the user
+/// goes through the verification protocol again if they want one back.
+pub async fn admin_unban_user(
+    pool:               &PgPool,
+    requesting_user_id: i32,
+    target_user_id:     i32,
+) -> AppResult<()> {
+    let requester_admin: Option<bool> = sqlx::query_scalar(
+        "SELECT is_platform_admin FROM users WHERE id = $1 AND deleted_at IS NULL"
+    )
+    .bind(requesting_user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(DomainError::Db)?;
+    if !matches!(requester_admin, Some(true)) {
+        return Err(DomainError::Forbidden);
+    }
+
+    let result = sqlx::query(
+        "UPDATE users SET \
+            is_banned     = false, \
+            banned_at     = NULL, \
+            banned_reason = NULL, \
+            updated_at    = now() \
+         WHERE id = $1"
+    )
+    .bind(target_user_id)
+    .execute(pool)
+    .await
+    .map_err(DomainError::Db)?;
+    if result.rows_affected() == 0 {
+        return Err(DomainError::NotFound);
+    }
+
+    audit::write(
+        pool,
+        Some(requesting_user_id),
+        None,
+        "admin.user_unbanned",
+        serde_json::json!({ "target_user_id": target_user_id }),
+    ).await;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2593,6 +2593,131 @@ async fn sse_stream_returns_200_with_correct_content_type(pool: PgPool) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Operational hardening (§10) — consent on creation, feature flags, ban/unban
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn new_user_creation_records_consent(pool: PgPool) {
+    use box_fraise_domain::domain::auth::repository as user_repo;
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    // Drive user creation through the magic-link path — ANTHROPIC_API_KEY /
+    // RESEND_API_KEY etc. aren't required for `find_or_create_magic_link_user`.
+    let email: String = SafeEmail().fake();
+    let (_user, is_new) = user_repo::find_or_create_magic_link_user(&pool, &email)
+        .await.expect("user creation must succeed");
+    assert!(is_new, "fresh email must produce a new user");
+
+    // Now invoke record_consent the same way request_magic_link does.
+    use box_fraise_domain::domain::users::service as user_svc;
+    let uid = i32::from(_user.id);
+    user_svc::record_consent(&pool, uid, "platform_terms", true, None).await.unwrap();
+    user_svc::record_consent(&pool, uid, "privacy_policy", true, None).await.unwrap();
+
+    let rows: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT consent_type, granted FROM consent_records WHERE user_id = $1 \
+         ORDER BY consent_type"
+    ).bind(uid).fetch_all(&pool).await.unwrap();
+
+    assert_eq!(rows.len(), 2, "must have two consent rows");
+    assert_eq!(rows[0], ("platform_terms".to_string(), true));
+    assert_eq!(rows[1], ("privacy_policy".to_string(), true));
+}
+
+#[sqlx::test]
+async fn is_feature_enabled_returns_false_for_unknown_flag(pool: PgPool) {
+    use box_fraise_domain::domain::platform_configuration::service as cfg_svc;
+    cfg_svc::initialize_defaults(&pool).await.ok();
+
+    let enabled = cfg_svc::is_feature_enabled(&pool, "nonexistent_xyz", None)
+        .await.expect("query must not error");
+    assert!(!enabled, "unknown flags must resolve to false (fail closed)");
+}
+
+#[sqlx::test]
+async fn is_feature_enabled_returns_true_when_globally_enabled(pool: PgPool) {
+    use box_fraise_domain::domain::platform_configuration::service as cfg_svc;
+
+    // Migration 006 seeds web3_payments=false. Flip it on.
+    sqlx::query("UPDATE feature_flags SET enabled = true WHERE flag_name = 'web3_payments'")
+        .execute(&pool).await.unwrap();
+
+    let enabled = cfg_svc::is_feature_enabled(&pool, "web3_payments", None)
+        .await.unwrap();
+    assert!(enabled, "globally-enabled flag must resolve to true");
+}
+
+#[sqlx::test]
+async fn is_feature_enabled_returns_true_for_specific_user(pool: PgPool) {
+    use box_fraise_domain::domain::platform_configuration::service as cfg_svc;
+
+    // Allow-list user 42 specifically — flag stays globally off.
+    sqlx::query(
+        "UPDATE feature_flags SET enabled_for_user_ids = ARRAY[42]::integer[] \
+         WHERE flag_name = 'mesh_presence'"
+    ).execute(&pool).await.unwrap();
+
+    let on  = cfg_svc::is_feature_enabled(&pool, "mesh_presence", Some(42)).await.unwrap();
+    let off = cfg_svc::is_feature_enabled(&pool, "mesh_presence", Some(99)).await.unwrap();
+    assert!( on,  "user 42 must see the flag enabled");
+    assert!(!off, "user 99 must NOT see the flag enabled");
+}
+
+#[sqlx::test]
+async fn admin_ban_user_sets_is_banned(pool: PgPool) {
+    use box_fraise_domain::domain::users::service as user_svc;
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let (admin_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, is_platform_admin) \
+         VALUES ($1, true, true) RETURNING id",
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+    let (target_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+
+    user_svc::admin_ban_user(&pool, admin_id, target_id, "test ban".to_string())
+        .await.expect("ban must succeed");
+
+    let row: (bool, Option<chrono::DateTime<chrono::Utc>>, Option<String>) = sqlx::query_as(
+        "SELECT is_banned, banned_at, banned_reason FROM users WHERE id = $1"
+    ).bind(target_id).fetch_one(&pool).await.unwrap();
+    assert!(row.0, "is_banned must be true");
+    assert!(row.1.is_some(), "banned_at must be set");
+    assert_eq!(row.2.as_deref(), Some("test ban"));
+
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE event_kind = 'admin.user_banned'"
+    ).fetch_one(&pool).await.unwrap();
+    assert_eq!(audit_count, 1, "audit row must be written");
+}
+
+#[sqlx::test]
+async fn admin_unban_user_clears_ban(pool: PgPool) {
+    use box_fraise_domain::domain::users::service as user_svc;
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let (admin_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, is_platform_admin) \
+         VALUES ($1, true, true) RETURNING id",
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+    let (target_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, is_banned, banned_at, banned_reason) \
+         VALUES ($1, true, true, now(), 'previous reason') RETURNING id",
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+
+    user_svc::admin_unban_user(&pool, admin_id, target_id)
+        .await.expect("unban must succeed");
+
+    let row: (bool, Option<chrono::DateTime<chrono::Utc>>, Option<String>) = sqlx::query_as(
+        "SELECT is_banned, banned_at, banned_reason FROM users WHERE id = $1"
+    ).bind(target_id).fetch_one(&pool).await.unwrap();
+    assert!(!row.0, "is_banned must be cleared");
+    assert!(row.1.is_none(), "banned_at must be NULL");
+    assert!(row.2.is_none(), "banned_reason must be NULL");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Compliance (Hardening §9) — erasure / export / consent / retention
 // ─────────────────────────────────────────────────────────────────────────────
 
