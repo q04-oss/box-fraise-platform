@@ -28,7 +28,7 @@ the highest one the request requires.
 | `cleared_user` | `attested_user` + non-revoked `users.cleared_soultoken_id` | Optional elevated tier; reserved for future scopes. |
 | `delivery_staff` | `user` + active `staff_roles` row with `role='delivery_staff'` | Location-scoped via `staff_roles.location_id` (NOT NULL for this role). |
 | `attestation_reviewer` | `user` + active `staff_roles` row with `role='attestation_reviewer'` | Platform-wide; assigned per-attestation by `assign_reviewers_for_visit`. |
-| `platform_admin` | `users.is_platform_admin = true` (preferred) **or** active `staff_roles` row with `role='platform_admin'` | Two parallel admin paths exist in the live code. The boolean is the path actually checked by every service today; the staff-role variant is granted but never read. Consolidating to the boolean is the cleanup path; documenting the staff-role path here so it isn't accidentally revived. |
+| `platform_admin` | `users.is_platform_admin = true` | **Sole** enforcement path. Migration 008 deleted any historical `staff_roles` rows with `role='platform_admin'` and added a CHECK constraint preventing re-introduction. `grant_staff_role` rejects the role with `DomainError::InvalidInput`. Anchor doc-comment lives on `domain::domain::auth::types::UserRow::is_platform_admin`. |
 | `stripe_webhook` | Stripe signature header verified by `integrations::stripe::verify_signature` | No JWT. May only act on identity / payment endpoints. |
 | `background_check_webhook` | Provider-specific signature on the inbound webhook (currently a stub — provider integration pending) | No JWT. Restricted to `background_checks` writes. |
 | `public` | No auth required by design | Trust registry, health check, OpenAPI doc. |
@@ -87,7 +87,7 @@ Conventions in the tables below:
 
 | Table | SELECT | INSERT | UPDATE | DELETE |
 |-------|--------|--------|--------|--------|
-| `staff_roles` | `user` (own active roles); `platform_admin` (any) | `platform_admin` (with `confirmed_by` from a second admin for `platform_admin` grants) | `platform_admin` (`revoked_at`, `expires_at`, `confirmed_by`, `confirmed_at`) | none |
+| `staff_roles` | `user` (own active roles); `platform_admin` (any) | `platform_admin` (operational roles only — `delivery_staff`, `attestation_reviewer`; the `platform_admin` role string is rejected at the service layer and blocked by the CHECK constraint added in migration 008) | `platform_admin` (`revoked_at`, `expires_at`, `confirmed_by`, `confirmed_at`) | none |
 | `reviewer_assignment_log` | `platform_admin`; assigned reviewer (own rows) | system on `initiate_attestation` | none | none |
 
 ### Staff visit tables (2)
@@ -338,11 +338,13 @@ RLS policies if a regression is found.
 
 1. **38 tables, not 37.** Spec said 37; live schema has 38
    (`qualifying_presence_events` is the off-by-one).
-2. **Two `platform_admin` paths.** `users.is_platform_admin` is the boolean
-   every authorization check actually reads. The `staff_roles` row with
-   `role='platform_admin'` is granted (with the two-person rule + no-self-
-   confirmation constraint) but no service ever reads it. Worth
-   consolidating in a future cleanup.
+2. **`platform_admin` consolidated to a single path** (Hardening cleanup #1,
+   migration 008). `users.is_platform_admin` is the **sole** enforcement
+   path. `staff_roles` is now operational-roles-only — `grant_staff_role`
+   rejects the `platform_admin` role string with `DomainError::InvalidInput`,
+   and the `staff_roles_role_check` CHECK constraint at the database layer
+   prevents any direct INSERT bypassing the service. Anchor doc-comment
+   lives on `domain::domain::auth::types::UserRow::is_platform_admin`.
 3. **`bcrypt` admin PINs are documented but unused.** `.env.example` claims
    the admin PIN fields are bcrypt-hashed at startup, but nothing in
    `server/src` ever reads `cfg.admin_pin` / `cfg.chocolatier_pin` /

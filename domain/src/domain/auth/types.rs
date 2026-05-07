@@ -16,6 +16,12 @@ pub struct UserRow {
     pub display_name:                 Option<String>,
     pub push_token:                   Option<String>,
     pub email_verified:               bool,
+    /// Sole platform-admin enforcement path. Every authorization check
+    /// across the workspace reads this boolean — never a `staff_roles`
+    /// row. The `staff_roles` table is operational-roles-only
+    /// (`delivery_staff`, `attestation_reviewer`); migration 008 added a
+    /// CHECK constraint preventing `'platform_admin'` from being inserted
+    /// there. See `docs/ACCESS_CONTROL_MATRIX.md` Section 5.
     pub is_platform_admin:            bool,
     pub is_banned:                    bool,
     pub verification_status:          String,

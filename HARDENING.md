@@ -147,7 +147,6 @@ not by section:
 | Stripe billing subscription webhook                           | §10     | `business_subscriptions` table left empty                       |
 | OpenAPI proc-macro annotations                                | n/a     | `utoipa` is wired but routes not annotated                      |
 | Per-endpoint rate-limit tuning                                | §6 / §10 | `server/src/http/middleware/rate_limit.rs`                      |
-| Two parallel `platform_admin` paths (`is_platform_admin` boolean vs `staff_roles` row) | §2a | matrix Section 5 deviation note                                 |
 
 None of the above block production launch — they're either operational
 work, follow-up refactors, or fail-safe defaults that require the next

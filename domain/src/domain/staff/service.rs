@@ -57,7 +57,12 @@ fn to_visit_response(row: StaffVisitRow) -> StaffVisitResponse {
 /// Grant a staff role to a user (BFIP Section 6.1).
 ///
 /// Requires the requesting user to be a platform admin.
-/// Platform admin grants additionally require a `confirmed_by` from a different admin.
+/// `staff_roles` is for **operational** roles only (`delivery_staff`,
+/// `attestation_reviewer`). Platform-admin status lives on
+/// `users.is_platform_admin` — see `docs/ACCESS_CONTROL_MATRIX.md` Section 5.
+/// Attempting to grant `platform_admin` here is rejected at the service
+/// layer; the database CHECK constraint added in migration 008 is a
+/// defence-in-depth backstop.
 pub async fn grant_staff_role(
     pool:               &PgPool,
     requesting_user_id: UserId,
@@ -66,7 +71,9 @@ pub async fn grant_staff_role(
 ) -> AppResult<StaffRoleResponse> {
     let rid = i32::from(requesting_user_id);
 
-    // 1. Requesting user must be platform_admin.
+    // 1. Requesting user must be platform_admin (boolean column — sole
+    //    enforcement path; a staff_roles row would be authoritative-looking
+    //    but inert).
     let requester = user_repo::find_by_id(pool, requesting_user_id)
         .await?
         .ok_or(DomainError::Unauthorized)?;
@@ -75,24 +82,22 @@ pub async fn grant_staff_role(
         return Err(DomainError::Forbidden);
     }
 
-    // 2. Platform_admin grants require confirmed_by from a different admin.
+    // 2. platform_admin is not a valid staff_roles role — promotion to
+    //    admin must go through the admin user-management API
+    //    (toggling users.is_platform_admin). Reject explicitly and
+    //    early so the error message is actionable.
     if req.role == "platform_admin" {
-        match req.confirmed_by {
-            None => return Err(DomainError::invalid_input(
-                "platform_admin grants require confirmed_by from a second admin",
-            )),
-            Some(cb) if cb == rid => return Err(DomainError::invalid_input(
-                "confirmed_by must differ from the granting admin",
-            )),
-            _ => {}
-        }
+        return Err(DomainError::invalid_input(
+            "platform_admin status is set via users.is_platform_admin, \
+             not staff_roles. Use the admin user-management API.",
+        ));
     }
 
     // 3. delivery_staff requires location_id.
-    let allowed_roles = ["delivery_staff", "attestation_reviewer", "platform_admin"];
+    let allowed_roles = ["delivery_staff", "attestation_reviewer"];
     if !allowed_roles.contains(&req.role.as_str()) {
         return Err(DomainError::invalid_input(
-            "role must be one of: delivery_staff, attestation_reviewer, platform_admin",
+            "role must be one of: delivery_staff, attestation_reviewer",
         ));
     }
     if req.role == "delivery_staff" && req.location_id.is_none() {
@@ -577,6 +582,107 @@ mod tests {
             &bus,
         ).await.unwrap_err();
         assert!(matches!(err, DomainError::InvalidInput(_)));
+    }
+
+    // ── Hardening cleanup #1: platform_admin path consolidation ──────────────
+
+    /// `grant_staff_role` must reject the `platform_admin` role string at
+    /// the service layer, with an actionable error message that points
+    /// callers at `users.is_platform_admin`. Backstop: even if the
+    /// service check is bypassed, migration 008's CHECK constraint
+    /// rejects the INSERT — verified in the second assertion.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn grant_role_rejects_platform_admin_role(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let admin  = create_platform_admin(&pool, &SafeEmail().fake::<String>()).await;
+        let target = create_user(&pool, &SafeEmail().fake::<String>()).await;
+        let bus    = EventBus::new();
+
+        // Service-layer rejection: actionable InvalidInput.
+        let err = grant_staff_role(
+            &pool, admin,
+            grant_req(i32::from(target), "platform_admin", None),
+            &bus,
+        ).await.unwrap_err();
+        match err {
+            DomainError::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("is_platform_admin"),
+                    "error message must point at the boolean column, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+
+        // Defence-in-depth: the database CHECK constraint must also reject
+        // a direct INSERT of role='platform_admin', so a raw-SQL bypass of
+        // the service can't smuggle the role back in.
+        let raw = sqlx::query(
+            "INSERT INTO staff_roles (user_id, role, granted_by) VALUES ($1, 'platform_admin', $2)"
+        )
+        .bind(i32::from(target))
+        .bind(i32::from(admin))
+        .execute(&pool).await;
+        assert!(
+            raw.is_err(),
+            "staff_roles_role_check CHECK constraint must reject role='platform_admin' \
+             — got Ok({raw:?}); migration 008 may have regressed"
+        );
+    }
+
+    /// Proves `users.is_platform_admin` is the **sole** enforcement path:
+    /// flipping the boolean (with no `staff_roles` row at all) is
+    /// sufficient to authorize an admin-only action; conversely, the
+    /// absence of the boolean denies even a user that holds operational
+    /// `staff_roles` rows.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn platform_admin_check_uses_is_platform_admin_column(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let bus    = EventBus::new();
+        let loc_id = create_location(&pool).await;
+        let target = create_user(&pool, &SafeEmail().fake::<String>()).await;
+
+        // Case A — boolean true, zero staff_roles rows: must authorize.
+        let admin_via_boolean =
+            create_platform_admin(&pool, &SafeEmail().fake::<String>()).await;
+        let row_count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM staff_roles WHERE user_id = $1"
+        )
+        .bind(i32::from(admin_via_boolean))
+        .fetch_one(&pool).await.unwrap();
+        assert_eq!(row_count.0, 0, "fixture must not insert any staff_roles row");
+
+        grant_staff_role(
+            &pool, admin_via_boolean,
+            grant_req(i32::from(target), "delivery_staff", Some(loc_id)),
+            &bus,
+        ).await.expect("boolean is_platform_admin alone must authorize");
+
+        // Case B — boolean false but holds operational staff_roles rows:
+        // must NOT authorize. Seed a delivery_staff and an
+        // attestation_reviewer row directly so we don't re-use the service.
+        let pseudo = create_user(&pool, &SafeEmail().fake::<String>()).await;
+        let granter = create_platform_admin(&pool, &SafeEmail().fake::<String>()).await;
+        sqlx::query(
+            "INSERT INTO staff_roles (user_id, location_id, role, granted_by) \
+             VALUES ($1, $2, 'delivery_staff', $3), ($1, NULL, 'attestation_reviewer', $3)"
+        )
+        .bind(i32::from(pseudo))
+        .bind(loc_id)
+        .bind(i32::from(granter))
+        .execute(&pool).await.unwrap();
+
+        let target2 = create_user(&pool, &SafeEmail().fake::<String>()).await;
+        let err = grant_staff_role(
+            &pool, pseudo,
+            grant_req(i32::from(target2), "delivery_staff", Some(loc_id)),
+            &bus,
+        ).await.unwrap_err();
+        assert!(
+            matches!(err, DomainError::Forbidden),
+            "operational staff_roles rows must NOT confer admin authority \
+             — only users.is_platform_admin does; got {err:?}"
+        );
     }
 
     // ── Tests 4–5: schedule_visit ─────────────────────────────────────────────
