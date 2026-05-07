@@ -2592,6 +2592,198 @@ async fn sse_stream_returns_200_with_correct_content_type(pool: PgPool) {
         "SSE response must be text/event-stream, got: {ct}");
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Compliance (Hardening §9) — erasure / export / consent / retention
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn request_erasure_anonymises_user_record(pool: PgPool) {
+    use box_fraise_domain::domain::users::service as user_svc;
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, display_name, apple_id, push_token) \
+         VALUES ($1, true, 'Original Name', 'apple-id-xyz', 'push-token-abc') RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+
+    user_svc::request_erasure(&pool, uid).await.expect("erasure must succeed for soultoken-less user");
+
+    let row: (String, Option<String>, Option<String>, Option<String>, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as(
+            "SELECT email, display_name, apple_id, push_token, deleted_at \
+             FROM users WHERE id = $1"
+        )
+        .bind(uid).fetch_one(&pool).await.unwrap();
+
+    assert_eq!(row.0, format!("erased-{uid}@deleted.boxfraise.com"));
+    assert_eq!(row.1.as_deref(), Some("Deleted User"));
+    assert_eq!(row.2, None, "apple_id must be cleared");
+    assert_eq!(row.3, None, "push_token must be cleared");
+    assert!(row.4.is_some(), "deleted_at must be set");
+}
+
+#[sqlx::test]
+async fn request_erasure_fails_if_active_soultoken(pool: PgPool) {
+    use box_fraise_domain::domain::users::service as user_svc;
+    use box_fraise_domain::error::DomainError;
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    // Build a presence-confirmed user, then the FK chain a soultoken needs:
+    // identity_credential, location, business, presence_threshold, staff_visit,
+    // visit_attestation, soultoken. Promote to attested AFTER inserting the
+    // attestation so bf_prevent_double_attestation doesn't reject the row.
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ($1, true, 'presence_confirmed') RETURNING id",
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+    let (cred_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO identity_credentials \
+         (user_id, credential_type, verified_at, cooling_ends_at, cooling_completed_at) \
+         VALUES ($1, 'stripe_identity', now(), now() + interval '7 days', now()) RETURNING id"
+    ).bind(uid).fetch_one(&pool).await.unwrap();
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('L', 'box_fraise_store', 'A', 'America/Edmonton') RETURNING id"
+    ).fetch_one(&pool).await.unwrap();
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'B', 'active') RETURNING id"
+    ).bind(loc_id).bind(uid).fetch_one(&pool).await.unwrap();
+    let (thresh_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO presence_thresholds \
+         (user_id, business_id, event_count, days_count, threshold_met_at) \
+         VALUES ($1, $2, 3, 3, now()) RETURNING id"
+    ).bind(uid).bind(biz_id).fetch_one(&pool).await.unwrap();
+    let (s_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+    let (r1,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+    let (r2,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+    let (visit_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO staff_visits (location_id, staff_id, visit_type, status, scheduled_at) \
+         VALUES ($1, $2, 'combined', 'completed', now()) RETURNING id"
+    ).bind(loc_id).bind(s_id).fetch_one(&pool).await.unwrap();
+    let (attest_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO visit_attestations \
+         (visit_id, user_id, staff_id, presence_threshold_id, \
+          assigned_reviewer_1_id, assigned_reviewer_2_id, status) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'approved') RETURNING id"
+    ).bind(visit_id).bind(uid).bind(s_id).bind(thresh_id).bind(r1).bind(r2)
+     .fetch_one(&pool).await.unwrap();
+    let (st_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO soultokens \
+         (display_code, holder_user_id, token_type, identity_credential_id, \
+          presence_threshold_id, attestation_id, expires_at) \
+         VALUES ('XXXX-YYYY-ZZZZ', $1, 'user', $2, $3, $4, now() + interval '1 year') \
+         RETURNING id"
+    ).bind(uid).bind(cred_id).bind(thresh_id).bind(attest_id)
+     .fetch_one(&pool).await.unwrap();
+    sqlx::query("UPDATE users SET soultoken_id = $1, verification_status = 'attested', \
+                                    attested_at = now() WHERE id = $2")
+        .bind(st_id).bind(uid).execute(&pool).await.unwrap();
+
+    let err = user_svc::request_erasure(&pool, uid).await.unwrap_err();
+    assert!(
+        matches!(err, box_fraise_domain::error::DomainError::Conflict(_)),
+        "expected Conflict (active soultoken), got: {err:?}"
+    );
+    let _ = DomainError::NotFound; // silence unused-import warning if rebalanced
+}
+
+#[sqlx::test]
+async fn export_my_data_returns_complete_profile(pool: PgPool) {
+    use box_fraise_domain::domain::users::service as user_svc;
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ($1, true, 'identity_confirmed') RETURNING id",
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO verification_events (user_id, event_type) VALUES ($1, 'identity_confirmed')"
+    ).bind(uid).execute(&pool).await.unwrap();
+
+    let export = user_svc::export_my_data(&pool, uid).await.expect("export must succeed");
+
+    assert_eq!(export.user_profile.id, uid);
+    assert_eq!(export.user_profile.verification_status, "identity_confirmed");
+    assert!(!export.verification_journey.is_empty(),
+        "verification_journey must include the inserted event");
+    assert!(export.exported_at <= chrono::Utc::now(),
+        "exported_at must be set to a sane timestamp");
+}
+
+#[sqlx::test]
+async fn record_consent_inserts_row(pool: PgPool) {
+    use box_fraise_domain::domain::users::service as user_svc;
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+
+    user_svc::record_consent(&pool, uid, "platform_terms", true, Some("127.0.0.1"))
+        .await.expect("record_consent must succeed");
+
+    let row: (String, bool, Option<String>) = sqlx::query_as(
+        "SELECT consent_type, granted, ip_address FROM consent_records WHERE user_id = $1"
+    ).bind(uid).fetch_one(&pool).await.unwrap();
+    assert_eq!(row.0, "platform_terms");
+    assert!(row.1, "granted must be true");
+    assert_eq!(row.2.as_deref(), Some("127.0.0.1"));
+}
+
+#[sqlx::test]
+async fn retention_pruning_removes_expired_jwt_revocations(pool: PgPool) {
+    use box_fraise_server::tasks::retention::prune_expired_jwt_revocations;
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO jwt_revocations (jti, user_id, expires_at) \
+         VALUES ('test-jti-stale', $1, now() - INTERVAL '2 days')"
+    ).bind(uid).execute(&pool).await.unwrap();
+
+    prune_expired_jwt_revocations(&pool).await;
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM jwt_revocations WHERE jti = 'test-jti-stale'"
+    ).fetch_one(&pool).await.unwrap();
+    assert_eq!(count, 0, "expired jwt_revocations row must be pruned");
+}
+
+#[sqlx::test]
+async fn retention_pruning_removes_used_magic_links(pool: PgPool) {
+    use box_fraise_server::tasks::retention::prune_expired_magic_links;
+    use fake::{Fake, faker::internet::en::SafeEmail};
+
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO magic_link_tokens (user_id, email, token_hash, expires_at, used_at) \
+         VALUES ($1, $2, 'stale-test-token-hash', now() + INTERVAL '5 minutes', \
+                 now() - INTERVAL '2 hours')"
+    ).bind(uid).bind("test@example.com").execute(&pool).await.unwrap();
+
+    prune_expired_magic_links(&pool).await;
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM magic_link_tokens WHERE token_hash = 'stale-test-token-hash'"
+    ).fetch_one(&pool).await.unwrap();
+    assert_eq!(count, 0, "used magic_link_tokens row must be pruned");
+}
+
 #[sqlx::test]
 async fn sse_stream_requires_auth(pool: PgPool) {
     let state = common::build_state(pool, None);

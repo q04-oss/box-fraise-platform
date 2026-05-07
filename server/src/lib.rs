@@ -5,6 +5,7 @@ pub mod events;
 pub mod http;
 pub mod notifications;
 pub mod openapi;
+pub mod tasks;
 
 // Re-export shared infrastructure from the domain crate so that:
 // 1. Route files can still use `use crate::error::AppError` unchanged.
@@ -149,6 +150,12 @@ pub async fn run() -> anyhow::Result<()> {
     let event_pool   = state.db.clone();
     let event_http   = state.http.clone();
     let notif_tx     = state.event_tx.clone();
+
+    // Hardening §9 — daily retention pruning daemon. First run is 24h after
+    // boot (sleep-first), so a restart loop doesn't churn the prunable tables.
+    tokio::spawn(tasks::retention::run_retention_pruning(state.db.clone()));
+    info!("Retention pruning task started");
+
     tokio::spawn(async move {
         use tokio::sync::broadcast::error::RecvError;
         loop {
