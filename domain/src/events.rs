@@ -112,6 +112,10 @@ pub enum DomainEvent {
         soultoken_id: i32,
         user_id:      i32,
         token_type:   String,
+        /// Human-readable code derived from the token UUID (BFIP §7) —
+        /// surfaced verbatim to the user via the SSE
+        /// `notification.soultoken_issued` event.
+        display_code: String,
     },
     /// A soultoken was revoked (by staff or platform) or voluntarily surrendered.
     SoultokenRevoked {

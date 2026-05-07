@@ -33,7 +33,7 @@ Every section's last commit is in `ROADMAP.md` Phase 2.
 - [x] `POST /api/staff/visits/:id/evidence` — multipart upload.
 - [x] `GET /api/staff/visits/:id/evidence/url` — presigned URL.
 - [x] Private bucket configuration documented; ACL `private` + AES-256 SSE on every PUT.
-- [ ] Evidence-hash enforcement at `complete_visit` — client-supplied hash is still stored verbatim. TODO in `domain/src/domain/staff/service.rs`.
+- [x] Evidence-hash format + presence enforcement at `complete_visit` and `initiate_attestation` (cleanup #5) — server rejects URI-without-hash and any hash that isn't 64-char lowercase hex. Full server-side recompute (download from S3) deferred — too expensive per request; tracked in deferred-items table.
 - [ ] Bucket lifecycle policies (operational task).
 
 ### §4 — Observability
@@ -74,8 +74,8 @@ Every section's last commit is in `ROADMAP.md` Phase 2.
 - [x] `GET /api/notifications/stream` SSE endpoint.
 - [x] User-scoped event filtering (`target_user_id` matches caller, or 0 broadcasts to all).
 - [x] 6 domain-event match arms publish notifications.
-- [ ] `business_id` in `OrderReady` (currently 0 — TODO).
-- [ ] `display_code` in `SoultokenIssued` (currently empty string — TODO).
+- [x] `business_id` in `OrderReady` populated from the `orders` row at handler time (cleanup #6).
+- [x] `display_code` in `SoultokenIssued` carried through the domain event (cleanup #6).
 
 ### §8 — Infrastructure
 
@@ -138,15 +138,13 @@ not by section:
 | Item                                                          | Section | Where the TODO lives                                            |
 |---------------------------------------------------------------|---------|-----------------------------------------------------------------|
 | RLS per-request transaction wiring                            | §2c     | `server/src/app.rs` middleware-stack comment                    |
-| Evidence hash enforcement (replace client-trusted hash)       | §3      | `domain/src/domain/staff/service.rs::complete_visit`            |
+| Full evidence-hash recompute (download object + SHA-256 vs client hash). Format/presence validation already lands in cleanup #5. | §3      | `domain/src/domain/staff/service.rs::complete_visit` + `attestations/service.rs::initiate_attestation` |
 | `record_consent` at background-check initiation               | §9      | `domain/src/domain/background_checks/service.rs`                |
-| `OrderReady.business_id` populated from order row             | §7      | `server/src/events.rs::OrderCollected` arm                      |
-| `SoultokenIssued.display_code` populated                      | §7      | `server/src/events.rs::SoultokenIssued` arm                     |
 | `constant_time_eq` shared utility crate                       | §11     | `integrations/src/stripe.rs` doc-comment                        |
 | `SOULTOKEN_HMAC_KEY` multi-version key rotation               | §1c     | `domain/src/domain/soultokens/service.rs::derive_display_code`  |
 | Stripe billing subscription webhook                           | §10     | `business_subscriptions` table left empty                       |
-| OpenAPI proc-macro annotations                                | n/a     | `utoipa` is wired but routes not annotated                      |
-| Per-endpoint rate-limit tuning                                | §6 / §10 | `server/src/http/middleware/rate_limit.rs`                      |
+| OpenAPI proc-macro annotations (15/89 routes documented; full migration deferred — see `server/src/openapi.rs` header) | n/a     | `server/src/openapi.rs` doc-comment                             |
+| Per-endpoint rate-limit tuning (config rows seeded in migration 009; per-user keying requires post-auth middleware refactor) | §6 / §10 | `server/src/http/middleware/rate_limit.rs`                      |
 
 None of the above block production launch — they're either operational
 work, follow-up refactors, or fail-safe defaults that require the next

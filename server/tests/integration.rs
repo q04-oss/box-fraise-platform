@@ -1031,8 +1031,9 @@ async fn full_staff_visit_journey(pool: PgPool) {
         CompleteVisitRequest {
             actual_box_count:    10,
             delivery_signature:  Some("sig-abc123".to_owned()),
-            evidence_hash:       Some("hash-abc123".to_owned()),
-            evidence_storage_uri: Some("s3://evidence/visit".to_owned()),
+            // Valid 64-char SHA-256 hex; cleanup #5 enforces format.
+            evidence_hash:       Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned()),
+            evidence_storage_uri: Some("evidence/visits/journey/test".to_owned()),
         },
         &bus,
     ).await.expect("complete_visit must succeed");
@@ -1207,7 +1208,9 @@ async fn full_attestation_journey(pool: PgPool) {
         &pool, staff,
         InitiateAttestationRequest {
             visit_id: visit.id, user_id: target_id, presence_threshold_id: threshold_id,
-            photo_hash: Some("sha256-photo".to_owned()), photo_storage_uri: None,
+            // Valid 64-char SHA-256 hex; cleanup #5 enforces format.
+            photo_hash: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned()),
+            photo_storage_uri: None,
         },
         &bus,
     ).await.expect("initiate_attestation must succeed");
@@ -2197,7 +2200,7 @@ async fn full_configuration_lifecycle(pool: PgPool) {
     cfg_svc::initialize_defaults(&pool).await.expect("initialize_defaults must succeed");
 
     let all = cfg_svc::get_all_configuration(&pool, admin).await.unwrap();
-    assert_eq!(all.len(), 14, "must have all 14 default keys");
+    assert_eq!(all.len(), 18, "must have all 18 default keys (14 BFIP §15 + 4 rate-limit cleanup #8)");
 
     let cooling = all.iter().find(|c| c.key == "cooling_period_days").unwrap();
     assert_eq!(cooling.value, "7", "default must be 7");

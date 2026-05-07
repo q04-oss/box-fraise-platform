@@ -6,16 +6,36 @@
 ///
 /// IP resolution: X-Forwarded-For first (Railway proxy), then socket peer address.
 ///
-/// Hardening §6 — intended per-endpoint rate limits (TODO: implement):
-///   - POST /api/attestations                    → max 10  per hour  per user
-///   - POST /api/background-checks/initiate      → max  5  per day   per user
-///   - POST /api/identity/initiate               → max  3  per day   per user
-///   - POST /api/dorotka/ask                     → max 20  per hour  per user
-///   - POST /api/auth/magic-link/request         → max  5  per hour  per email
-///   - All other routes                          → existing 120/min/IP global
-/// TODO(hardening): implement per-route rate limits — likely a Redis-backed
-/// keyed counter middleware that runs after JWT validation so the user_id /
-/// email is available as the bucket key.
+/// Hardening §6 / cleanup #8 — intended per-endpoint, per-user rate limits.
+///
+/// **Status**: limit *values* are seeded into `platform_configuration` by
+/// migration `009_rate_limits.sql` so they're operator-tunable without a
+/// redeploy. The middleware that consumes them is **not yet wired** —
+/// see the architectural note below.
+///
+/// | Route                                   | Limit            | platform_configuration key                |
+/// |-----------------------------------------|------------------|-------------------------------------------|
+/// | POST /api/attestations                  | 10 / hour / user | `rate_limit_attestations_per_hour`        |
+/// | POST /api/background-checks/initiate    | 5 / day / user   | `rate_limit_background_checks_per_day`    |
+/// | POST /api/identity/initiate             | 3 / day / user   | `rate_limit_identity_initiations_per_day` |
+/// | POST /api/dorotka/ask                   | 20 / hour / user | `rate_limit_dorotka_per_hour`             |
+/// | POST /api/auth/magic-link/request       | 5 / hour / email | (not yet seeded — pre-auth bucket)        |
+/// | All other routes                        | 120 / min / IP   | hard-coded `MAX_REQUESTS` below            |
+///
+/// **Architectural note (deferred)**: this middleware runs *before* JWT
+/// validation in the stack at `server/src/app.rs`, so it cannot key on
+/// `user_id` today — only on `IpAddr`. Implementing per-user limits
+/// requires either (a) a second middleware that runs *after* the auth
+/// extractor and reads the per-route limit from `platform_configuration`,
+/// or (b) per-route extractors that do the rate check inline. Both are
+/// non-trivial — they need the same Redis-backed `INCR + EXPIRE` shape
+/// already used for the global IP bucket below, but keyed by `(user_id,
+/// route)` and TTL'd to the config-driven window.
+///
+/// TODO(hardening): wire post-auth per-user middleware that reads the
+/// `rate_limit_*` config rows and applies them. Until then, the global
+/// IP bucket and the existing `dorotka_rate` (per-IP, in `AppState`) are
+/// the only enforcement.
 use std::{
     collections::{HashMap, VecDeque},
     net::{IpAddr, Ipv4Addr, SocketAddr},

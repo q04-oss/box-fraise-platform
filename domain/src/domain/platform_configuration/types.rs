@@ -70,6 +70,14 @@ pub const DEFAULTS: &[(&str, &str, &str, &str)] = &[
     ("business_notification_hours",      "4",     "integer", "Hours before window for business notification"),
     ("background_check_expiry_months",   "12",    "integer", "Months before background check expires"),
     ("cleared_requires_all_checks",      "true",  "boolean", "All five check types required for cleared"),
+    // ── Per-endpoint rate limits (Hardening cleanup #8) ──────────────────────
+    // Mirror migration 009_rate_limits.sql; values are operator-tunable.
+    // The middleware that consumes them is not yet wired — see
+    // server/src/http/middleware/rate_limit.rs for the deferral.
+    ("rate_limit_attestations_per_hour",        "10", "integer", "Max attestation initiations per user per hour"),
+    ("rate_limit_background_checks_per_day",    "5",  "integer", "Max background-check initiations per user per day"),
+    ("rate_limit_identity_initiations_per_day", "3",  "integer", "Max identity verifications per user per day"),
+    ("rate_limit_dorotka_per_hour",             "20", "integer", "Max Dorotka queries per user per hour"),
 ];
 
 // ── Feature flags (Hardening §10) ────────────────────────────────────────────

@@ -52,6 +52,14 @@ fn to_visit_response(row: StaffVisitRow) -> StaffVisitResponse {
     }
 }
 
+/// SHA-256 hex format check: 64 chars, all lowercase hex.
+/// Used to validate client-supplied evidence/photo hashes — pairs with
+/// the canonical server-side `StorageClient::compute_evidence_hash` which
+/// produces strings of exactly this shape.
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 // ── Commands ──────────────────────────────────────────────────────────────────
 
 /// Grant a staff role to a user (BFIP Section 6.1).
@@ -291,17 +299,32 @@ pub async fn complete_visit(
         }
     }
 
-    // 3. Update to completed.
+    // 3. Validate evidence hash + URI invariants (Hardening cleanup #5).
     //
-    // TODO(hardening): `evidence_hash` is currently trusted from the client.
-    // The canonical server-computed hash now comes from
-    // `POST /api/staff/visits/:id/evidence` (Hardening §3, see
-    // `box_fraise_integrations::storage::StorageClient::compute_evidence_hash`).
-    // A future pass should refuse to accept `evidence_hash` from the client
-    // and require completion to reference an already-uploaded object via
-    // `evidence_storage_uri` only — the server then looks up the hash it
-    // computed at upload time. Both fields are accepted today for backwards
-    // compatibility with the iOS client.
+    // Full hash verification (download from S3 + recompute) is deferred —
+    // the upload endpoint at `POST /api/staff/visits/:id/evidence` already
+    // computes the hash server-side via
+    // `StorageClient::compute_evidence_hash`, so we validate format and
+    // presence only here.
+    //
+    // TODO(hardening): consider storing the server-computed hash at upload
+    // time (e.g. in a `visit_evidence` table keyed by storage URI) and
+    // looking it up by `evidence_storage_uri` instead of trusting the
+    // client-provided value at all.
+    if req.evidence_storage_uri.is_some() && req.evidence_hash.is_none() {
+        return Err(DomainError::invalid_input(
+            "evidence_hash is required when evidence_storage_uri is provided",
+        ));
+    }
+    if let Some(hash) = req.evidence_hash.as_deref() {
+        if !is_sha256_hex(hash) {
+            return Err(DomainError::invalid_input(
+                "evidence_hash must be a 64-character lowercase hex string (SHA-256)",
+            ));
+        }
+    }
+
+    // 4. Update to completed.
     let updated = repository::update_visit_completed(
         pool,
         visit_id,
@@ -311,7 +334,7 @@ pub async fn complete_visit(
         req.evidence_storage_uri.as_deref(),
     ).await?;
 
-    // 4. Audit event.
+    // 5. Audit event.
     audit::write(
         pool,
         Some(uid),
@@ -320,7 +343,7 @@ pub async fn complete_visit(
         serde_json::json!({ "visit_id": visit_id, "actual_box_count": req.actual_box_count }),
     ).await;
 
-    // 5. Publish domain event.
+    // 6. Publish domain event.
     event_bus.publish(DomainEvent::VisitCompleted { visit_id });
 
     Ok(to_visit_response(updated))
@@ -779,6 +802,72 @@ mod tests {
 
         assert_eq!(resp.status, "completed");
         assert_eq!(resp.actual_box_count, Some(5));
+    }
+
+    /// Hardening cleanup #5: a client supplying `evidence_storage_uri`
+    /// without an accompanying `evidence_hash` must be rejected — without
+    /// the hash there's no integrity anchor for the uploaded object.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn complete_visit_rejects_uri_without_hash(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let admin  = create_platform_admin(&pool, &SafeEmail().fake::<String>()).await;
+        let staff  = create_user(&pool, &SafeEmail().fake::<String>()).await;
+        let loc_id = create_location(&pool).await;
+        let bus    = EventBus::new();
+
+        grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
+        let visit = schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
+        arrive_at_visit(&pool, visit.id, staff, ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None }).await.unwrap();
+
+        let err = complete_visit(
+            &pool, visit.id, staff,
+            CompleteVisitRequest {
+                actual_box_count:     1,
+                delivery_signature:   None,
+                evidence_hash:        None,
+                evidence_storage_uri: Some("evidence/visits/1/abc".to_owned()),
+            },
+            &bus,
+        ).await.unwrap_err();
+        match err {
+            DomainError::InvalidInput(msg) =>
+                assert!(msg.contains("evidence_hash"), "msg should mention evidence_hash, got: {msg}"),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// Hardening cleanup #5: an `evidence_hash` that isn't a 64-char
+    /// lowercase hex string is structurally invalid SHA-256 — reject it
+    /// at the service layer rather than persisting garbage.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn complete_visit_rejects_invalid_hash_format(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let admin  = create_platform_admin(&pool, &SafeEmail().fake::<String>()).await;
+        let staff  = create_user(&pool, &SafeEmail().fake::<String>()).await;
+        let loc_id = create_location(&pool).await;
+        let bus    = EventBus::new();
+
+        grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
+        let visit = schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
+        arrive_at_visit(&pool, visit.id, staff, ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None }).await.unwrap();
+
+        // Three flavours of badness — wrong length, uppercase, and non-hex.
+        for bad in ["not_hex", "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"] {
+            let err = complete_visit(
+                &pool, visit.id, staff,
+                CompleteVisitRequest {
+                    actual_box_count:     1,
+                    delivery_signature:   None,
+                    evidence_hash:        Some(bad.to_owned()),
+                    evidence_storage_uri: None,
+                },
+                &bus,
+            ).await.unwrap_err();
+            assert!(
+                matches!(err, DomainError::InvalidInput(ref m) if m.contains("64-character")),
+                "input {bad:?} must be rejected as malformed SHA-256, got {err:?}"
+            );
+        }
     }
 
     // ── Tests 9–12: submit_quality_assessment ─────────────────────────────────

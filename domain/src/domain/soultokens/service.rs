@@ -275,6 +275,7 @@ pub async fn issue_soultoken(
         soultoken_id: token.id,
         user_id:      uid,
         token_type:   req.token_type,
+        display_code: token.display_code.clone(),
     });
 
     Ok(to_response(token))
@@ -786,6 +787,40 @@ mod tests {
         )
         .bind(i32::from(user_id)).fetch_one(&pool).await.unwrap();
         assert_eq!(ve_count, 1, "verification_event 'soultoken_issued' must be written");
+    }
+
+    /// Hardening cleanup #6: the `SoultokenIssued` domain event must
+    /// carry the human-readable `display_code` so the SSE consumer
+    /// can surface it to the client without an additional DB lookup.
+    /// Subscribes to the event bus before issuing so we observe the
+    /// event payload directly.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn issue_soultoken_event_includes_display_code(pool: PgPool) {
+        use crate::events::DomainEvent;
+        let (user_id, attest_id) = setup_attested_user(&pool).await;
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+
+        let resp = issue_soultoken(
+            &pool, user_id,
+            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+            TEST_HMAC_KEY, test_key_pair(), &bus,
+        ).await.expect("issue_soultoken must succeed");
+
+        // Receive must succeed — the bus is in-process and capacity 256.
+        let event = rx.try_recv().expect("SoultokenIssued event must be published");
+        match event {
+            DomainEvent::SoultokenIssued { soultoken_id, user_id: ev_user, display_code, token_type } => {
+                assert_eq!(soultoken_id, resp.id);
+                assert_eq!(ev_user, i32::from(user_id));
+                assert_eq!(token_type, "user");
+                assert_eq!(
+                    display_code, resp.display_code,
+                    "event display_code must equal the issued soultoken's display_code"
+                );
+            }
+            other => panic!("expected SoultokenIssued, got {other:?}"),
+        }
     }
 
     #[sqlx::test(migrations = "../server/migrations")]

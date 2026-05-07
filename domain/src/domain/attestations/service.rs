@@ -87,6 +87,14 @@ fn verify_signature(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/// SHA-256 hex format check: 64 chars, all lowercase hex.
+/// Pairs with the canonical server-side
+/// `StorageClient::compute_evidence_hash` which produces strings of
+/// exactly this shape.
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// BFIP Section 6.5 — Reviewer assignment algorithm v1.
 ///
 /// Selects two eligible reviewers, excluding those who worked at the delivery
@@ -247,19 +255,35 @@ pub async fn initiate_attestation(
         ));
     }
 
-    // 6. Assign two eligible reviewers (BFIP Section 6.5).
+    // 6. Validate photo hash + URI invariants (Hardening cleanup #5).
+    //
+    // Full hash verification (download from S3 + recompute) is deferred —
+    // the upload endpoint at `POST /api/staff/visits/:id/evidence` already
+    // computes the hash server-side via
+    // `StorageClient::compute_evidence_hash`, so we validate format and
+    // presence only here.
+    //
+    // TODO(hardening): consider storing the server-computed hash at upload
+    // time and looking it up by `photo_storage_uri` instead of trusting
+    // the client-provided value at all.
+    if req.photo_storage_uri.is_some() && req.photo_hash.is_none() {
+        return Err(DomainError::InvalidInput(
+            "photo_hash is required when photo_storage_uri is provided".to_string(),
+        ));
+    }
+    if let Some(hash) = req.photo_hash.as_deref() {
+        if !is_sha256_hex(hash) {
+            return Err(DomainError::InvalidInput(
+                "photo_hash must be a 64-character lowercase hex string (SHA-256)".to_string(),
+            ));
+        }
+    }
+
+    // 7. Assign two eligible reviewers (BFIP Section 6.5).
     let (r1_id, r2_id, cosign_count) =
         assign_reviewers_for_visit(pool, uid, location_id).await?;
 
-    // 7. Create attestation record.
-    //
-    // TODO(hardening): `photo_hash` is currently trusted from the client.
-    // The canonical server-computed hash now comes from
-    // `POST /api/staff/visits/:id/evidence` (Hardening §3). A future pass
-    // should require the photo to be uploaded via that endpoint first,
-    // accept only `photo_storage_uri` here, and look up the server-computed
-    // hash from the storage record. Both fields are accepted today for
-    // backwards compatibility with the iOS client.
+    // 8. Create attestation record.
     let attestation = repository::create_attestation(
         pool,
         req.visit_id,
@@ -272,7 +296,7 @@ pub async fn initiate_attestation(
         req.photo_storage_uri.as_deref(),
     ).await?;
 
-    // 8. Log reviewer assignments to reviewer_assignment_log.
+    // 9. Log reviewer assignments to reviewer_assignment_log.
     let details = serde_json::json!({
         "same_location_30d": false,
         "cosign_7d":          cosign_count,
@@ -284,7 +308,7 @@ pub async fn initiate_attestation(
         pool, req.visit_id, r2_id, cosign_count as i32, true, details,
     ).await;
 
-    // 9. Audit + event.
+    // 10. Audit + event.
     audit::write(
         pool,
         Some(uid),
@@ -815,8 +839,12 @@ mod tests {
             visit_id:              ctx.visit_id,
             user_id:               i32::from(ctx.target),
             presence_threshold_id: ctx.threshold_id,
-            photo_hash:            Some("sha256-photo".to_owned()),
-            photo_storage_uri:     Some("s3://photos/test".to_owned()),
+            // Valid SHA-256 hex (64 lowercase hex chars) — required by the
+            // validator added in cleanup #5. Same fixture for every test
+            // — the value isn't checked against the actual photo bytes
+            // (server-side recompute is deferred — see initiate_attestation).
+            photo_hash:            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned()),
+            photo_storage_uri:     Some("evidence/visits/test/photo".to_owned()),
         }
     }
 
@@ -885,6 +913,33 @@ mod tests {
         assert_eq!(attest.visit_id, ctx.visit_id);
         assert_eq!(attest.user_id, i32::from(ctx.target));
         assert_ne!(attest.assigned_reviewer_1_id, attest.assigned_reviewer_2_id);
+    }
+
+    /// Hardening cleanup #5: a client supplying `photo_storage_uri`
+    /// without an accompanying `photo_hash` must be rejected — without
+    /// the hash there's no integrity anchor for the uploaded photo.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn initiate_attestation_rejects_photo_uri_without_hash(pool: PgPool) {
+        let ctx = setup(&pool).await;
+        let bus = EventBus::new();
+
+        let err = initiate_attestation(
+            &pool,
+            ctx.staff,
+            InitiateAttestationRequest {
+                visit_id:              ctx.visit_id,
+                user_id:               i32::from(ctx.target),
+                presence_threshold_id: ctx.threshold_id,
+                photo_hash:            None,
+                photo_storage_uri:     Some("evidence/visits/1/photo".to_owned()),
+            },
+            &bus,
+        ).await.unwrap_err();
+        match err {
+            DomainError::InvalidInput(msg) =>
+                assert!(msg.contains("photo_hash"), "msg should mention photo_hash, got: {msg}"),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
     }
 
     #[sqlx::test(migrations = "../server/migrations")]

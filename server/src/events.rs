@@ -167,9 +167,23 @@ pub async fn handle(
         DomainEvent::OrderCollected { order_id, user_id, box_id } => {
             counter!("bfip_orders_collected_total").increment(1);
             // Hardening §7 — surface to the user's SSE stream. business_id
-            // requires a join (orders.business_id) — TODO: fetch and emit.
+            // is fetched from the orders row; on lookup failure (deleted
+            // row, transient DB error) we fall back to 0 and warn — the
+            // notification is best-effort and must not block the collect
+            // flow.
+            let business_id: i32 = sqlx::query_scalar(
+                "SELECT business_id FROM orders WHERE id = $1"
+            )
+            .bind(order_id)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(order_id, error = %e, "order_ready: business_id lookup failed");
+                None
+            })
+            .unwrap_or(0);
             let _ = event_tx.send(NotificationEvent::OrderReady {
-                order_id, user_id, business_id: 0,
+                order_id, user_id, business_id,
             });
             tracing::info!(order_id, user_id, box_id, "order.collected");
             audit::write(
@@ -185,13 +199,11 @@ pub async fn handle(
             .await;
         }
 
-        DomainEvent::SoultokenIssued { soultoken_id, user_id, ref token_type } => {
+        DomainEvent::SoultokenIssued { soultoken_id, user_id, ref token_type, ref display_code } => {
             counter!("bfip_soultokens_issued_total").increment(1);
-            // Hardening §7 — display_code requires a soultokens lookup;
-            // emitting empty for now and TODO'd until we extend the
-            // domain event with the display code at issuance time.
             let _ = event_tx.send(NotificationEvent::SoultokenIssued {
-                user_id, display_code: String::new(),
+                user_id,
+                display_code: display_code.clone(),
             });
             tracing::info!(soultoken_id, user_id, token_type, "soultoken.issued");
             audit::write(

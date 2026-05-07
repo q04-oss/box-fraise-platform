@@ -311,7 +311,7 @@ mod tests {
         let admin = create_admin(&pool, &SafeEmail().fake::<String>()).await;
 
         let configs = get_all_configuration(&pool, admin).await.unwrap();
-        assert_eq!(configs.len(), 14, "must have all 14 default keys");
+        assert_eq!(configs.len(), 18, "must have all 18 default keys (14 BFIP §15 + 4 rate-limit cleanup #8)");
 
         // Spot-check values.
         let cooling = configs.iter().find(|c| c.key == "cooling_period_days").unwrap();
@@ -418,7 +418,7 @@ mod tests {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM platform_configuration"
         ).fetch_one(&pool).await.unwrap();
-        assert_eq!(count, 14, "idempotent seed must not create duplicate rows");
+        assert_eq!(count, 18, "idempotent seed must not create duplicate rows (14 BFIP §15 + 4 rate-limit)");
     }
 
     #[sqlx::test(migrations = "../server/migrations")]

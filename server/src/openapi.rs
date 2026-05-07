@@ -3,6 +3,32 @@
 /// Served at:
 ///   `GET /api/docs/openapi.json` — machine-readable OpenAPI 3.0 JSON spec
 ///   `GET /api/docs`              — Swagger UI (loads spec from the JSON endpoint)
+///
+/// ## Coverage gap (Hardening cleanup #7 — deferred)
+///
+/// Audit at the time of cleanup #7: this hand-built `PathsBuilder` documents
+/// **15 of ~89 registered routes** (≈17%). The intended end state is a
+/// `#[utoipa::path(...)]` annotation on every handler plus a single
+/// `#[derive(OpenApi)]` aggregator that replaces this builder entirely.
+///
+/// Migrating the remaining 74 routes touches every handler signature
+/// (each gets a `#[utoipa::path]` macro), every request/response type
+/// (each must derive `ToSchema`), and replaces the `PathsBuilder` /
+/// `openapi_json()` glue here with a derived spec exposed via
+/// `ApiDoc::openapi()`. That is a genuinely large refactor and creates
+/// a bad mid-state where part of the spec is derived and part is
+/// hand-built — utoipa's two surfaces don't interleave cleanly.
+///
+/// TODO(hardening): execute the migration as a dedicated pass. Suggested
+/// order, smallest blast radius first:
+///   1. `domain::auth::routes` (7 routes — already documented here)
+///   2. `domain::users::routes`
+///   3. `domain::soultokens::routes`
+///   4. `domain::staff::routes`
+///   5. remaining ten domains in any order
+///   6. delete this `PathsBuilder` once parity is reached.
+/// Until then this file remains the canonical spec and is what Swagger UI
+/// loads — stale, but accurate for the routes it does cover.
 use axum::{
     extract::State,
     http::{header, StatusCode},
