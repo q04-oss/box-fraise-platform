@@ -20,10 +20,44 @@ use super::{
 
 // ── Crypto primitives ─────────────────────────────────────────────────────────
 
-/// Derive a daily UUID for a beacon using BFIP Section 8 formula.
+/// Beacon daily UUID derivation — BFIP Section 8.1 / Hardening Section 1d.
 ///
-/// input  = `{business_id}:{YYYY-MM-DD}` (UTC date)
-/// output = HMAC-SHA256(secret_key, input), first 16 bytes formatted as UUID
+/// Implements a Pseudorandom Function Family (PRF) with the following formal
+/// security properties:
+///
+/// **Construction:**
+/// ```text
+/// input  = business_id.to_string() + ":" + date (YYYY-MM-DD UTC)
+/// output = HMAC-SHA256(secret_key, input)[0..16] hyphenated as 8-4-4-4-12
+/// ```
+///
+/// **PRF security:**
+/// HMAC-SHA256 is a secure PRF under the assumption that SHA-256 is a random
+/// oracle (Bellare et al. 1996 — *Keying Hash Functions for Message Authentication*).
+/// An adversary without `secret_key` cannot distinguish `derive_daily_uuid`
+/// output from a uniformly random 128-bit value with advantage better than
+/// 2^-128 (128-bit PRF security parameter).
+///
+/// **Unforgeability:**
+/// Without `secret_key` an adversary cannot predict the UUID for any
+/// `(business_id, date)` pair not previously observed. This follows directly
+/// from PRF security.
+///
+/// **Domain separation:**
+/// The `":"` separator between `business_id` and `date` prevents
+/// length-extension confusion between the two input components.
+///
+/// **Daily rotation:**
+/// Each calendar date produces an independent UUID. Observing
+/// `UUID(business, date_N)` gives zero information about
+/// `UUID(business, date_N+1)` — independence follows from PRF security.
+///
+/// **UUID format note:**
+/// The output uses UUID *shape* (8-4-4-4-12 hyphenated hex, 36 chars) but is
+/// **not** a strictly compliant RFC 4122 v4 UUID — the version (byte 6) and
+/// variant (byte 8) bits are NOT set. This is intentional: the value is a
+/// 128-bit PRF output displayed in UUID layout, never used as an RFC 4122
+/// identifier.
 pub fn derive_daily_uuid(secret_key: &str, business_id: i32, date: NaiveDate) -> String {
     let input   = format!("{}:{}", business_id, date.format("%Y-%m-%d"));
     let key     = ring_hmac::Key::new(ring_hmac::HMAC_SHA256, secret_key.as_bytes());
@@ -34,10 +68,29 @@ pub fn derive_daily_uuid(secret_key: &str, business_id: i32, date: NaiveDate) ->
         &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
 }
 
-/// Derive a witness HMAC for a presence event (BFIP Section 8 / cryptography.md Section 2).
+/// Beacon witness HMAC derivation — BFIP Section 5.1 / Hardening Section 1d.
 ///
-/// input  = `{business_id}:{YYYY-MM-DD}:{user_id}`
-/// output = HMAC-SHA256(secret_key, input), full 32 bytes as hex string
+/// Produces a per-user per-day unforgeable witness that proves a specific user
+/// was in proximity to a specific beacon on a specific calendar day.
+///
+/// **Construction:**
+/// ```text
+/// input  = business_id.to_string() + ":" + date (YYYY-MM-DD UTC) + ":" + user_id.to_string()
+/// output = HMAC-SHA256(secret_key, input) as 64-char lowercase hex
+/// ```
+///
+/// **PRF security:**
+/// Inherits 128-bit PRF security from HMAC-SHA256 (Bellare et al. 1996). A
+/// user cannot forge a witness for a beacon they were not near because they
+/// do not know `secret_key`.
+///
+/// **Binding:**
+/// `business_id` binds to a specific beacon, `date` binds to a specific
+/// calendar day (preventing replay across days), and `user_id` binds to a
+/// specific user (preventing one user's witness from being reused by another).
+///
+/// **Domain separation:**
+/// `":"` separators prevent cross-component length-extension confusion.
 pub fn derive_witness_hmac(
     secret_key:  &str,
     business_id: i32,

@@ -22,12 +22,35 @@ use super::{
 
 // ── Crypto primitives ─────────────────────────────────────────────────────────
 
-/// BFIP cryptography.md Section 3 — Display code derivation.
+/// Display code derivation — BFIP cryptography.md Section 3 / Hardening Section 1d.
 ///
-/// input       = uuid.as_bytes() (16 raw bytes)
-/// hmac_output = HMAC-SHA256(hmac_key, input)
-/// base36      = base36_encode(hmac_output[0..9])
-/// display_code = formatted as XXXX-XXXX-XXXX
+/// **Construction:**
+/// ```text
+/// input        = uuid.as_bytes() (16 raw bytes)
+/// hmac_output  = HMAC-SHA256(hmac_key, input)
+/// base36       = base36_encode(hmac_output[0..9])
+/// display_code = XXXX-XXXX-XXXX (hyphens at positions 4 and 8)
+/// ```
+///
+/// **Key rotation:**
+/// The `display_code_key_version` column on each `soultokens` row records which
+/// `SOULTOKEN_HMAC_KEY` version produced its display code. When the HMAC key
+/// is rotated:
+/// 1. Increment the key version counter.
+/// 2. New soultokens are derived with the new key and record the new version.
+/// 3. Existing soultokens retain their display codes — they remain valid
+///    indefinitely without re-derivation.
+/// 4. Verification must look up the key version stored on the soultoken row,
+///    not always use the current key.
+///
+/// **Current implementation:**
+/// The version field is recorded at issuance but multi-version key lookup is
+/// not yet wired up — every soultoken is derived with the single configured
+/// `SOULTOKEN_HMAC_KEY` (currently version 1). Full rotation support is
+/// deferred until rotation is operationally required.
+///
+// TODO(hardening): implement a multi-version key store so display codes
+// derived from rotated keys remain verifiable after a rotation event.
 pub fn derive_display_code(uuid: &Uuid, hmac_key: &[u8], _key_version: i32) -> String {
     use ring::hmac as ring_hmac;
     let key = ring_hmac::Key::new(ring_hmac::HMAC_SHA256, hmac_key);
