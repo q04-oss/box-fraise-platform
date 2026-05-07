@@ -82,7 +82,12 @@ pub struct InitiateAttestationRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct StaffSignAttestationRequest {
+    /// Ed25519 signature (128 hex chars) over the canonical attestation payload
+    /// — see `service::attestation_payload`.
     pub staff_signature:        String,
+    /// Ed25519 verifying key (64 hex chars) the server uses to verify
+    /// `staff_signature` before storing.
+    pub verifying_key_hex:      String,
     pub photo_hash:             Option<String>,
     pub location_confirmed:     bool,
     pub user_present_confirmed: bool,
@@ -90,7 +95,13 @@ pub struct StaffSignAttestationRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct ReviewerSignAttestationRequest {
+    /// Ed25519 signature (128 hex chars) over the canonical attestation payload
+    /// — see `service::attestation_payload`.
     pub signature:              String,
+    /// Ed25519 verifying key (64 hex chars) the server uses to verify
+    /// `signature` before storing. Stored alongside the signature so a third
+    /// party can re-run the aggregated verification offline.
+    pub verifying_key_hex:      String,
     pub evidence_hash_reviewed: String,
 }
 

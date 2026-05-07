@@ -1135,11 +1135,15 @@ async fn full_attestation_journey(pool: PgPool) {
     assert_eq!(attest.status, "pending");
     assert_ne!(attest.assigned_reviewer_1_id, attest.assigned_reviewer_2_id);
 
-    // ── Step 6: staff sign ────────────────────────────────────────────────────
+    // ── Step 6: staff sign (Hardening 1c — Ed25519) ──────────────────────────
+    use box_fraise_domain::domain::attestations::service::attestation_payload;
+    let payload = attestation_payload(&attest);
+    let staff_kp = common::test_ed25519_key_pair();
     let after_staff_sign = attest_svc::staff_sign(
         &pool, attest.id, staff,
         StaffSignAttestationRequest {
-            staff_signature:        "staff-sig-journey".to_owned(),
+            staff_signature:        staff_kp.sign(payload.as_bytes()),
+            verifying_key_hex:      staff_kp.verifying_key_hex(),
             photo_hash:             None,
             location_confirmed:     true,
             user_present_confirmed: true,
@@ -1150,12 +1154,19 @@ async fn full_attestation_journey(pool: PgPool) {
     assert_eq!(after_staff_sign.status, "co_sign_pending");
     assert!(after_staff_sign.co_sign_deadline.is_some());
 
+    // Each reviewer signs the same canonical payload — distinct key pairs so
+    // aggregated verify covers two independent keys.
+    use box_fraise_domain::crypto::Ed25519KeyPair;
+    let r1_kp = Ed25519KeyPair::generate();
+    let r2_kp = Ed25519KeyPair::generate();
+
     // ── Step 7: reviewer 1 sign ───────────────────────────────────────────────
     let r1 = UserId::from(attest.assigned_reviewer_1_id);
     let after_r1 = attest_svc::reviewer_sign(
         &pool, attest.id, r1,
         ReviewerSignAttestationRequest {
-            signature:              "r1-sig".to_owned(),
+            signature:              r1_kp.sign(payload.as_bytes()),
+            verifying_key_hex:      r1_kp.verifying_key_hex(),
             evidence_hash_reviewed: "r1-evidence".to_owned(),
         },
         &bus,
@@ -1168,7 +1179,8 @@ async fn full_attestation_journey(pool: PgPool) {
     let approved = attest_svc::reviewer_sign(
         &pool, attest.id, r2,
         ReviewerSignAttestationRequest {
-            signature:              "r2-sig".to_owned(),
+            signature:              r2_kp.sign(payload.as_bytes()),
+            verifying_key_hex:      r2_kp.verifying_key_hex(),
             evidence_hash_reviewed: "r2-evidence".to_owned(),
         },
         &bus,

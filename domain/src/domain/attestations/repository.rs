@@ -247,15 +247,18 @@ pub async fn record_reviewer_signature(
     Ok(())
 }
 
-/// Returns true when both assigned reviewers have signed the visit.
+/// Returns the two stored signature records when both assigned reviewers have
+/// signed; `None` otherwise. Each record is the raw `visit_signatures.signature`
+/// value (`verifying_key_hex:signature_hex` after Hardening Section 1c) — the
+/// service layer parses and re-verifies them via aggregated Ed25519.
 pub async fn check_both_reviewers_signed(
     pool:          &PgPool,
     visit_id:      i32,
     reviewer_1_id: i32,
     reviewer_2_id: i32,
-) -> AppResult<bool> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM visit_signatures \
+) -> AppResult<Option<(String, String)>> {
+    let rows: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT reviewer_id, signature FROM visit_signatures \
          WHERE visit_id = $1 \
            AND reviewer_id IN ($2, $3) \
            AND signed_at IS NOT NULL"
@@ -263,8 +266,24 @@ pub async fn check_both_reviewers_signed(
     .bind(visit_id)
     .bind(reviewer_1_id)
     .bind(reviewer_2_id)
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await
     .map_err(DomainError::Db)?;
-    Ok(count >= 2)
+
+    if rows.len() < 2 {
+        return Ok(None);
+    }
+    let mut sig_1 = None;
+    let mut sig_2 = None;
+    for (rid, sig) in rows {
+        if rid == reviewer_1_id {
+            sig_1 = Some(sig);
+        } else if rid == reviewer_2_id {
+            sig_2 = Some(sig);
+        }
+    }
+    match (sig_1, sig_2) {
+        (Some(a), Some(b)) => Ok(Some((a, b))),
+        _                  => Ok(None),
+    }
 }

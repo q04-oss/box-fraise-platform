@@ -1201,13 +1201,21 @@ async fn post_attestations_staff_sign_returns_200(pool: PgPool) {
     let state = common::build_state(pool, None);
     let app   = box_fraise_server::app::build(state);
 
+    // Build the canonical Ed25519 payload and sign it with the test key pair
+    // — server verifies before storing (Hardening Section 1c).
+    use box_fraise_domain::domain::attestations::service::attestation_payload;
+    let payload = attestation_payload(&attest);
+    let kp = common::test_ed25519_key_pair();
+    let signature = kp.sign(payload.as_bytes());
+
     let resp = app
         .oneshot(authed_json_req(
             "POST",
             &format!("/api/attestations/{}/staff-sign", attest.id),
             &staff_token,
             serde_json::json!({
-                "staff_signature":        "staff-sig-handler-test",
+                "staff_signature":        signature,
+                "verifying_key_hex":      kp.verifying_key_hex(),
                 "photo_hash":             null,
                 "location_confirmed":     true,
                 "user_present_confirmed": true,

@@ -3,6 +3,7 @@ use sqlx::PgPool;
 
 use crate::{
     audit,
+    crypto::{verify_aggregated_ed25519, verify_ed25519},
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
@@ -17,6 +18,72 @@ use super::{
         VisitAttestationRow,
     },
 };
+
+// ── BFIP Hardening 1c — Ed25519 attestation signing ──────────────────────────
+
+/// Canonical attestation evidence payload. Both reviewers and the delivery
+/// staff sign these exact bytes, so anyone holding the row can rebuild it and
+/// verify the stored Ed25519 signatures offline.
+///
+/// Format: `attestation_id|visit_id|user_id|photo_hash|BFIP_ATTESTATION_V1`
+/// (`photo_hash` is the empty string when absent).
+pub fn attestation_payload(attestation: &VisitAttestationRow) -> String {
+    format!(
+        "{}|{}|{}|{}|BFIP_ATTESTATION_V1",
+        attestation.id,
+        attestation.visit_id,
+        attestation.user_id,
+        attestation.photo_hash.as_deref().unwrap_or(""),
+    )
+}
+
+/// Format used in `visit_signatures.signature` and `visit_attestations.staff_signature`.
+/// The verifying key is stored alongside the signature so a third party can
+/// re-run the aggregated Ed25519 verification offline without needing a
+/// reviewer-key directory.
+fn encode_signature_record(verifying_key_hex: &str, signature_hex: &str) -> String {
+    format!("{verifying_key_hex}:{signature_hex}")
+}
+
+/// Inverse of [`encode_signature_record`]. Returns `(verifying_key_hex, signature_hex)`.
+/// Errors with `InvalidInput` when the stored value does not match the
+/// expected `<key>:<sig>` shape.
+fn parse_signature_record(stored: &str) -> Result<(String, String), DomainError> {
+    let (vk, sig) = stored.split_once(':').ok_or_else(|| {
+        DomainError::InvalidInput(
+            "stored signature record is malformed — expected verifying_key_hex:signature_hex".to_string(),
+        )
+    })?;
+    if vk.is_empty() || sig.is_empty() {
+        return Err(DomainError::InvalidInput(
+            "stored signature record has empty verifying key or signature".to_string(),
+        ));
+    }
+    Ok((vk.to_string(), sig.to_string()))
+}
+
+/// Verify an incoming Ed25519 signature against the canonical payload.
+/// Returns `Ok(())` only on a cryptographically valid signature.
+///
+// TODO(BFAP): Replace with per-reviewer hardware-bound Ed25519 keys. Today we
+// trust whatever verifying key the reviewer's client supplies; BFAP will pin
+// each reviewer to a Secure Enclave key registered at staff onboarding.
+fn verify_signature(
+    verifying_key_hex: &str,
+    payload:           &str,
+    signature_hex:     &str,
+    context:           &'static str,
+) -> AppResult<()> {
+    match verify_ed25519(verifying_key_hex, payload.as_bytes(), signature_hex) {
+        Ok(true)  => Ok(()),
+        Ok(false) => Err(DomainError::InvalidInput(format!(
+            "invalid {context} signature — Ed25519 verification failed"
+        ))),
+        Err(e)    => Err(DomainError::InvalidInput(format!(
+            "invalid {context} signature — Ed25519 verification failed ({e:?})"
+        ))),
+    }
+}
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -260,14 +327,34 @@ pub async fn staff_sign(
         return Err(DomainError::Forbidden);
     }
 
-    // 3. Set co_sign_deadline to now() + 48 hours.
+    // 3. Verify the staff Ed25519 signature against the canonical payload.
+    //    Use the row that *would* exist after staff_sign — photo_hash may be
+    //    overridden by the request body, but id/visit_id/user_id are stable.
+    let payload_attest = if req.photo_hash.is_some() {
+        VisitAttestationRow {
+            photo_hash: req.photo_hash.clone(),
+            ..attest.clone()
+        }
+    } else {
+        attest.clone()
+    };
+    let payload = attestation_payload(&payload_attest);
+    verify_signature(
+        &req.verifying_key_hex,
+        &payload,
+        &req.staff_signature,
+        "staff",
+    )?;
+    let staff_sig_record = encode_signature_record(&req.verifying_key_hex, &req.staff_signature);
+
+    // 4. Set co_sign_deadline to now() + 48 hours.
     let deadline = Utc::now() + chrono::Duration::hours(48);
 
-    // 4. Update attestation with signature and set status to co_sign_pending.
+    // 5. Update attestation with signature and set status to co_sign_pending.
     let updated = repository::update_attestation_staff_signed(
         pool,
         attestation_id,
-        &req.staff_signature,
+        &staff_sig_record,
         req.photo_hash.as_deref(),
         req.location_confirmed,
         req.user_present_confirmed,
@@ -322,7 +409,19 @@ pub async fn reviewer_sign(
         }
     }
 
-    // 4. Record signature — INSERT with all fields (signature col is NOT NULL).
+    // 4. Verify the reviewer's Ed25519 signature over the canonical payload
+    //    BEFORE persisting. Anything that fails verification never reaches the
+    //    DB, so a stored signature is always cryptographically valid.
+    let payload = attestation_payload(&attest);
+    verify_signature(
+        &req.verifying_key_hex,
+        &payload,
+        &req.signature,
+        "reviewer",
+    )?;
+    let sig_record = encode_signature_record(&req.verifying_key_hex, &req.signature);
+
+    // 5. Record signature — INSERT with all fields (signature col is NOT NULL).
     //    ON CONFLICT DO NOTHING guards against double-signing.
     let sign_deadline = attest
         .co_sign_deadline
@@ -332,11 +431,11 @@ pub async fn reviewer_sign(
         attest.visit_id,
         uid,
         sign_deadline,
-        &req.signature,
+        &sig_record,
         &req.evidence_hash_reviewed,
     ).await?;
 
-    // 5. Check if both reviewers have now signed.
+    // 6. Check if both reviewers have now signed.
     let both_signed = repository::check_both_reviewers_signed(
         pool,
         attest.visit_id,
@@ -344,8 +443,28 @@ pub async fn reviewer_sign(
         attest.assigned_reviewer_2_id,
     ).await?;
 
-    if both_signed {
-        // 6a. Approve attestation.
+    if let Some((sig_record_1, sig_record_2)) = both_signed {
+        // 6a. Re-verify both reviewer signatures aggregated against the
+        //     payload. This is belt-and-suspenders: each was already verified
+        //     individually before storage, but aggregated verify proves the
+        //     stored records can be replayed end-to-end by an auditor.
+        let (vk1, sig1) = parse_signature_record(&sig_record_1)?;
+        let (vk2, sig2) = parse_signature_record(&sig_record_2)?;
+        let aggregated_ok = verify_aggregated_ed25519(
+            &[vk1.as_str(), vk2.as_str()],
+            payload.as_bytes(),
+            &[sig1.as_str(), sig2.as_str()],
+        )
+        .map_err(|e| DomainError::InvalidInput(format!(
+            "aggregated Ed25519 verification failed ({e:?})"
+        )))?;
+        if !aggregated_ok {
+            return Err(DomainError::InvalidInput(
+                "aggregated Ed25519 verification failed".to_string(),
+            ));
+        }
+
+        // 6b. Approve attestation.
         let approved = repository::approve_attestation(pool, attestation_id).await?;
 
         // 6b. Promote user to 'attested'.
@@ -507,6 +626,7 @@ pub async fn list_my_attestations(
 mod tests {
     use super::*;
     use crate::{
+        crypto::Ed25519KeyPair,
         domain::staff::{
             service as staff_svc,
             types::{ArriveAtVisitRequest, GrantRoleRequest, ScheduleVisitRequest},
@@ -515,6 +635,12 @@ mod tests {
         types::UserId,
     };
     use sqlx::PgPool;
+
+    /// Sign `payload` with `kp` and return `(verifying_key_hex, signature_hex)`
+    /// — the two values that a real client would send in a sign request.
+    fn signed_pair(payload: &str, kp: &Ed25519KeyPair) -> (String, String) {
+        (kp.verifying_key_hex(), kp.sign(payload.as_bytes()))
+    }
 
     // ── Test context ──────────────────────────────────────────────────────────
 
@@ -688,12 +814,18 @@ mod tests {
 
     async fn run_staff_sign(pool: &PgPool, ctx: &Ctx, attestation_id: i32) -> VisitAttestationRow {
         let bus = EventBus::new();
+        let attest = repository::get_attestation_by_id(pool, attestation_id)
+            .await.unwrap().unwrap();
+        let payload = attestation_payload(&attest);
+        let kp = Ed25519KeyPair::generate();
+        let (vk, sig) = signed_pair(&payload, &kp);
         staff_sign(
             pool,
             attestation_id,
             ctx.staff,
             StaffSignAttestationRequest {
-                staff_signature:        "staff-sig-abc".to_owned(),
+                staff_signature:        sig,
+                verifying_key_hex:      vk,
                 photo_hash:             None,
                 location_confirmed:     true,
                 user_present_confirmed: true,
@@ -710,12 +842,18 @@ mod tests {
         reviewer:      UserId,
     ) -> VisitAttestationRow {
         let bus = EventBus::new();
+        let attest = repository::get_attestation_by_id(pool, attestation_id)
+            .await.unwrap().unwrap();
+        let payload = attestation_payload(&attest);
+        let kp = Ed25519KeyPair::generate();
+        let (vk, sig) = signed_pair(&payload, &kp);
         reviewer_sign(
             pool,
             attestation_id,
             reviewer,
             ReviewerSignAttestationRequest {
-                signature:              "reviewer-sig".to_owned(),
+                signature:              sig,
+                verifying_key_hex:      vk,
                 evidence_hash_reviewed: "evidence-hash".to_owned(),
             },
             &bus,
@@ -914,12 +1052,14 @@ mod tests {
             .await
             .unwrap();
 
+        // Forbidden short-circuits before signature verification.
         let err = staff_sign(
             &pool,
             attest.id,
             ctx.reviewer_1,
             StaffSignAttestationRequest {
                 staff_signature:        "impostor-sig".to_owned(),
+                verifying_key_hex:      "00".repeat(32),
                 photo_hash:             None,
                 location_confirmed:     true,
                 user_present_confirmed: true,
@@ -1099,13 +1239,16 @@ mod tests {
 
         let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
 
+        // Forbidden is checked before signature verification, so the bytes
+        // here never need to verify — but the struct still needs the field.
         let err = staff_sign(
             &pool,
             attest.id,
             ctx.admin,
             StaffSignAttestationRequest {
-                staff_signature: "forged".to_owned(),
-                photo_hash:      None,
+                staff_signature:   "forged".to_owned(),
+                verifying_key_hex: "00".repeat(32),
+                photo_hash:        None,
                 location_confirmed:     true,
                 user_present_confirmed: true,
             },
@@ -1125,13 +1268,14 @@ mod tests {
         let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
         run_staff_sign(&pool, &ctx, attest.id).await;
 
-        // staff user is not a reviewer.
+        // staff user is not a reviewer — Forbidden short-circuits before sig verify.
         let err = reviewer_sign(
             &pool,
             attest.id,
             ctx.staff,
             ReviewerSignAttestationRequest {
                 signature:              "bad".to_owned(),
+                verifying_key_hex:      "00".repeat(32),
                 evidence_hash_reviewed: "bad".to_owned(),
             },
             &bus,
@@ -1202,13 +1346,20 @@ mod tests {
         // First sign succeeds.
         run_reviewer_sign(&pool, attest.id, ctx.reviewer_1).await;
 
-        // Second sign by the same reviewer must fail.
+        // Second sign by the same reviewer must hit the DB ON CONFLICT path.
+        // Signature must verify so we get past Ed25519 check and reach the insert.
+        let attest_now = repository::get_attestation_by_id(&pool, attest.id)
+            .await.unwrap().unwrap();
+        let payload = attestation_payload(&attest_now);
+        let kp = Ed25519KeyPair::generate();
+        let (vk, sig) = signed_pair(&payload, &kp);
         let err = reviewer_sign(
             &pool,
             attest.id,
             ctx.reviewer_1,
             ReviewerSignAttestationRequest {
-                signature:              "double-sig".to_owned(),
+                signature:              sig,
+                verifying_key_hex:      vk,
                 evidence_hash_reviewed: "double-hash".to_owned(),
             },
             &bus,
@@ -1220,5 +1371,186 @@ mod tests {
             matches!(err, DomainError::Conflict(_)),
             "double-sign must be Conflict, got: {err:?}"
         );
+    }
+
+    // ── Hardening Section 1c — Ed25519 attestation signing tests ─────────────
+
+    /// Walk an attestation up to `co_sign_pending` and return the row + the
+    /// canonical payload. Used by the Ed25519 reviewer-sign tests.
+    async fn ready_for_reviewer_sign(pool: &PgPool, ctx: &Ctx)
+        -> (VisitAttestationRow, String)
+    {
+        let bus = EventBus::new();
+        let attest = initiate_attestation(pool, ctx.staff, initiate_req(ctx), &bus)
+            .await.unwrap();
+        run_staff_sign(pool, ctx, attest.id).await;
+        let attest_now = repository::get_attestation_by_id(pool, attest.id)
+            .await.unwrap().unwrap();
+        let payload = attestation_payload(&attest_now);
+        (attest_now, payload)
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn reviewer_sign_verifies_ed25519_before_storing(pool: PgPool) {
+        let ctx = setup(&pool).await;
+        let (attest_now, payload) = ready_for_reviewer_sign(&pool, &ctx).await;
+        let bus = EventBus::new();
+
+        let kp = Ed25519KeyPair::generate();
+        let (vk, sig) = signed_pair(&payload, &kp);
+
+        reviewer_sign(
+            &pool, attest_now.id, ctx.reviewer_1,
+            ReviewerSignAttestationRequest {
+                signature:              sig.clone(),
+                verifying_key_hex:      vk.clone(),
+                evidence_hash_reviewed: "evidence".to_owned(),
+            },
+            &bus,
+        ).await.expect("valid Ed25519 sign must succeed");
+
+        // Stored as verifying_key_hex:signature_hex in visit_signatures.
+        let stored: String = sqlx::query_scalar(
+            "SELECT signature FROM visit_signatures \
+             WHERE visit_id = $1 AND reviewer_id = $2"
+        )
+        .bind(attest_now.visit_id)
+        .bind(i32::from(ctx.reviewer_1))
+        .fetch_one(&pool).await.unwrap();
+        assert_eq!(stored, format!("{vk}:{sig}"),
+            "stored value must be verifying_key_hex:signature_hex");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn reviewer_sign_rejects_invalid_signature(pool: PgPool) {
+        let ctx = setup(&pool).await;
+        let (attest_now, payload) = ready_for_reviewer_sign(&pool, &ctx).await;
+        let bus = EventBus::new();
+
+        let kp = Ed25519KeyPair::generate();
+        let (vk, mut sig) = signed_pair(&payload, &kp);
+        // Flip one hex digit — signature now does not verify against payload.
+        let last = sig.pop().unwrap();
+        let flipped = if last == '0' { '1' } else { '0' };
+        sig.push(flipped);
+
+        let err = reviewer_sign(
+            &pool, attest_now.id, ctx.reviewer_1,
+            ReviewerSignAttestationRequest {
+                signature:              sig,
+                verifying_key_hex:      vk,
+                evidence_hash_reviewed: "evidence".to_owned(),
+            },
+            &bus,
+        ).await.unwrap_err();
+
+        assert!(matches!(err, DomainError::InvalidInput(_)),
+            "tampered signature must be InvalidInput, got: {err:?}");
+
+        // Crucially, no row was written — verification happens before insert.
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM visit_signatures \
+             WHERE visit_id = $1 AND reviewer_id = $2"
+        )
+        .bind(attest_now.visit_id)
+        .bind(i32::from(ctx.reviewer_1))
+        .fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 0, "failed sig verify must not write to visit_signatures");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn reviewer_sign_rejects_wrong_key(pool: PgPool) {
+        let ctx = setup(&pool).await;
+        let (attest_now, payload) = ready_for_reviewer_sign(&pool, &ctx).await;
+        let bus = EventBus::new();
+
+        let kp_a = Ed25519KeyPair::generate();
+        let kp_b = Ed25519KeyPair::generate();
+        let sig_a = kp_a.sign(payload.as_bytes());
+
+        let err = reviewer_sign(
+            &pool, attest_now.id, ctx.reviewer_1,
+            ReviewerSignAttestationRequest {
+                signature:              sig_a,
+                verifying_key_hex:      kp_b.verifying_key_hex(),
+                evidence_hash_reviewed: "evidence".to_owned(),
+            },
+            &bus,
+        ).await.unwrap_err();
+
+        assert!(matches!(err, DomainError::InvalidInput(_)),
+            "signature/key mismatch must be InvalidInput, got: {err:?}");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn both_reviewers_sign_passes_aggregated_verification(pool: PgPool) {
+        let ctx = setup(&pool).await;
+        let (attest_now, payload) = ready_for_reviewer_sign(&pool, &ctx).await;
+        let bus = EventBus::new();
+
+        // Distinct keys per reviewer — covers the aggregated path.
+        let kp1 = Ed25519KeyPair::generate();
+        let kp2 = Ed25519KeyPair::generate();
+        let (vk1, sig1) = signed_pair(&payload, &kp1);
+        let (vk2, sig2) = signed_pair(&payload, &kp2);
+
+        reviewer_sign(
+            &pool, attest_now.id, ctx.reviewer_1,
+            ReviewerSignAttestationRequest {
+                signature: sig1, verifying_key_hex: vk1,
+                evidence_hash_reviewed: "evidence-1".to_owned(),
+            },
+            &bus,
+        ).await.unwrap();
+
+        let approved = reviewer_sign(
+            &pool, attest_now.id, ctx.reviewer_2,
+            ReviewerSignAttestationRequest {
+                signature: sig2, verifying_key_hex: vk2,
+                evidence_hash_reviewed: "evidence-2".to_owned(),
+            },
+            &bus,
+        ).await.expect("aggregated verify must pass with two valid sigs");
+
+        assert_eq!(approved.status, "approved");
+
+        let user_status: String = sqlx::query_scalar(
+            "SELECT verification_status FROM users WHERE id = $1"
+        )
+        .bind(i32::from(ctx.target))
+        .fetch_one(&pool).await.unwrap();
+        assert_eq!(user_status, "attested");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn payload_is_deterministic(pool: PgPool) {
+        let ctx = setup(&pool).await;
+        let bus = EventBus::new();
+        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus)
+            .await.unwrap();
+
+        let p1 = attestation_payload(&attest);
+        let p2 = attestation_payload(&attest);
+        assert_eq!(p1, p2, "payload must be byte-for-byte identical for the same row");
+        assert!(p1.ends_with("|BFIP_ATTESTATION_V1"),
+            "payload must end with the BFIP version tag");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn parse_signature_record_round_trips(_pool: PgPool) {
+        let kp = Ed25519KeyPair::generate();
+        let vk = kp.verifying_key_hex();
+        let sig = kp.sign(b"any payload");
+
+        let stored = encode_signature_record(&vk, &sig);
+        let (parsed_vk, parsed_sig) = parse_signature_record(&stored)
+            .expect("well-formed record must parse");
+        assert_eq!(parsed_vk,  vk);
+        assert_eq!(parsed_sig, sig);
+
+        // Malformed inputs error rather than silently accepting.
+        assert!(parse_signature_record("no-colon-here").is_err());
+        assert!(parse_signature_record(":only-sig").is_err());
+        assert!(parse_signature_record("only-key:").is_err());
     }
 }
