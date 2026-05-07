@@ -1,4 +1,5 @@
 use box_fraise_domain::{audit, events::DomainEvent};
+use metrics::counter;
 use sqlx::PgPool;
 
 /// Consume one domain event and write durable side-effects:
@@ -84,6 +85,7 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
         }
 
         DomainEvent::PresenceEventRecorded { user_id, ref event_type, is_qualifying } => {
+            counter!("bfip_presence_events_recorded_total").increment(1);
             if is_qualifying {
                 tracing::info!(user_id, event_type, "presence.event_recorded");
             }
@@ -149,6 +151,7 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
         }
 
         DomainEvent::OrderCollected { order_id, user_id, box_id } => {
+            counter!("bfip_orders_collected_total").increment(1);
             tracing::info!(order_id, user_id, box_id, "order.collected");
             audit::write(
                 pool,
@@ -164,6 +167,7 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
         }
 
         DomainEvent::SoultokenIssued { soultoken_id, user_id, ref token_type } => {
+            counter!("bfip_soultokens_issued_total").increment(1);
             tracing::info!(soultoken_id, user_id, token_type, "soultoken.issued");
             audit::write(
                 pool,
@@ -179,6 +183,7 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
         }
 
         DomainEvent::SoultokenRevoked { soultoken_id, user_id, ref reason } => {
+            counter!("bfip_soultokens_revoked_total").increment(1);
             tracing::info!(soultoken_id, user_id, reason, "soultoken.revoked");
             audit::write(
                 pool,
@@ -221,6 +226,7 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
         }
 
         DomainEvent::AttestationApproved { attestation_id, user_id } => {
+            counter!("bfip_attestations_approved_total").increment(1);
             tracing::info!(attestation_id, user_id, "attestation.approved");
             audit::write(
                 pool,
@@ -233,6 +239,7 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
         }
 
         DomainEvent::AttestationRejected { attestation_id, user_id, rejection_reviewer_id } => {
+            counter!("bfip_attestations_rejected_total").increment(1);
             tracing::info!(attestation_id, user_id, rejection_reviewer_id, "attestation.rejected");
             audit::write(
                 pool,
@@ -312,6 +319,7 @@ pub async fn handle(pool: &PgPool, _http: &reqwest::Client, event: DomainEvent) 
         }
 
         DomainEvent::BackgroundCheckPassed { user_id, check_id, ref check_type } => {
+            counter!("bfip_background_checks_passed_total").increment(1);
             tracing::info!(user_id, check_id, check_type, "background_check.passed");
             audit::write(
                 pool,

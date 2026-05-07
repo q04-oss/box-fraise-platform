@@ -2270,6 +2270,94 @@ async fn post_evidence_upload_returns_503_when_storage_not_configured(pool: PgPo
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Observability (Hardening §4) — /metrics + /health
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn metrics_endpoint_returns_200(pool: PgPool) {
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/metrics")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    // The default axum-prometheus metric set always includes this counter
+    // family; even before any request is recorded the family appears with
+    // a HELP/TYPE comment block.
+    assert!(
+        text.contains("axum_http_requests_total") || text.contains("http_requests_total"),
+        "metrics body must include the http_requests_total family, got: {}",
+        &text.chars().take(500).collect::<String>(),
+    );
+}
+
+#[sqlx::test]
+async fn health_endpoint_returns_healthy_when_db_ok(pool: PgPool) {
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"],   "healthy");
+    assert_eq!(json["database"], "ok");
+}
+
+#[sqlx::test]
+async fn health_endpoint_returns_degraded_when_redis_unavailable(pool: PgPool) {
+    // Configure Redis at an unreachable port — pool creation is lazy, the
+    // first PING call fails and tips the health check to "degraded".
+    let bad_redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        .expect("deadpool create_pool is infallible for a parsable URL");
+    let state = common::build_state(pool, Some(bad_redis));
+    let app   = box_fraise_server::app::build(state);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK,
+        "Redis-only failure must remain HTTP 200 — degraded does not page");
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "degraded");
+    assert_eq!(json["redis"],  "error");
+}
+
+#[sqlx::test]
+async fn health_endpoint_includes_storage_status(pool: PgPool) {
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["storage"], "not_configured",
+        "test fixtures don't wire SPACES_* — storage must be reported as not_configured");
+    assert!(json["version"].as_str().is_some(), "version must appear in /health");
+}
+
 #[sqlx::test]
 async fn get_evidence_url_returns_503_when_storage_not_configured(pool: PgPool) {
     use fake::{Fake, faker::internet::en::SafeEmail};

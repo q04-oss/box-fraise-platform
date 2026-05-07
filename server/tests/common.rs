@@ -17,7 +17,7 @@ use testcontainers_modules::redis::Redis;
 
 use box_fraise_domain::{crypto::Ed25519KeyPair, event_bus::EventBus};
 use box_fraise_server::{
-    app::AppState,
+    app::{prometheus_pair, AppState},
     auth::new_revoked_tokens,
     config::Config,
     http::middleware::{hmac::new_nonce_cache, rate_limit::RateLimiter},
@@ -79,6 +79,7 @@ pub fn test_config() -> Config {
         soultoken_verifying_key_hex: test_ed25519_key_pair().verifying_key_hex(),
         spaces_access_key: None, spaces_secret_key: None, spaces_bucket: None,
         spaces_endpoint: None, spaces_region: None,
+        sentry_dsn: None,
     }
 }
 
@@ -89,6 +90,7 @@ pub fn build_state(db: PgPool, redis: Option<RedisPool>) -> AppState {
 /// Build an AppState using a fully custom Config — used by tests that need
 /// to override specific fields (e.g., `anthropic_base_url` for Dorotka tests).
 pub fn build_state_with_config(db: PgPool, redis: Option<RedisPool>, cfg: Config) -> AppState {
+    let (_layer, metric_handle) = prometheus_pair();
     AppState {
         db,
         cfg:              Arc::new(cfg),
@@ -101,6 +103,7 @@ pub fn build_state_with_config(db: PgPool, redis: Option<RedisPool>, cfg: Config
         event_bus:        EventBus::new(),
         ed25519_key_pair: Arc::new(test_ed25519_key_pair()),
         storage_client:   None,
+        metric_handle,
     }
 }
 

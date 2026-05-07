@@ -18,6 +18,21 @@ use box_fraise_domain::{
     event_bus::EventBus,
 };
 use box_fraise_integrations::storage::StorageClient;
+use axum_prometheus::PrometheusMetricLayer;
+use metrics_exporter_prometheus::PrometheusHandle;
+use std::sync::OnceLock;
+
+/// The `metrics-exporter-prometheus` crate registers a global recorder; the
+/// pair must therefore be constructed exactly once per process. Tests run
+/// under one process and each build their own `AppState`, so we memoise the
+/// pair here and clone both pieces out of the `OnceLock` for every caller.
+/// Public so test fixtures can pull from the same memoised pair — that
+/// guarantees the handle in `AppState` and the layer registered with the
+/// router both observe the same recorder.
+pub fn prometheus_pair() -> (PrometheusMetricLayer<'static>, PrometheusHandle) {
+    static PAIR: OnceLock<(PrometheusMetricLayer<'static>, PrometheusHandle)> = OnceLock::new();
+    PAIR.get_or_init(PrometheusMetricLayer::pair).clone()
+}
 use crate::http::{
     middleware::{
         correlation_id,
@@ -48,10 +63,18 @@ pub struct AppState {
     /// the `SPACES_*` env vars aren't set — handlers that need storage must
     /// return `503` in that case.
     pub storage_client:   Option<Arc<StorageClient>>,
+    /// Prometheus metric handle (Hardening §4). The same handle that the
+    /// metrics layer registered with — call `.render()` from `/metrics`.
+    pub metric_handle:    PrometheusHandle,
 }
 
 impl AppState {
-    pub fn new(db: PgPool, cfg: Config, storage_client: Option<Arc<StorageClient>>) -> Self {
+    pub fn new(
+        db:             PgPool,
+        cfg:            Config,
+        storage_client: Option<Arc<StorageClient>>,
+    ) -> Self {
+        let (_layer, metric_handle) = prometheus_pair();
         use secrecy::ExposeSecret;
 
         let redis = cfg.redis_url.as_ref().and_then(|url| {
@@ -123,6 +146,7 @@ impl AppState {
             event_bus: EventBus::new(),
             ed25519_key_pair: Arc::new(ed25519_key_pair),
             storage_client,
+            metric_handle,
         }
     }
 }
@@ -131,6 +155,8 @@ impl AppState {
 
 #[allow(deprecated)] // tower_http 0.6 deprecated TimeoutLayer::new; no non-deprecated replacement yet
 pub fn build(state: AppState) -> Router {
+    let (prometheus_layer, _handle) = prometheus_pair();
+
     Router::new()
         // ── OpenAPI docs ──────────────────────────────────────────────────────
         .merge(crate::openapi::router())
@@ -189,6 +215,21 @@ pub fn build(state: AppState) -> Router {
         // the request_id is available in timeout logs. Configurable via
         // TIMEOUT_SECS env var (default 30).
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
+        // ── Observability (Hardening §4) ──────────────────────────────────────
+        // Prometheus middleware records http_requests_total,
+        // http_request_duration_seconds, and http_requests_in_flight per
+        // route automatically. Wire OUTSIDE timeout/correlation_id so that
+        // metrics observe what reached the wire, not the inner-handler view.
+        .layer(prometheus_layer)
+        //
+        // NOTE: Sentry's tower middleware (sentry-tower 0.34) is intentionally
+        // omitted here — its `SentryLayer<_, _, Request<Body>>` is not `Sync`
+        // under axum 0.8 (axum's `Body` itself isn't `Sync`), so it doesn't
+        // satisfy `Router::layer`'s `Layer + Sync + 'static` bound. The
+        // sentry-tracing layer in `lib.rs::run` already captures every
+        // `tracing::error!` event into Sentry, which is the main value;
+        // request-transaction wrapping is the only thing we lose. Revisit
+        // when sentry-tower releases an axum-0.8-compatible variant.
         // ── Transport ─────────────────────────────────────────────────────────
         .layer(CompressionLayer::new())
         // CORS posture — review before production launch

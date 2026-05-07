@@ -21,39 +21,68 @@ use crate::app::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/health",                                   get(health))
+        .route("/metrics",                                  get(metrics))
         .route("/.well-known/apple-app-site-association",   get(aasa))
         .route("/go",                                        get(tracker_hop))
 }
 
+/// GET /metrics — Prometheus text-format scrape endpoint (Hardening §4).
+///
+/// No auth: served unauthenticated for the local Prometheus / Grafana Agent
+/// to scrape. TODO: restrict to internal network on the VPS (firewall rule
+/// or reverse-proxy ACL) before the host is exposed to the public internet.
+async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    state.metric_handle.render()
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
+/// GET /health — Hardening §4 enhanced liveness probe.
+///
+/// Status semantics:
+/// - `healthy`     → DB up. Redis up (or not configured). HTTP 200.
+/// - `degraded`    → DB up. Redis configured but unreachable. HTTP 200.
+/// - `unhealthy`   → DB down (regardless of Redis). HTTP 503.
+///
+/// UptimeRobot pages on non-200 only — so a Redis blip does not page on-call.
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let db_ok = sqlx::query("SELECT 1")
         .execute(&state.db)
         .await
         .is_ok();
 
-    let redis_ok = match state.redis.as_ref() {
-        None => true, // Redis not configured — not a failure condition
-        Some(pool) => match pool.get().await {
-            Err(_) => false,
-            Ok(mut conn) => redis::cmd("PING")
-                .query_async::<_, String>(&mut *conn)
-                .await
-                .is_ok(),
-        },
+    let (redis_ok, redis_configured) = match state.redis.as_ref() {
+        None       => (true, false), // not configured — not a failure
+        Some(pool) => {
+            let ok = match pool.get().await {
+                Err(_)        => false,
+                Ok(mut conn)  => redis::cmd("PING")
+                    .query_async::<_, String>(&mut *conn)
+                    .await
+                    .is_ok(),
+            };
+            (ok, true)
+        }
     };
 
-    let status_code = if db_ok && redis_ok {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
+    let storage_configured = state.storage_client.is_some();
+
+    let (status_str, status_code) = match (db_ok, redis_ok) {
+        (true,  true)  => ("healthy",   StatusCode::OK),
+        (true,  false) => ("degraded",  StatusCode::OK),
+        (false, _)     => ("unhealthy", StatusCode::SERVICE_UNAVAILABLE),
     };
 
     (status_code, Json(json!({
-        "status": if db_ok && redis_ok { "ok" } else { "degraded" },
-        "db":    if db_ok    { "ok" } else { "error" },
-        "redis": if redis_ok { "ok" } else { "error" },
+        "status":   status_str,
+        "database": if db_ok { "ok" } else { "error" },
+        "redis":    if redis_configured {
+            if redis_ok { "ok" } else { "error" }
+        } else {
+            "not_configured"
+        },
+        "storage":  if storage_configured { "configured" } else { "not_configured" },
+        "version":  env!("CARGO_PKG_VERSION"),
     })))
 }
 

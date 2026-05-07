@@ -71,6 +71,10 @@ pub struct Config {
     pub spaces_bucket:               Option<String>,
     pub spaces_endpoint:             Option<String>,
     pub spaces_region:               Option<String>,
+    /// Sentry error-tracking DSN (Hardening §4). When set, Sentry captures
+    /// panics, error-level tracing events, and a 10% sample of request
+    /// traces. When unset, Sentry is disabled and the server logs locally only.
+    pub sentry_dsn:                  Option<String>,
 }
 
 impl Config {
@@ -173,6 +177,7 @@ impl Config {
             spaces_bucket:               optional("SPACES_BUCKET"),
             spaces_endpoint:             optional("SPACES_ENDPOINT"),
             spaces_region:               optional("SPACES_REGION"),
+            sentry_dsn:                  optional("SENTRY_DSN"),
         })
     }
 

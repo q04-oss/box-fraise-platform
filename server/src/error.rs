@@ -65,27 +65,33 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, message) = match &self {
-            Self::Unauthorized      => (StatusCode::UNAUTHORIZED,          self.to_string()),
-            Self::Forbidden         => (StatusCode::FORBIDDEN,             self.to_string()),
-            Self::BadRequest(m)     => (StatusCode::BAD_REQUEST,           m.clone()),
-            Self::NotFound          => (StatusCode::NOT_FOUND,             self.to_string()),
-            Self::Conflict(m)       => (StatusCode::CONFLICT,              m.clone()),
-            Self::Unprocessable(m)  => (StatusCode::UNPROCESSABLE_ENTITY,  m.clone()),
-            Self::TooManyRequests   => (StatusCode::TOO_MANY_REQUESTS,     self.to_string()),
-            Self::PaymentRequired   => (StatusCode::PAYMENT_REQUIRED,      self.to_string()),
-            Self::BadGateway(m)     => (StatusCode::BAD_GATEWAY,           m.clone()),
-            Self::ServiceUnavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m.clone()),
+        // Hardening §4 — structured error response.
+        // `error`   is a stable machine-readable slug.
+        // `message` is the human-readable detail.
+        // The X-Request-Id header (added by the correlation_id middleware
+        // outside this layer) carries the correlation ID; it isn't echoed
+        // in the body because IntoResponse has no request context.
+        let (status, error_slug, message) = match &self {
+            Self::Unauthorized          => (StatusCode::UNAUTHORIZED,          "unauthorized",        self.to_string()),
+            Self::Forbidden             => (StatusCode::FORBIDDEN,             "forbidden",           self.to_string()),
+            Self::BadRequest(m)         => (StatusCode::BAD_REQUEST,           "bad_request",         m.clone()),
+            Self::NotFound              => (StatusCode::NOT_FOUND,             "not_found",           self.to_string()),
+            Self::Conflict(m)           => (StatusCode::CONFLICT,              "conflict",            m.clone()),
+            Self::Unprocessable(m)      => (StatusCode::UNPROCESSABLE_ENTITY,  "unprocessable",       m.clone()),
+            Self::TooManyRequests       => (StatusCode::TOO_MANY_REQUESTS,     "rate_limited",        self.to_string()),
+            Self::PaymentRequired       => (StatusCode::PAYMENT_REQUIRED,      "payment_required",    self.to_string()),
+            Self::BadGateway(m)         => (StatusCode::BAD_GATEWAY,           "bad_gateway",         m.clone()),
+            Self::ServiceUnavailable(m) => (StatusCode::SERVICE_UNAVAILABLE,   "service_unavailable", m.clone()),
             Self::Internal(e) => {
                 tracing::error!(error = %e, "internal server error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "internal error".to_owned())
             }
             Self::Db(e) => {
                 tracing::error!(error = %e, "database error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "internal error".to_owned())
             }
         };
-        (status, Json(json!({ "error": message }))).into_response()
+        (status, Json(json!({ "error": error_slug, "message": message }))).into_response()
     }
 }
 

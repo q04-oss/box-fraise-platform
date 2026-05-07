@@ -233,6 +233,7 @@ mod proptest_tests {
             soultoken_verifying_key_hex: "4242424242424242424242424242424242424242424242424242424242424242".to_owned(),
             spaces_access_key: None, spaces_secret_key: None, spaces_bucket: None,
             spaces_endpoint: None, spaces_region: None,
+            sentry_dsn: None,
         }
     }
 

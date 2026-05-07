@@ -25,12 +25,20 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 pub async fn run() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
+    // Hardening §4 — observability bootstrap.
+    //
+    // The Sentry layer is added to the subscriber unconditionally; it's a
+    // no-op until `sentry::init` runs below (after config loads). `sentry::init`
+    // belongs as early as possible, but Sentry needs the DSN, and the DSN
+    // lives on `Config` — so config loads, then Sentry inits, then the
+    // observability summary logs.
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "box_fraise_server=debug,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
+        .with(sentry_tracing::layer())
         .init();
 
     // Fail immediately with a human-readable message if any required variable
@@ -42,6 +50,33 @@ pub async fn run() -> anyhow::Result<()> {
         eprintln!("FATAL: {e:#}");
         std::process::exit(1);
     });
+
+    // Sentry guard must outlive the program — its Drop flushes pending events.
+    // Hold it in `_sentry_guard` so it lives through `axum::serve(...).await`.
+    let _sentry_guard = cfg.sentry_dsn.as_ref().map(|dsn| {
+        let g = sentry::init((
+            dsn.as_str(),
+            sentry::ClientOptions {
+                release:            sentry::release_name!(),
+                traces_sample_rate: 0.1,
+                ..Default::default()
+            },
+        ));
+        info!("Sentry initialised");
+        g
+    });
+    if cfg.sentry_dsn.is_none() {
+        tracing::warn!("Sentry disabled — SENTRY_DSN not set");
+    }
+
+    // One-line summary of which observability + hardening features came
+    // online for this boot.
+    info!(
+        sentry_enabled  = cfg.sentry_dsn.is_some(),
+        storage_enabled = cfg.spaces_access_key.is_some(),
+        rls_enforcement = cfg.app_user_database_url.is_some(),
+        "Server configuration summary",
+    );
     let port = cfg.port;
     // Hardening Section 2c — connection role routing.
     // If APP_USER_DATABASE_URL is set, the main pool connects as the
@@ -95,6 +130,10 @@ pub async fn run() -> anyhow::Result<()> {
         }
     };
 
+    // Hardening §4 — Prometheus pair lives behind a OnceLock in `app.rs`
+    // because the metrics-exporter-prometheus global recorder can only be
+    // registered once per process. Both `AppState::new` and `app::build`
+    // pull from the same memoised pair.
     let state  = app::AppState::new(pool, cfg, storage_client);
 
     // Subscribe before building the router so no early events are missed.
