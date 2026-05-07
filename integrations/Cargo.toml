@@ -12,9 +12,25 @@ reqwest    = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 anyhow     = { workspace = true }
+thiserror  = { workspace = true }
 tracing    = { workspace = true }
 ring       = { workspace = true }
 base64     = { workspace = true }
 hex        = { workspace = true }
 secrecy    = { workspace = true }
 chrono     = { workspace = true }
+
+# Object storage (DigitalOcean Spaces — S3-compatible). Hardening Section 3.
+aws-sdk-s3              = { version = "1", features = ["behavior-version-latest"] }
+aws-config              = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types    = "1"
+sha2       = "0.10"
+bytes      = "1"
+mime_guess = "2"
+
+# `From<StorageError> for DomainError` lives in the domain crate — domain
+# already depends on integrations, and reversing that direction would
+# introduce a cycle.
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

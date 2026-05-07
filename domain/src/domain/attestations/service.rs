@@ -252,6 +252,14 @@ pub async fn initiate_attestation(
         assign_reviewers_for_visit(pool, uid, location_id).await?;
 
     // 7. Create attestation record.
+    //
+    // TODO(hardening): `photo_hash` is currently trusted from the client.
+    // The canonical server-computed hash now comes from
+    // `POST /api/staff/visits/:id/evidence` (Hardening §3). A future pass
+    // should require the photo to be uploaded via that endpoint first,
+    // accept only `photo_storage_uri` here, and look up the server-computed
+    // hash from the storage record. Both fields are accepted today for
+    // backwards compatibility with the iOS client.
     let attestation = repository::create_attestation(
         pool,
         req.visit_id,

@@ -78,6 +78,8 @@ async fn magic_link_flow_fires_user_logged_in_event(pool: PgPool) {
         soultoken_hmac_key:          "test-soultoken-hmac-key-32bytes!!".to_string().into(),
         soultoken_signing_key_hex:   common::TEST_ED25519_SIGNING_KEY_HEX.to_string().into(),
         soultoken_verifying_key_hex: common::test_ed25519_key_pair().verifying_key_hex(),
+        spaces_access_key: None, spaces_secret_key: None, spaces_bucket: None,
+        spaces_endpoint: None, spaces_region: None,
     });
     let _http = reqwest::Client::new();
 

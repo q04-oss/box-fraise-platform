@@ -64,6 +64,13 @@ pub struct Config {
     /// Ed25519 public key (32 bytes) as 64 hex chars — published via the
     /// trust-registry endpoint for offline signature verification.
     pub soultoken_verifying_key_hex: String,
+    /// DigitalOcean Spaces (S3-compatible) credentials. All five fields
+    /// must be present together — the [`storage_config`] helper validates.
+    pub spaces_access_key:           Option<SecretString>,
+    pub spaces_secret_key:           Option<SecretString>,
+    pub spaces_bucket:               Option<String>,
+    pub spaces_endpoint:             Option<String>,
+    pub spaces_region:               Option<String>,
 }
 
 impl Config {
@@ -161,6 +168,29 @@ impl Config {
             soultoken_hmac_key:          soultoken_hmac_key_raw.into(),
             soultoken_signing_key_hex:   soultoken_signing_key_hex_raw.into(),
             soultoken_verifying_key_hex: soultoken_verifying_key_hex_raw,
+            spaces_access_key:           optional_secret("SPACES_ACCESS_KEY"),
+            spaces_secret_key:           optional_secret("SPACES_SECRET_KEY"),
+            spaces_bucket:               optional("SPACES_BUCKET"),
+            spaces_endpoint:             optional("SPACES_ENDPOINT"),
+            spaces_region:               optional("SPACES_REGION"),
+        })
+    }
+
+    /// Build a [`StorageConfig`](box_fraise_integrations::storage::StorageConfig)
+    /// when all five `SPACES_*` env vars are present. Returns `None` in dev/test
+    /// where storage isn't configured — callers should treat that as
+    /// "storage feature disabled" and surface a 503 to clients.
+    pub fn storage_config(&self) -> Option<box_fraise_integrations::storage::StorageConfig> {
+        use secrecy::ExposeSecret;
+        let access_key = self.spaces_access_key.as_ref()?.expose_secret().to_owned();
+        let secret_key = self.spaces_secret_key.as_ref()?.expose_secret().to_owned();
+        let bucket     = self.spaces_bucket.clone()?;
+        let endpoint   = self.spaces_endpoint.clone()
+            .unwrap_or_else(|| "https://nyc3.digitaloceanspaces.com".to_owned());
+        let region     = self.spaces_region.clone().unwrap_or_else(|| "nyc3".to_owned());
+        Some(box_fraise_integrations::storage::StorageConfig {
+            access_key, secret_key, bucket, endpoint, region,
+            presign_expiry_seconds: 900,
         })
     }
 }

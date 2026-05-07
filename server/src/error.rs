@@ -39,6 +39,9 @@ pub enum AppError {
     #[error("{0}")]
     BadGateway(String),
 
+    #[error("{0}")]
+    ServiceUnavailable(String),
+
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
 
@@ -72,6 +75,7 @@ impl IntoResponse for AppError {
             Self::TooManyRequests   => (StatusCode::TOO_MANY_REQUESTS,     self.to_string()),
             Self::PaymentRequired   => (StatusCode::PAYMENT_REQUIRED,      self.to_string()),
             Self::BadGateway(m)     => (StatusCode::BAD_GATEWAY,           m.clone()),
+            Self::ServiceUnavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m.clone()),
             Self::Internal(e) => {
                 tracing::error!(error = %e, "internal server error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())

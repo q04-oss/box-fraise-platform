@@ -17,6 +17,7 @@ use box_fraise_domain::{
     crypto::Ed25519KeyPair,
     event_bus::EventBus,
 };
+use box_fraise_integrations::storage::StorageClient;
 use crate::http::{
     middleware::{
         correlation_id,
@@ -43,10 +44,14 @@ pub struct AppState {
     /// Hardening Section 1b). Wrapped in `Arc` because `Ed25519KeyPair` is not
     /// `Clone` and `AppState` is cloned per request.
     pub ed25519_key_pair: Arc<Ed25519KeyPair>,
+    /// DigitalOcean Spaces storage client (Hardening Section 3). `None` when
+    /// the `SPACES_*` env vars aren't set — handlers that need storage must
+    /// return `503` in that case.
+    pub storage_client:   Option<Arc<StorageClient>>,
 }
 
 impl AppState {
-    pub fn new(db: PgPool, cfg: Config) -> Self {
+    pub fn new(db: PgPool, cfg: Config, storage_client: Option<Arc<StorageClient>>) -> Self {
         use secrecy::ExposeSecret;
 
         let redis = cfg.redis_url.as_ref().and_then(|url| {
@@ -117,6 +122,7 @@ impl AppState {
                 .expect("reqwest client is infallible"),
             event_bus: EventBus::new(),
             ed25519_key_pair: Arc::new(ed25519_key_pair),
+            storage_client,
         }
     }
 }

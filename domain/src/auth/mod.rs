@@ -231,6 +231,8 @@ mod proptest_tests {
             soultoken_hmac_key:          s("test-soultoken-hmac-key-32bytes!!"),
             soultoken_signing_key_hex:   s("4242424242424242424242424242424242424242424242424242424242424242"),
             soultoken_verifying_key_hex: "4242424242424242424242424242424242424242424242424242424242424242".to_owned(),
+            spaces_access_key: None, spaces_secret_key: None, spaces_bucket: None,
+            spaces_endpoint: None, spaces_region: None,
         }
     }
 

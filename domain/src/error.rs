@@ -70,3 +70,13 @@ impl DomainError {
 
 /// Alias for `Result<T, DomainError>` used throughout the domain layer.
 pub type AppResult<T> = Result<T, DomainError>;
+
+/// Storage failures (DigitalOcean Spaces / S3) flatten into
+/// `ExternalServiceError`. Defined here rather than in the integrations crate
+/// because adding a domain dep there would create a cycle (domain already
+/// depends on integrations).
+impl From<box_fraise_integrations::storage::StorageError> for DomainError {
+    fn from(e: box_fraise_integrations::storage::StorageError) -> Self {
+        Self::ExternalServiceError(e.to_string())
+    }
+}

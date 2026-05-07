@@ -287,6 +287,16 @@ pub async fn complete_visit(
     }
 
     // 3. Update to completed.
+    //
+    // TODO(hardening): `evidence_hash` is currently trusted from the client.
+    // The canonical server-computed hash now comes from
+    // `POST /api/staff/visits/:id/evidence` (Hardening §3, see
+    // `box_fraise_integrations::storage::StorageClient::compute_evidence_hash`).
+    // A future pass should refuse to accept `evidence_hash` from the client
+    // and require completion to reference an already-uploaded object via
+    // `evidence_storage_uri` only — the server then looks up the hash it
+    // computed at upload time. Both fields are accepted today for backwards
+    // compatibility with the iOS client.
     let updated = repository::update_visit_completed(
         pool,
         visit_id,

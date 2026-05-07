@@ -69,7 +69,33 @@ pub async fn run() -> anyhow::Result<()> {
         tracing::info!("Platform configuration defaults initialized");
     }
 
-    let state  = app::AppState::new(pool, cfg);
+    // Hardening Section 3 — build the storage client when SPACES_* are set.
+    let storage_client = match cfg.storage_config() {
+        Some(scfg) => {
+            match box_fraise_integrations::storage::StorageClient::new(scfg).await {
+                Ok(client) => {
+                    info!("Storage client initialised — DigitalOcean Spaces");
+                    Some(std::sync::Arc::new(client))
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Storage client initialisation failed — feature disabled"
+                    );
+                    None
+                }
+            }
+        }
+        None => {
+            tracing::warn!(
+                "Storage disabled — SPACES_* not configured. \
+                 Evidence upload + presign endpoints will return 503."
+            );
+            None
+        }
+    };
+
+    let state  = app::AppState::new(pool, cfg, storage_client);
 
     // Subscribe before building the router so no early events are missed.
     let mut event_rx = state.event_bus.subscribe();

@@ -2235,3 +2235,60 @@ async fn trust_registry_returns_verifying_key(pool: PgPool) {
     assert!(body["bfip_version"].as_str().is_some(), "bfip_version must be present");
     assert!(body["description"].as_str().is_some(), "description must be present");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Evidence storage — 503 when SPACES_* not configured (Hardening §3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn post_evidence_upload_returns_503_when_storage_not_configured(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+    let token = common::valid_token(uid);
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    // Empty multipart body with the right Content-Type header — the
+    // Multipart extractor parses the headers and lets the handler run;
+    // require_storage short-circuits with 503 before any field is read.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/staff/visits/1/evidence")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "multipart/form-data; boundary=BOUND")
+        .header("x-forwarded-for", "127.0.0.1")
+        .body(Body::from("--BOUND--\r\n"))
+        .unwrap();
+    let mut req = req;
+    req.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[sqlx::test]
+async fn get_evidence_url_returns_503_when_storage_not_configured(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+    let token = common::valid_token(uid);
+
+    let state = common::build_state(pool, None);
+    let app   = box_fraise_server::app::build(state);
+
+    let resp = app
+        .oneshot(authed_req(
+            "GET",
+            "/api/staff/visits/1/evidence/url?path=evidence/visits/1/123_photo",
+            &token,
+        ))
+        .await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
