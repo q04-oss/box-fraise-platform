@@ -3,6 +3,7 @@ use sqlx::{PgConnection, PgPool};
 
 use crate::{
     audit,
+    auth::apple_attest::{self, AppAttestPolicy},
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
@@ -224,7 +225,15 @@ pub async fn record_beacon_dwell(
     user_id: UserId,
     req:     RecordBeaconDwellRequest,
     bus:     &EventBus,
+    policy:  AppAttestPolicy,
 ) -> AppResult<PresenceStatusResponse> {
+    // 0. App Attest gate (Hardening §3a / Grade A item 2).
+    apple_attest::enforce_assertion(
+        policy,
+        req.app_attest_assertion.as_deref(),
+        req.app_attest_key_id.as_deref(),
+    )?;
+
     let uid = i32::from(user_id);
 
     // 1. Validate user. Cross-domain repo call — kept on &PgPool for now.
@@ -361,7 +370,15 @@ pub async fn record_nfc_tap(
     user_id: UserId,
     req:     RecordNfcTapRequest,
     bus:     &EventBus,
+    policy:  AppAttestPolicy,
 ) -> AppResult<PresenceStatusResponse> {
+    // 0. App Attest gate (Hardening §3a / Grade A item 2).
+    apple_attest::enforce_assertion(
+        policy,
+        req.app_attest_assertion.as_deref(),
+        req.app_attest_key_id.as_deref(),
+    )?;
+
     let uid = i32::from(user_id);
 
     // 1. Validate user. Cross-domain repo call — kept on &PgPool for now.
@@ -573,6 +590,7 @@ mod tests {
             dwell_minutes: dwell_mins,
             beacon_witness_hmac: witness_hmac,
             app_attest_assertion: None,
+            app_attest_key_id:    None,
             device_identifier: None,
             started_at,
             ended_at: started_at + Duration::minutes(dwell_mins as i64),
@@ -597,7 +615,7 @@ mod tests {
             record_beacon_dwell(
                 &mut tx, &pool, uid,
                 dwell_req(beacon_id, biz_id, -65, 20, hmac, now),
-                &bus,
+                &bus, AppAttestPolicy::DISABLED,
             ).await.expect("qualifying dwell must succeed")
         });
 
@@ -623,7 +641,7 @@ mod tests {
             record_beacon_dwell(
                 &mut tx, &pool, uid,
                 dwell_req(beacon_id, biz_id, -80, 20, hmac, now),
-                &bus,
+                &bus, AppAttestPolicy::DISABLED,
             ).await.expect("call must succeed")
         });
 
@@ -656,7 +674,7 @@ mod tests {
             record_beacon_dwell(
                 &mut tx, &pool, uid,
                 dwell_req(beacon_id, biz_id, -65, 10, hmac, now),  // 10 mins < 15 min minimum
-                &bus,
+                &bus, AppAttestPolicy::DISABLED,
             ).await.unwrap()
         });
 
@@ -687,7 +705,7 @@ mod tests {
             record_beacon_dwell(
                 &mut tx, &pool, uid,
                 dwell_req(beacon_id, biz_id, -65, 20, bad_hmac, now),
-                &bus,
+                &bus, AppAttestPolicy::DISABLED,
             ).await.unwrap()
         });
 
@@ -721,7 +739,7 @@ mod tests {
         // First dwell on day.
         let hmac1 = derive_witness_hmac(&secret, biz_id, day.date_naive(), i32::from(uid));
         with_rls_tx!(&pool, uid, |tx| {
-            record_beacon_dwell(&mut tx, &pool, uid, dwell_req(beacon_id, biz_id, -65, 20, hmac1, day), &bus)
+            record_beacon_dwell(&mut tx, &pool, uid, dwell_req(beacon_id, biz_id, -65, 20, hmac1, day), &bus, AppAttestPolicy::DISABLED)
                 .await.unwrap()
         });
 
@@ -731,7 +749,7 @@ mod tests {
             record_beacon_dwell(
                 &mut tx, &pool, uid,
                 dwell_req(beacon_id, biz_id, -65, 20, hmac2, day + Duration::hours(2)),
-                &bus,
+                &bus, AppAttestPolicy::DISABLED,
             ).await.unwrap()
         });
 
@@ -758,7 +776,7 @@ mod tests {
                 record_beacon_dwell(
                     &mut tx, &pool, uid,
                     dwell_req(beacon_id, biz_id, -65, 20, hmac, started_at),
-                    &bus,
+                    &bus, AppAttestPolicy::DISABLED,
                 ).await.unwrap()
             });
         }
@@ -832,8 +850,9 @@ mod tests {
                 business_id:          biz_id,
                 beacon_witness_hmac:  hmac,
                 app_attest_assertion: None,
+                app_attest_key_id:    None,
                 device_identifier:    None,
-            }, &bus).await.expect("NFC tap must succeed")
+            }, &bus, AppAttestPolicy::DISABLED).await.expect("NFC tap must succeed")
         });
 
         assert_eq!(resp.event_count, 1, "threshold must advance after NFC tap");
@@ -862,19 +881,20 @@ mod tests {
             business_id:          biz_id,
             beacon_witness_hmac:  derive_witness_hmac(&secret, biz_id, Utc::now().date_naive(), i32::from(uid)),
             app_attest_assertion: None,
+            app_attest_key_id:    None,
             device_identifier:    None,
         };
 
         // First tap succeeds.
         let bus1 = EventBus::new();
         with_rls_tx!(&pool, uid, |tx| {
-            record_nfc_tap(&mut tx, &pool, uid, make_req(), &bus1).await.expect("first tap must succeed")
+            record_nfc_tap(&mut tx, &pool, uid, make_req(), &bus1, AppAttestPolicy::DISABLED).await.expect("first tap must succeed")
         });
 
         // Second tap on same box must fail.
         let bus2 = EventBus::new();
         let mut tx2 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let err = record_nfc_tap(&mut tx2, &pool, uid, make_req(), &bus2)
+        let err = record_nfc_tap(&mut tx2, &pool, uid, make_req(), &bus2, AppAttestPolicy::DISABLED)
             .await.expect_err("second tap must be rejected");
         // tx2 is dropped on error path → automatic rollback.
         assert!(matches!(err, DomainError::Conflict(_)),
@@ -897,7 +917,7 @@ mod tests {
 
         with_rls_tx!(&pool, uid, |tx| {
             record_beacon_dwell(
-                &mut tx, &pool, uid, dwell_req(beacon_id, biz_id, -65, 20, hmac, now), &bus,
+                &mut tx, &pool, uid, dwell_req(beacon_id, biz_id, -65, 20, hmac, now), &bus, AppAttestPolicy::DISABLED,
             ).await.unwrap()
         });
 
@@ -927,7 +947,7 @@ mod tests {
             record_beacon_dwell(
                 &mut tx, &pool, uid,
                 dwell_req(beacon_id, biz_id, -65, 20, fake_hmac, now),
-                &bus,
+                &bus, AppAttestPolicy::DISABLED,
             ).await.unwrap()
         });
 
@@ -958,15 +978,16 @@ mod tests {
             business_id:          biz_id,
             beacon_witness_hmac:  derive_witness_hmac(&secret, biz_id, Utc::now().date_naive(), i32::from(uid)),
             app_attest_assertion: None,
+            app_attest_key_id:    None,
             device_identifier:    None,
         };
 
         with_rls_tx!(&pool, uid, |tx| {
-            record_nfc_tap(&mut tx, &pool, uid, make_req(), &bus).await.expect("first tap must succeed")
+            record_nfc_tap(&mut tx, &pool, uid, make_req(), &bus, AppAttestPolicy::DISABLED).await.expect("first tap must succeed")
         });
 
         let mut tx2 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let err = record_nfc_tap(&mut tx2, &pool, uid, make_req(), &bus)
+        let err = record_nfc_tap(&mut tx2, &pool, uid, make_req(), &bus, AppAttestPolicy::DISABLED)
             .await.expect_err("replay tap must be rejected");
         assert!(matches!(err, DomainError::Conflict(_)));
     }
@@ -992,11 +1013,95 @@ mod tests {
         let err = record_beacon_dwell(
             &mut tx, &pool, uid,
             dwell_req(beacon_id, biz_id, -65, 20, hmac, now),
-            &bus,
+            &bus, AppAttestPolicy::DISABLED,
         ).await.expect_err("inactive beacon must be rejected");
         // tx is dropped on error path → automatic rollback.
 
         assert!(matches!(err, DomainError::NotFound),
             "inactive beacon must return NotFound, got: {err:?}");
+    }
+
+    // ── Tests 13–15: App Attest enforcement ───────────────────────────────────
+    //
+    // The `enforce_assertion` gate is presence-only (full crypto is deferred
+    // until per-device public-key storage lands). These tests prove the
+    // assertion *header* is required when policy.enabled, and that
+    // disabled-mode is a transparent no-op for the existing call sites.
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn record_beacon_dwell_requires_assertion_when_enabled(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let uid   = create_identity_confirmed_user(&pool, &SafeEmail().fake::<String>()).await;
+        let owner = create_attested_user(&pool, &SafeEmail().fake::<String>()).await;
+        let (biz_id, _, beacon_id, secret) =
+            create_business_and_beacon(&pool, i32::from(owner)).await;
+
+        let now  = Utc::now();
+        let hmac = derive_witness_hmac(&secret, biz_id, now.date_naive(), i32::from(uid));
+        let bus  = EventBus::new();
+
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
+        let err = record_beacon_dwell(
+            &mut tx, &pool, uid,
+            dwell_req(beacon_id, biz_id, -65, 20, hmac, now), // assertion + key_id are None
+            &bus, AppAttestPolicy::ENABLED,
+        ).await.expect_err("missing App Attest assertion must reject");
+
+        assert!(matches!(err, DomainError::Forbidden),
+            "expected Forbidden, got: {err:?}");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn record_nfc_tap_requires_assertion_when_enabled(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let uid   = create_identity_confirmed_user(&pool, &SafeEmail().fake::<String>()).await;
+        let owner = create_attested_user(&pool, &SafeEmail().fake::<String>()).await;
+        let (biz_id, loc_id, _beacon_id, secret) =
+            create_business_and_beacon(&pool, i32::from(owner)).await;
+
+        let box_id = create_visit_box(&pool, loc_id, i32::from(owner)).await;
+        let bus    = EventBus::new();
+
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
+        let err = record_nfc_tap(
+            &mut tx, &pool, uid,
+            RecordNfcTapRequest {
+                box_id,
+                business_id:          biz_id,
+                beacon_witness_hmac:  derive_witness_hmac(&secret, biz_id, Utc::now().date_naive(), i32::from(uid)),
+                app_attest_assertion: None,
+                app_attest_key_id:    None,
+                device_identifier:    None,
+            },
+            &bus, AppAttestPolicy::ENABLED,
+        ).await.expect_err("missing App Attest assertion must reject");
+
+        assert!(matches!(err, DomainError::Forbidden),
+            "expected Forbidden, got: {err:?}");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn record_beacon_dwell_skips_check_when_disabled(pool: PgPool) {
+        use fake::{Fake, faker::internet::en::SafeEmail};
+        let uid   = create_identity_confirmed_user(&pool, &SafeEmail().fake::<String>()).await;
+        let owner = create_attested_user(&pool, &SafeEmail().fake::<String>()).await;
+        let (biz_id, _, beacon_id, secret) =
+            create_business_and_beacon(&pool, i32::from(owner)).await;
+
+        let now  = Utc::now();
+        let hmac = derive_witness_hmac(&secret, biz_id, now.date_naive(), i32::from(uid));
+        let bus  = EventBus::new();
+
+        // Policy disabled + assertion absent → must succeed (the existing call
+        // sites all use this path; this test pins the no-op contract).
+        let resp = with_rls_tx!(&pool, uid, |tx| {
+            record_beacon_dwell(
+                &mut tx, &pool, uid,
+                dwell_req(beacon_id, biz_id, -65, 20, hmac, now),
+                &bus, AppAttestPolicy::DISABLED,
+            ).await.expect("disabled-mode must succeed without assertion")
+        });
+
+        assert_eq!(resp.event_count, 1);
     }
 }

@@ -35,6 +35,55 @@ pub struct AttestationData {
     pub public_key_der: Vec<u8>,
 }
 
+/// Per-request enforcement policy for App Attest assertions.
+///
+/// Built from `Config::app_attest_enabled` at the HTTP boundary and passed
+/// through to domain services. Domain code never reads env or `Config`
+/// directly; this struct is the only knob.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AppAttestPolicy {
+    pub enabled: bool,
+}
+
+impl AppAttestPolicy {
+    pub const DISABLED: Self = Self { enabled: false };
+    pub const ENABLED: Self  = Self { enabled: true };
+}
+
+/// Gate a presence-class request on a present, non-empty App Attest assertion.
+///
+/// When `policy.enabled` is false, this is a silent no-op (dev/test mode).
+///
+/// When enabled, requires both `assertion` and `key_id` to be `Some(non-empty)`.
+/// Returns `DomainError::Forbidden` otherwise. Once present, the call falls
+/// through to a presence-only check — full cryptographic verification (via
+/// [`verify_assertion`]) is deferred until the per-device public-key DER is
+/// persisted at attestation registration. A `tracing::warn!` records that the
+/// stub path was taken so this is visible in production logs.
+pub fn enforce_assertion(
+    policy:    AppAttestPolicy,
+    assertion: Option<&str>,
+    key_id:    Option<&str>,
+) -> Result<(), DomainError> {
+    if !policy.enabled {
+        return Ok(());
+    }
+    let assertion_ok = assertion.map(|s| !s.is_empty()).unwrap_or(false);
+    let key_id_ok    = key_id.map(|s| !s.is_empty()).unwrap_or(false);
+    if !assertion_ok || !key_id_ok {
+        return Err(DomainError::Forbidden);
+    }
+    // TODO(app-attest-full): wire `verify_assertion` here once
+    // `identity_credentials` carries the per-device public-key DER.
+    // The crypto routine in this module is complete; only the registered
+    // public-key lookup by key_id is missing.
+    tracing::warn!(
+        "App Attest: presence-only enforcement (full crypto verification \
+         pending per-device public-key storage)"
+    );
+    Ok(())
+}
+
 // ── Attestation parsing ───────────────────────────────────────────────────────
 
 /// Parse and partially verify an App Attest attestation object.

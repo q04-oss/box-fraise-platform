@@ -87,6 +87,8 @@ async fn magic_link_flow_fires_user_logged_in_event(pool: PgPool) {
         db_max_connections:      20,
         db_min_connections:      2,
         db_acquire_timeout_secs: 5,
+        app_attest_enabled:      false,
+        app_attest_app_id:       None,
     });
     let _http = reqwest::Client::new();
 
@@ -2691,6 +2693,7 @@ async fn presence_same_day_increments_events_but_not_days(pool: PgPool) {
         beacon_id, business_id: biz_id, rssi: -65, dwell_minutes: 20,
         beacon_witness_hmac: hmac,
         app_attest_assertion: None,
+        app_attest_key_id:    None,
         device_identifier: None,
         started_at: t,
         ended_at:   t + chrono::Duration::minutes(20),
@@ -2698,7 +2701,7 @@ async fn presence_same_day_increments_events_but_not_days(pool: PgPool) {
 
     // Event 1.
     with_rls_tx!(&pool, user, |tx| {
-        presence_svc::record_beacon_dwell(&mut tx, &pool, user, dwell_req(hmac1, day), &bus)
+        presence_svc::record_beacon_dwell(&mut tx, &pool, user, dwell_req(hmac1, day), &bus, box_fraise_domain::auth::apple_attest::AppAttestPolicy::DISABLED)
             .await.expect("first dwell must succeed")
     });
 
@@ -2707,7 +2710,7 @@ async fn presence_same_day_increments_events_but_not_days(pool: PgPool) {
         presence_svc::record_beacon_dwell(
             &mut tx, &pool, user,
             dwell_req(hmac2, day + chrono::Duration::hours(2)),
-            &bus,
+            &bus, box_fraise_domain::auth::apple_attest::AppAttestPolicy::DISABLED,
         ).await.expect("second dwell must succeed")
     });
 
@@ -2972,11 +2975,12 @@ async fn full_bfip_protocol_journey(pool: PgPool) {
                     dwell_minutes: 20,
                     beacon_witness_hmac: hmac,
                     app_attest_assertion: None,
+                    app_attest_key_id:    None,
                     device_identifier: None,
                     started_at: started,
                     ended_at:   started + chrono::Duration::minutes(20),
                 },
-                &bus,
+                &bus, box_fraise_domain::auth::apple_attest::AppAttestPolicy::DISABLED,
             ).await.expect("Stage 4: presence dwell must succeed")
         });
     }

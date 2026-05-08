@@ -87,6 +87,14 @@ pub struct Config {
     pub db_min_connections:          u32,
     /// Hardening §6 — Postgres pool acquire-timeout seconds (default 5).
     pub db_acquire_timeout_secs:     u64,
+    /// Hardening §3a / Grade A item 2 — App Attest device-attestation gate
+    /// for presence/beacon writes. Default `false` so dev and CI run without
+    /// real iOS device assertions; production sets `true`.
+    pub app_attest_enabled:          bool,
+    /// App Attest RP ID — typically `"<TEAM_ID>.<BUNDLE_ID>"`. Required only
+    /// for the registration-time `parse_attestation` path; assertion-time
+    /// verification reads it from the stored attestation.
+    pub app_attest_app_id:           Option<String>,
 }
 
 impl Config {
@@ -197,6 +205,8 @@ impl Config {
             db_max_connections:          optional_parse("DB_MAX_CONNECTIONS", 20u32)?,
             db_min_connections:          optional_parse("DB_MIN_CONNECTIONS", 2u32)?,
             db_acquire_timeout_secs:     optional_parse("DB_ACQUIRE_TIMEOUT_SECS", 5u64)?,
+            app_attest_enabled:          optional_parse("APP_ATTEST_ENABLED", false)?,
+            app_attest_app_id:           optional("APP_ATTEST_APP_ID"),
         })
     }
 

@@ -94,6 +94,7 @@ pub struct RecordBeaconDwellRequest {
     pub dwell_minutes:         i32,
     pub beacon_witness_hmac:   String,
     pub app_attest_assertion:  Option<String>,
+    pub app_attest_key_id:     Option<String>,
     pub device_identifier:     Option<String>,
     pub started_at:            DateTime<Utc>,
     pub ended_at:              DateTime<Utc>,
@@ -107,6 +108,7 @@ pub struct RecordNfcTapRequest {
     pub business_id:          i32,
     pub beacon_witness_hmac:  String,
     pub app_attest_assertion: Option<String>,
+    pub app_attest_key_id:    Option<String>,
     pub device_identifier:    Option<String>,
 }
 

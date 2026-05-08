@@ -239,6 +239,8 @@ mod proptest_tests {
             db_max_connections:      20,
             db_min_connections:      2,
             db_acquire_timeout_secs: 5,
+            app_attest_enabled:      false,
+            app_attest_app_id:       None,
         }
     }
 
