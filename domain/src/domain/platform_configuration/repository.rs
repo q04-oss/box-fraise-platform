@@ -3,6 +3,7 @@ use sqlx::PgConnection;
 
 use crate::error::{AppResult, DomainError};
 use super::types::{
+    BusinessSubscriptionRow,
     PlatformConfigurationHistoryResponse, PlatformConfigurationHistoryRow,
     PlatformConfigurationRow, PLATFORM_CONFIG_COLS, DEFAULTS,
 };
@@ -83,6 +84,22 @@ pub async fn get_history_by_key(
          ORDER BY pch.changed_at DESC"
     )
     .bind(key)
+    .fetch_all(conn)
+    .await
+    .map_err(DomainError::Db)
+}
+
+/// List every `business_subscriptions` row for the admin billing dashboard.
+/// Temporary home — moves to `domain/src/domain/billing/repository.rs` once
+/// the Stripe webhook lands and `business_subscriptions` becomes write-side.
+pub async fn list_business_subscriptions(
+    conn: &mut PgConnection,
+) -> AppResult<Vec<BusinessSubscriptionRow>> {
+    sqlx::query_as(
+        "SELECT id, business_id, tier, stripe_subscription_id, current_period_end \
+         FROM business_subscriptions \
+         ORDER BY id"
+    )
     .fetch_all(conn)
     .await
     .map_err(DomainError::Db)

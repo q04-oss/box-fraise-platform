@@ -1,3 +1,4 @@
+#![deny(clippy::disallowed_methods)] // Grade A item 5 — raw SQL belongs in repository.rs (clippy.toml)
 use std::sync::Arc;
 
 use axum::{
@@ -11,12 +12,20 @@ use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
 
+use box_fraise_domain::{
+    domain::{
+        attestations::repository as attest_repo,
+        auth::repository as user_repo,
+        staff::repository as staff_repo,
+    },
+    transaction::{AdminRlsTransaction, RlsTransaction},
+    types::UserId,
+};
 use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::{auth::RequireUser, json::AppJson},
 };
-use box_fraise_domain::types::UserId;
 use super::{service, types::*};
 
 const MAX_EVIDENCE_BYTES: usize = 50 * 1024 * 1024; // 50 MB
@@ -326,26 +335,30 @@ fn require_storage(state: &AppState) -> Result<Arc<StorageClient>, AppError> {
         ))
 }
 
+/// Look up a visit's `staff_id` for authorization checks. The lookup runs
+/// inside an `AdminRlsTransaction` so the helper can see any visit
+/// regardless of the caller's user-scope RLS context — the caller then
+/// matches `staff_id` against `user_id` to decide ownership. Returns
+/// `NotFound` when the visit doesn't exist (preserved 404 semantics from
+/// the original raw-SQL helpers).
+async fn visit_staff_id(pool: &PgPool, visit_id: i32) -> Result<i32, AppError> {
+    let mut tx = AdminRlsTransaction::begin(pool).await?;
+    let visit = staff_repo::get_visit_by_id(tx.as_mut(), visit_id).await?
+        .ok_or(AppError::NotFound)?;
+    tx.commit().await?;
+    Ok(visit.staff_id)
+}
+
 /// Writer: only the assigned staff or a platform admin may upload evidence.
 async fn require_visit_writer(pool: &PgPool, visit_id: i32, user_id: UserId) -> Result<(), AppError> {
     let uid = i32::from(user_id);
-    let row: Option<(i32,)> = sqlx::query_as("SELECT staff_id FROM staff_visits WHERE id = $1")
-        .bind(visit_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(AppError::Db)?;
-    let staff_id = row.ok_or(AppError::NotFound)?.0;
-    if staff_id == uid {
-        return Ok(());
-    }
-    let is_admin: Option<bool> = sqlx::query_scalar("SELECT is_platform_admin FROM users WHERE id = $1")
-        .bind(uid)
-        .fetch_optional(pool)
-        .await
-        .map_err(AppError::Db)?;
-    if matches!(is_admin, Some(true)) {
-        return Ok(());
-    }
+    let staff_id = visit_staff_id(pool, visit_id).await?;
+    if staff_id == uid { return Ok(()); }
+
+    let user = user_repo::find_by_id(pool, user_id).await?
+        .ok_or(AppError::Unauthorized)?;
+    if user.is_platform_admin { return Ok(()); }
+
     Err(AppError::Forbidden)
 }
 
@@ -353,35 +366,19 @@ async fn require_visit_writer(pool: &PgPool, visit_id: i32, user_id: UserId) -> 
 /// tied to this visit.
 async fn require_visit_reader(pool: &PgPool, visit_id: i32, user_id: UserId) -> Result<(), AppError> {
     let uid = i32::from(user_id);
-    let row: Option<(i32,)> = sqlx::query_as("SELECT staff_id FROM staff_visits WHERE id = $1")
-        .bind(visit_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(AppError::Db)?;
-    let staff_id = row.ok_or(AppError::NotFound)?.0;
-    if staff_id == uid {
-        return Ok(());
-    }
-    let is_admin: Option<bool> = sqlx::query_scalar("SELECT is_platform_admin FROM users WHERE id = $1")
-        .bind(uid)
-        .fetch_optional(pool)
-        .await
-        .map_err(AppError::Db)?;
-    if matches!(is_admin, Some(true)) {
-        return Ok(());
-    }
-    let reviewer_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM visit_attestations \
-         WHERE visit_id = $1 \
-           AND (assigned_reviewer_1_id = $2 OR assigned_reviewer_2_id = $2)"
-    )
-    .bind(visit_id)
-    .bind(uid)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Db)?;
-    if reviewer_count > 0 {
-        return Ok(());
-    }
-    Err(AppError::Forbidden)
+    let staff_id = visit_staff_id(pool, visit_id).await?;
+    if staff_id == uid { return Ok(()); }
+
+    let user = user_repo::find_by_id(pool, user_id).await?
+        .ok_or(AppError::Unauthorized)?;
+    if user.is_platform_admin { return Ok(()); }
+
+    // Reviewer fall-through: count visit_attestations rows on this visit
+    // assigned to the caller. Runs in user-scope tx so the count respects
+    // the caller's own RLS view (defense in depth — a reviewer can't be
+    // probed for visits they aren't on).
+    let mut tx = RlsTransaction::begin(pool, uid).await?;
+    let count = attest_repo::count_reviewer_assignments_for_visit(tx.as_mut(), visit_id, uid).await?;
+    tx.commit().await?;
+    if count > 0 { Ok(()) } else { Err(AppError::Forbidden) }
 }

@@ -1,0 +1,18 @@
+# Clippy configuration for the box-fraise-server crate (Grade A item 5).
+#
+# Disallowed methods are paired with `#![deny(clippy::disallowed_methods)]`
+# at the top of each `server/src/domain/*/routes.rs` file. The lint is off
+# by default; it only fires inside files that opt in. That keeps legitimate
+# uses elsewhere in the crate (the `set_config` call in
+# `http/extractors/auth.rs`, the SSE event-payload lookup in `events.rs`,
+# the `/health` probe in `routes/meta.rs`, the retention-pruning daemon,
+# and the analytics `queries.rs` module) untouched.
+#
+# To extend the ban to a new file, add `#![deny(clippy::disallowed_methods)]`
+# at the top of the file.
+
+disallowed-methods = [
+    { path = "sqlx::query",        reason = "raw SQL forbidden in route handlers — move to repository.rs" },
+    { path = "sqlx::query_as",     reason = "raw SQL forbidden in route handlers — move to repository.rs" },
+    { path = "sqlx::query_scalar", reason = "raw SQL forbidden in route handlers — move to repository.rs" },
+]

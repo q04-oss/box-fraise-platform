@@ -1,3 +1,4 @@
+#![deny(clippy::disallowed_methods)] // Grade A item 5 — raw SQL belongs in repository.rs (clippy.toml)
 use axum::{
     extract::{Path, State},
     routing::{get, patch},
@@ -5,10 +6,11 @@ use axum::{
 };
 
 use box_fraise_domain::domain::platform_configuration::{
+    repository,
     service,
     types::{
-        FeatureFlagRow, PlatformConfigurationHistoryResponse, PlatformConfigurationResponse,
-        UpdateConfigurationRequest, UpdateFeatureFlagRequest,
+        BusinessSubscriptionRow, FeatureFlagRow, PlatformConfigurationHistoryResponse,
+        PlatformConfigurationResponse, UpdateConfigurationRequest, UpdateFeatureFlagRequest,
     },
 };
 use crate::{
@@ -160,28 +162,20 @@ pub async fn list_flags(
 pub async fn list_subscriptions(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
-) -> AppResult<Json<Vec<serde_json::Value>>> {
+) -> AppResult<Json<Vec<BusinessSubscriptionRow>>> {
     let user = box_fraise_domain::domain::auth::repository::find_by_id(&state.db, user_id)
         .await?
         .ok_or(box_fraise_domain::error::DomainError::Unauthorized)?;
     if !user.is_platform_admin {
         return Err(box_fraise_domain::error::DomainError::Forbidden.into());
     }
-    let rows: Vec<(i32, i32, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as(
-            "SELECT id, business_id, tier, stripe_subscription_id, current_period_end \
-             FROM business_subscriptions ORDER BY id"
-        )
-        .fetch_all(&state.db)
-        .await
-        .map_err(box_fraise_domain::error::DomainError::Db)?;
-    let out: Vec<serde_json::Value> = rows.into_iter().map(|(id, biz, tier, sub, end)| {
-        serde_json::json!({
-            "id": id, "business_id": biz, "tier": tier,
-            "stripe_subscription_id": sub, "current_period_end": end,
-        })
-    }).collect();
-    Ok(Json(out))
+    // Admin-only read — runs under AdminRlsTransaction so the lookup
+    // succeeds under both `fraise` (BYPASSRLS) and `app_user_prod`
+    // (RLS active via grant_app_admin role-switch).
+    let mut tx = box_fraise_domain::transaction::AdminRlsTransaction::begin(&state.db).await?;
+    let rows = repository::list_business_subscriptions(tx.as_mut()).await?;
+    tx.commit().await?;
+    Ok(Json(rows))
 }
 
 /// PATCH /api/admin/feature-flags/:flag_name — flip global enabled.

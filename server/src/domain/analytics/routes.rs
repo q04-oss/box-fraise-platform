@@ -1,3 +1,4 @@
+#![deny(clippy::disallowed_methods)] // Grade A item 5 — raw SQL belongs in repository.rs (clippy.toml)
 //! Analytics routes — every endpoint is `platform_admin`-only.
 //!
 //! There is no global "admin middleware" in this codebase; the established

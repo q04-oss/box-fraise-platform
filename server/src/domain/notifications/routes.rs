@@ -1,3 +1,4 @@
+#![deny(clippy::disallowed_methods)] // Grade A item 5 — raw SQL belongs in repository.rs (clippy.toml)
 //! `GET /api/notifications/stream` — authenticated SSE feed.
 
 use std::convert::Infallible;

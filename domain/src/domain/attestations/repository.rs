@@ -92,6 +92,27 @@ pub async fn get_attestations_by_user(
     .map_err(DomainError::Db)
 }
 
+/// Number of `visit_attestations` rows on this visit that have the given
+/// user assigned as either reviewer slot. Used by the
+/// `require_visit_reader` authz helper — non-zero means the caller may read
+/// the visit's evidence even if they aren't the assigned staff or admin.
+pub async fn count_reviewer_assignments_for_visit(
+    conn:     &mut PgConnection,
+    visit_id: i32,
+    user_id:  i32,
+) -> AppResult<i64> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM visit_attestations \
+         WHERE visit_id = $1 \
+           AND (assigned_reviewer_1_id = $2 OR assigned_reviewer_2_id = $2)"
+    )
+    .bind(visit_id)
+    .bind(user_id)
+    .fetch_one(conn)
+    .await
+    .map_err(DomainError::Db)
+}
+
 pub async fn get_pending_attestations_for_reviewer(
     conn:        &mut PgConnection,
     reviewer_id: i32,

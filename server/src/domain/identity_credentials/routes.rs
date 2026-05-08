@@ -1,3 +1,4 @@
+#![deny(clippy::disallowed_methods)] // Grade A item 5 — raw SQL belongs in repository.rs (clippy.toml)
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
