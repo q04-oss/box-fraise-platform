@@ -391,8 +391,8 @@ mod tests {
             types::{ArriveAtVisitRequest, GrantRoleRequest, ScheduleVisitRequest},
         },
         event_bus::EventBus,
-        transaction::AdminRlsTransaction,
         types::UserId,
+        with_admin_tx, with_rls_tx,
     };
     use sqlx::PgPool;
 
@@ -438,41 +438,41 @@ mod tests {
         let staff = create_user(pool, &SafeEmail().fake::<String>()).await;
         let loc   = create_location(pool).await;
 
-        let mut tx_grant = AdminRlsTransaction::begin(pool).await.unwrap();
-        staff_svc::grant_staff_role(
-            &mut tx_grant, pool, admin,
-            GrantRoleRequest {
-                user_id:      i32::from(staff),
-                role:         "delivery_staff".to_owned(),
-                location_id:  Some(loc),
-                expires_at:   None,
-                confirmed_by: None,
-            },
-            &bus,
-        ).await.unwrap();
-        tx_grant.commit().await.unwrap();
+        with_admin_tx!(pool, |tx| {
+            staff_svc::grant_staff_role(
+                &mut tx, pool, admin,
+                GrantRoleRequest {
+                    user_id:      i32::from(staff),
+                    role:         "delivery_staff".to_owned(),
+                    location_id:  Some(loc),
+                    expires_at:   None,
+                    confirmed_by: None,
+                },
+                &bus,
+            ).await.unwrap()
+        });
 
-        let mut tx_schedule = RlsTransaction::begin(pool, i32::from(staff)).await.unwrap();
-        let visit = staff_svc::schedule_visit(
-            &mut tx_schedule, pool, staff,
-            ScheduleVisitRequest {
-                location_id:              loc,
-                visit_type:               "support".to_owned(),
-                scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
-                window_hours:             Some(4),
-                support_booking_capacity: Some(capacity),
-                expected_box_count:       Some(0),
-            },
-            &bus,
-        ).await.unwrap();
-        tx_schedule.commit().await.unwrap();
+        let visit = with_rls_tx!(pool, staff, |tx| {
+            staff_svc::schedule_visit(
+                &mut tx, pool, staff,
+                ScheduleVisitRequest {
+                    location_id:              loc,
+                    visit_type:               "support".to_owned(),
+                    scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
+                    window_hours:             Some(4),
+                    support_booking_capacity: Some(capacity),
+                    expected_box_count:       Some(0),
+                },
+                &bus,
+            ).await.unwrap()
+        });
 
-        let mut tx_arrive = RlsTransaction::begin(pool, i32::from(staff)).await.unwrap();
-        staff_svc::arrive_at_visit(
-            &mut tx_arrive, pool, visit.id, staff,
-            ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
-        ).await.unwrap();
-        tx_arrive.commit().await.unwrap();
+        with_rls_tx!(pool, staff, |tx| {
+            staff_svc::arrive_at_visit(
+                &mut tx, pool, visit.id, staff,
+                ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+            ).await.unwrap()
+        });
 
         (admin, staff, loc, visit.id)
     }
@@ -509,10 +509,10 @@ mod tests {
         let (_, _, _, visit_id) = setup_with_support_visit(&pool, 5).await;
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let resp = create_booking(&mut tx, &pool, user, booking_req(visit_id), &bus)
-            .await.expect("create_booking must succeed");
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, user, |tx| {
+            create_booking(&mut tx, &pool, user, booking_req(visit_id), &bus)
+                .await.expect("create_booking must succeed")
+        });
 
         assert_eq!(resp.status, "booked");
         assert_eq!(resp.visit_id, visit_id);
@@ -529,10 +529,10 @@ mod tests {
         let user1 = create_user(&pool, &SafeEmail().fake::<String>()).await;
         let user2 = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let mut tx1 = RlsTransaction::begin(&pool, i32::from(user1)).await.unwrap();
-        create_booking(&mut tx1, &pool, user1, booking_req(visit_id), &bus)
-            .await.expect("first booking must succeed");
-        tx1.commit().await.unwrap();
+        with_rls_tx!(&pool, user1, |tx| {
+            create_booking(&mut tx, &pool, user1, booking_req(visit_id), &bus)
+                .await.expect("first booking must succeed")
+        });
 
         let mut tx2 = RlsTransaction::begin(&pool, i32::from(user2)).await.unwrap();
         let err = create_booking(&mut tx2, &pool, user2, booking_req(visit_id), &bus)
@@ -550,10 +550,10 @@ mod tests {
         let (_, _, _, visit_id) = setup_with_support_visit(&pool, 5).await;
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let mut tx1 = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        create_booking(&mut tx1, &pool, user, booking_req(visit_id), &bus)
-            .await.expect("first booking must succeed");
-        tx1.commit().await.unwrap();
+        with_rls_tx!(&pool, user, |tx| {
+            create_booking(&mut tx, &pool, user, booking_req(visit_id), &bus)
+                .await.expect("first booking must succeed")
+        });
 
         let mut tx2 = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
         let err = create_booking(&mut tx2, &pool, user, booking_req(visit_id), &bus)
@@ -573,14 +573,14 @@ mod tests {
         let (_, staff, _, visit_id) = setup_with_support_visit(&pool, 5).await;
         let user   = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
-        tx_create.commit().await.unwrap();
+        let booking = with_rls_tx!(&pool, user, |tx| {
+            create_booking(&mut tx, &pool, user, booking_req(visit_id), &bus).await.unwrap()
+        });
 
-        let mut tx_attend = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-        let resp = attend_booking(&mut tx_attend, &pool, booking.id, staff)
-            .await.expect("attend must succeed");
-        tx_attend.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, staff, |tx| {
+            attend_booking(&mut tx, &pool, booking.id, staff)
+                .await.expect("attend must succeed")
+        });
 
         assert_eq!(resp.status, "attended");
         assert!(resp.attended_at.is_some());
@@ -594,9 +594,9 @@ mod tests {
         let user     = create_user(&pool, &SafeEmail().fake::<String>()).await;
         let imposter = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
-        tx_create.commit().await.unwrap();
+        let booking = with_rls_tx!(&pool, user, |tx| {
+            create_booking(&mut tx, &pool, user, booking_req(visit_id), &bus).await.unwrap()
+        });
 
         let mut tx_attend = RlsTransaction::begin(&pool, i32::from(imposter)).await.unwrap();
         let err = attend_booking(&mut tx_attend, &pool, booking.id, imposter).await.unwrap_err();
@@ -614,18 +614,18 @@ mod tests {
         let (_, staff, _, visit_id) = setup_with_support_visit(&pool, 5).await;
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
-        tx_create.commit().await.unwrap();
+        let booking = with_rls_tx!(&pool, user, |tx| {
+            create_booking(&mut tx, &pool, user, booking_req(visit_id), &bus).await.unwrap()
+        });
 
-        let mut tx_attend = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-        attend_booking(&mut tx_attend, &pool, booking.id, staff).await.unwrap();
-        tx_attend.commit().await.unwrap();
+        with_rls_tx!(&pool, staff, |tx| {
+            attend_booking(&mut tx, &pool, booking.id, staff).await.unwrap()
+        });
 
-        let mut tx_resolve = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-        let resp = resolve_booking(&mut tx_resolve, &pool, booking.id, staff, resolve_req(true), &bus)
-            .await.expect("resolve must succeed");
-        tx_resolve.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, staff, |tx| {
+            resolve_booking(&mut tx, &pool, booking.id, staff, resolve_req(true), &bus)
+                .await.expect("resolve must succeed")
+        });
 
         assert_eq!(resp.status, "resolved");
         assert!(resp.resolved_at.is_some());
@@ -640,17 +640,17 @@ mod tests {
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
         let uid  = i32::from(user);
 
-        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
-        tx_create.commit().await.unwrap();
+        let booking = with_rls_tx!(&pool, user, |tx| {
+            create_booking(&mut tx, &pool, user, booking_req(visit_id), &bus).await.unwrap()
+        });
 
-        let mut tx_attend = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-        attend_booking(&mut tx_attend, &pool, booking.id, staff).await.unwrap();
-        tx_attend.commit().await.unwrap();
+        with_rls_tx!(&pool, staff, |tx| {
+            attend_booking(&mut tx, &pool, booking.id, staff).await.unwrap()
+        });
 
-        let mut tx_resolve = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-        resolve_booking(&mut tx_resolve, &pool, booking.id, staff, resolve_req(true), &bus).await.unwrap();
-        tx_resolve.commit().await.unwrap();
+        with_rls_tx!(&pool, staff, |tx| {
+            resolve_booking(&mut tx, &pool, booking.id, staff, resolve_req(true), &bus).await.unwrap()
+        });
 
         // Gift box history row created as platform-covered.
         let covered_by: String = sqlx::query_scalar(
@@ -680,17 +680,17 @@ mod tests {
              WHERE id = $1"
         ).bind(uid).execute(&pool).await.unwrap();
 
-        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
-        tx_create.commit().await.unwrap();
+        let booking = with_rls_tx!(&pool, user, |tx| {
+            create_booking(&mut tx, &pool, user, booking_req(visit_id), &bus).await.unwrap()
+        });
 
-        let mut tx_attend = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-        attend_booking(&mut tx_attend, &pool, booking.id, staff).await.unwrap();
-        tx_attend.commit().await.unwrap();
+        with_rls_tx!(&pool, staff, |tx| {
+            attend_booking(&mut tx, &pool, booking.id, staff).await.unwrap()
+        });
 
-        let mut tx_resolve = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-        resolve_booking(&mut tx_resolve, &pool, booking.id, staff, resolve_req(true), &bus).await.unwrap();
-        tx_resolve.commit().await.unwrap();
+        with_rls_tx!(&pool, staff, |tx| {
+            resolve_booking(&mut tx, &pool, booking.id, staff, resolve_req(true), &bus).await.unwrap()
+        });
 
         // Gift should be recorded as user-covered, not platform.
         let covered_by: String = sqlx::query_scalar(
@@ -709,14 +709,14 @@ mod tests {
         let (_, _, _, visit_id) = setup_with_support_visit(&pool, 5).await;
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
-        tx_create.commit().await.unwrap();
+        let booking = with_rls_tx!(&pool, user, |tx| {
+            create_booking(&mut tx, &pool, user, booking_req(visit_id), &bus).await.unwrap()
+        });
 
-        let mut tx_cancel = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let resp = cancel_booking(&mut tx_cancel, &pool, booking.id, user, cancel_req())
-            .await.expect("cancel must succeed for owner");
-        tx_cancel.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, user, |tx| {
+            cancel_booking(&mut tx, &pool, booking.id, user, cancel_req())
+                .await.expect("cancel must succeed for owner")
+        });
 
         assert_eq!(resp.status, "cancelled");
     }
@@ -728,13 +728,13 @@ mod tests {
         let (_, staff, _, visit_id) = setup_with_support_visit(&pool, 5).await;
         let user   = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
-        tx_create.commit().await.unwrap();
+        let booking = with_rls_tx!(&pool, user, |tx| {
+            create_booking(&mut tx, &pool, user, booking_req(visit_id), &bus).await.unwrap()
+        });
 
-        let mut tx_attend = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-        attend_booking(&mut tx_attend, &pool, booking.id, staff).await.unwrap();
-        tx_attend.commit().await.unwrap();
+        with_rls_tx!(&pool, staff, |tx| {
+            attend_booking(&mut tx, &pool, booking.id, staff).await.unwrap()
+        });
 
         let mut tx_cancel = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
         let err = cancel_booking(&mut tx_cancel, &pool, booking.id, user, cancel_req()).await.unwrap_err();
@@ -754,9 +754,9 @@ mod tests {
         let owner    = create_user(&pool, &SafeEmail().fake::<String>()).await;
         let attacker = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let mut tx_create = RlsTransaction::begin(&pool, i32::from(owner)).await.unwrap();
-        let booking = create_booking(&mut tx_create, &pool, owner, booking_req(visit_id), &bus).await.unwrap();
-        tx_create.commit().await.unwrap();
+        let booking = with_rls_tx!(&pool, owner, |tx| {
+            create_booking(&mut tx, &pool, owner, booking_req(visit_id), &bus).await.unwrap()
+        });
 
         let mut tx_cancel = RlsTransaction::begin(&pool, i32::from(attacker)).await.unwrap();
         let err = cancel_booking(&mut tx_cancel, &pool, booking.id, attacker, cancel_req()).await.unwrap_err();
@@ -773,13 +773,13 @@ mod tests {
         let user     = create_user(&pool, &SafeEmail().fake::<String>()).await;
         let attacker = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
-        tx_create.commit().await.unwrap();
+        let booking = with_rls_tx!(&pool, user, |tx| {
+            create_booking(&mut tx, &pool, user, booking_req(visit_id), &bus).await.unwrap()
+        });
 
-        let mut tx_attend = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-        attend_booking(&mut tx_attend, &pool, booking.id, staff).await.unwrap();
-        tx_attend.commit().await.unwrap();
+        with_rls_tx!(&pool, staff, |tx| {
+            attend_booking(&mut tx, &pool, booking.id, staff).await.unwrap()
+        });
 
         let mut tx_resolve = RlsTransaction::begin(&pool, i32::from(attacker)).await.unwrap();
         let err = resolve_booking(&mut tx_resolve, &pool, booking.id, attacker, resolve_req(false), &bus)
@@ -797,9 +797,9 @@ mod tests {
         let user1    = create_user(&pool, &SafeEmail().fake::<String>()).await;
         let attacker = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let mut tx1 = RlsTransaction::begin(&pool, i32::from(user1)).await.unwrap();
-        create_booking(&mut tx1, &pool, user1, booking_req(visit_id), &bus).await.unwrap();
-        tx1.commit().await.unwrap();
+        with_rls_tx!(&pool, user1, |tx| {
+            create_booking(&mut tx, &pool, user1, booking_req(visit_id), &bus).await.unwrap()
+        });
 
         let mut tx2 = RlsTransaction::begin(&pool, i32::from(attacker)).await.unwrap();
         let err = create_booking(&mut tx2, &pool, attacker, booking_req(visit_id), &bus)
@@ -816,9 +816,9 @@ mod tests {
         let (_, _, _, visit_id) = setup_with_support_visit(&pool, 5).await;
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let mut tx1 = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        create_booking(&mut tx1, &pool, user, booking_req(visit_id), &bus).await.unwrap();
-        tx1.commit().await.unwrap();
+        with_rls_tx!(&pool, user, |tx| {
+            create_booking(&mut tx, &pool, user, booking_req(visit_id), &bus).await.unwrap()
+        });
 
         let mut tx2 = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
         let err = create_booking(&mut tx2, &pool, user, booking_req(visit_id), &bus)

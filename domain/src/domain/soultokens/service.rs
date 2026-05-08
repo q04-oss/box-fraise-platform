@@ -668,6 +668,7 @@ mod tests {
         },
         event_bus::EventBus,
         types::UserId,
+        with_rls_tx,
     };
     use sqlx::PgPool;
 
@@ -789,13 +790,13 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
-        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
-        let resp = issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, test_key_pair(), &bus,
-        ).await.expect("issue_soultoken must succeed");
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, test_key_pair(), &bus,
+            ).await.expect("issue_soultoken must succeed")
+        });
 
         // Display code format: XXXX-XXXX-XXXX
         let re = regex::Regex::new(r"^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$").unwrap();
@@ -838,13 +839,13 @@ mod tests {
         let bus = EventBus::new();
         let mut rx = bus.subscribe();
 
-        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
-        let resp = issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, test_key_pair(), &bus,
-        ).await.expect("issue_soultoken must succeed");
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, test_key_pair(), &bus,
+            ).await.expect("issue_soultoken must succeed")
+        });
 
         // Receive must succeed — the bus is in-process and capacity 256.
         let event = rx.try_recv().expect("SoultokenIssued event must be published");
@@ -890,13 +891,13 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
-        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
-        issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, test_key_pair(), &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, test_key_pair(), &bus,
+            ).await.unwrap()
+        });
 
         let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let err = issue_soultoken(
@@ -957,13 +958,13 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
-        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
-        issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, test_key_pair(), &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, test_key_pair(), &bus,
+            ).await.unwrap()
+        });
 
         let resp = get_my_soultoken(&pool, user_id).await.unwrap();
 
@@ -994,23 +995,23 @@ mod tests {
         .fetch_one(&pool).await.unwrap();
         let admin = UserId::from(admin_id);
 
-        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
-        let token = issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, test_key_pair(), &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        let token = with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, test_key_pair(), &bus,
+            ).await.unwrap()
+        });
 
-        let mut tx = begin_tx(&pool, admin_id).await;
-        revoke_soultoken(
-            &mut tx, &pool, token.id, admin,
-            RevokeSoultokenRequest {
-                revocation_reason:   "stripe_flag".to_owned(),
-                revocation_visit_id: None,
-            },
-        ).await.expect("revoke must succeed");
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, admin, |tx| {
+            revoke_soultoken(
+                &mut tx, &pool, token.id, admin,
+                RevokeSoultokenRequest {
+                    revocation_reason:   "stripe_flag".to_owned(),
+                    revocation_visit_id: None,
+                },
+            ).await.expect("revoke must succeed")
+        });
 
         let status: String = sqlx::query_scalar(
             "SELECT verification_status FROM users WHERE id = $1"
@@ -1030,13 +1031,13 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
-        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
-        let token = issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, test_key_pair(), &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        let token = with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, test_key_pair(), &bus,
+            ).await.unwrap()
+        });
 
         // Attempt surrender with non-existent visit
         let mut tx = begin_tx(&pool, i32::from(user_id)).await;
@@ -1060,23 +1061,23 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
-        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
-        let token = issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, test_key_pair(), &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        let token = with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, test_key_pair(), &bus,
+            ).await.unwrap()
+        });
 
         let before_renewal = token.expires_at;
 
-        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
-        let renewal = renew_soultoken(
-            &mut tx, &pool, user_id,
-            RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
-            test_key_pair(), &bus,
-        ).await.expect("renew must succeed");
-        tx.commit().await.unwrap();
+        let renewal = with_rls_tx!(&pool, user_id, |tx| {
+            renew_soultoken(
+                &mut tx, &pool, user_id,
+                RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
+                test_key_pair(), &bus,
+            ).await.expect("renew must succeed")
+        });
 
         assert!(renewal.new_expires_at > before_renewal,
             "new_expires_at must be after previous expires_at");
@@ -1096,23 +1097,23 @@ mod tests {
         .fetch_one(&pool).await.unwrap();
         let admin = UserId::from(admin_id);
 
-        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
-        let token = issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, test_key_pair(), &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        let token = with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, test_key_pair(), &bus,
+            ).await.unwrap()
+        });
 
-        let mut tx = begin_tx(&pool, admin_id).await;
-        revoke_soultoken(
-            &mut tx, &pool, token.id, admin,
-            RevokeSoultokenRequest {
-                revocation_reason:   "platform_ban".to_owned(),
-                revocation_visit_id: None,
-            },
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, admin, |tx| {
+            revoke_soultoken(
+                &mut tx, &pool, token.id, admin,
+                RevokeSoultokenRequest {
+                    revocation_reason:   "platform_ban".to_owned(),
+                    revocation_visit_id: None,
+                },
+            ).await.unwrap()
+        });
 
         let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let err = renew_soultoken(
@@ -1133,13 +1134,13 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
-        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
-        let token = issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, test_key_pair(), &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        let token = with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, test_key_pair(), &bus,
+            ).await.unwrap()
+        });
 
         // Attacker is a regular user (no admin or reviewer role)
         let (attacker_id,): (i32,) = sqlx::query_as(
@@ -1166,13 +1167,13 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
-        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
-        let token = issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, test_key_pair(), &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        let token = with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, test_key_pair(), &bus,
+            ).await.unwrap()
+        });
 
         let (attacker_id,): (i32,) = sqlx::query_as(
             "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
@@ -1198,13 +1199,13 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
-        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
-        issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, test_key_pair(), &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, test_key_pair(), &bus,
+            ).await.unwrap()
+        });
 
         // Backdate expires_at to the past
         sqlx::query(
@@ -1251,13 +1252,13 @@ mod tests {
         let bus = EventBus::new();
         let kp  = Ed25519KeyPair::generate();
 
-        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
-        issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, &kp, &bus,
-        ).await.expect("issue_soultoken must succeed");
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, &kp, &bus,
+            ).await.expect("issue_soultoken must succeed")
+        });
 
         let uid = i32::from(user_id);
         let (token_uuid, row, signature) = fetch_signing_inputs(&pool, uid).await;
@@ -1280,13 +1281,13 @@ mod tests {
         let bus = EventBus::new();
         let kp  = Ed25519KeyPair::generate();
 
-        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
-        issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, &kp, &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, &kp, &bus,
+            ).await.unwrap()
+        });
 
         let uid = i32::from(user_id);
         let (token_uuid, row, signature) = fetch_signing_inputs(&pool, uid).await;
@@ -1312,23 +1313,23 @@ mod tests {
         let kp  = Ed25519KeyPair::generate();
         let uid = i32::from(user_id);
 
-        let mut tx = begin_tx(&pool, uid).await;
-        issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, &kp, &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, &kp, &bus,
+            ).await.unwrap()
+        });
 
         let (token_uuid, row_before, sig_before) = fetch_signing_inputs(&pool, uid).await;
 
-        let mut tx = begin_tx(&pool, uid).await;
-        renew_soultoken(
-            &mut tx, &pool, user_id,
-            RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
-            &kp, &bus,
-        ).await.expect("renew must succeed");
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, user_id, |tx| {
+            renew_soultoken(
+                &mut tx, &pool, user_id,
+                RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
+                &kp, &bus,
+            ).await.expect("renew must succeed")
+        });
 
         let (_uuid_after, row_after, sig_after) = fetch_signing_inputs(&pool, uid).await;
 
@@ -1389,23 +1390,23 @@ mod tests {
         let kp  = Ed25519KeyPair::generate();
         let uid = i32::from(user_id);
 
-        let mut tx = begin_tx(&pool, uid).await;
-        issue_soultoken(
-            &mut tx, &pool, user_id,
-            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-            TEST_HMAC_KEY, &kp, &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, user_id, |tx| {
+            issue_soultoken(
+                &mut tx, &pool, user_id,
+                IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+                TEST_HMAC_KEY, &kp, &bus,
+            ).await.unwrap()
+        });
 
         let (token_uuid, _row_before, sig_before) = fetch_signing_inputs(&pool, uid).await;
 
-        let mut tx = begin_tx(&pool, uid).await;
-        renew_soultoken(
-            &mut tx, &pool, user_id,
-            RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
-            &kp, &bus,
-        ).await.expect("renew must succeed");
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, user_id, |tx| {
+            renew_soultoken(
+                &mut tx, &pool, user_id,
+                RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
+                &kp, &bus,
+            ).await.expect("renew must succeed")
+        });
 
         let (_, row_after, sig_after) = fetch_signing_inputs(&pool, uid).await;
 

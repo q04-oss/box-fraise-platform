@@ -348,6 +348,7 @@ mod tests {
         domain::soultokens::{service as soultoken_svc, types::IssueSoultokenRequest},
         event_bus::EventBus,
         types::UserId,
+        with_rls_tx,
     };
     use sqlx::PgPool;
 
@@ -686,9 +687,9 @@ mod tests {
             "SELECT id FROM attestation_tokens WHERE token_hash = $1"
         ).bind(&hash).fetch_one(&pool).await.unwrap();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        revoke_my_token(&mut tx, &pool, token_id, user).await.expect("revoke must succeed");
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, user, |tx| {
+            revoke_my_token(&mut tx, &pool, token_id, user).await.expect("revoke must succeed");
+        });
 
         let result = verify_token(&pool, verify_req(&issued.raw_token), None, None, &bus)
             .await.unwrap();

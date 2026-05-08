@@ -501,6 +501,7 @@ mod tests {
         event_bus::EventBus,
         transaction::RlsTransaction,
         types::UserId,
+        with_rls_tx,
     };
     use chrono::{DateTime, Duration, Utc};
     use sqlx::PgPool;
@@ -592,13 +593,13 @@ mod tests {
         let hmac = derive_witness_hmac(&secret, biz_id, now.date_naive(), i32::from(uid));
         let bus  = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let resp = record_beacon_dwell(
-            &mut tx, &pool, uid,
-            dwell_req(beacon_id, biz_id, -65, 20, hmac, now),
-            &bus,
-        ).await.expect("qualifying dwell must succeed");
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, uid, |tx| {
+            record_beacon_dwell(
+                &mut tx, &pool, uid,
+                dwell_req(beacon_id, biz_id, -65, 20, hmac, now),
+                &bus,
+            ).await.expect("qualifying dwell must succeed")
+        });
 
         assert_eq!(resp.event_count, 1);
         assert_eq!(resp.days_count,  1);
@@ -618,13 +619,13 @@ mod tests {
         let bus  = EventBus::new();
 
         // minimum_rssi_threshold is -70 — send -80 (below threshold)
-        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let resp = record_beacon_dwell(
-            &mut tx, &pool, uid,
-            dwell_req(beacon_id, biz_id, -80, 20, hmac, now),
-            &bus,
-        ).await.expect("call must succeed");
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, uid, |tx| {
+            record_beacon_dwell(
+                &mut tx, &pool, uid,
+                dwell_req(beacon_id, biz_id, -80, 20, hmac, now),
+                &bus,
+            ).await.expect("call must succeed")
+        });
 
         assert_eq!(resp.event_count, 0, "threshold must not advance for rejected event");
 
@@ -651,13 +652,13 @@ mod tests {
         let hmac = derive_witness_hmac(&secret, biz_id, now.date_naive(), i32::from(uid));
         let bus  = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let resp = record_beacon_dwell(
-            &mut tx, &pool, uid,
-            dwell_req(beacon_id, biz_id, -65, 10, hmac, now),  // 10 mins < 15 min minimum
-            &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, uid, |tx| {
+            record_beacon_dwell(
+                &mut tx, &pool, uid,
+                dwell_req(beacon_id, biz_id, -65, 10, hmac, now),  // 10 mins < 15 min minimum
+                &bus,
+            ).await.unwrap()
+        });
 
         assert_eq!(resp.event_count, 0);
 
@@ -682,13 +683,13 @@ mod tests {
         let bad_hmac = "deadbeef".repeat(8); // wrong HMAC — 64 chars, all wrong
         let bus  = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let resp = record_beacon_dwell(
-            &mut tx, &pool, uid,
-            dwell_req(beacon_id, biz_id, -65, 20, bad_hmac, now),
-            &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, uid, |tx| {
+            record_beacon_dwell(
+                &mut tx, &pool, uid,
+                dwell_req(beacon_id, biz_id, -65, 20, bad_hmac, now),
+                &bus,
+            ).await.unwrap()
+        });
 
         assert_eq!(resp.event_count, 0);
 
@@ -719,20 +720,20 @@ mod tests {
 
         // First dwell on day.
         let hmac1 = derive_witness_hmac(&secret, biz_id, day.date_naive(), i32::from(uid));
-        let mut tx1 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        record_beacon_dwell(&mut tx1, &pool, uid, dwell_req(beacon_id, biz_id, -65, 20, hmac1, day), &bus)
-            .await.unwrap();
-        tx1.commit().await.unwrap();
+        with_rls_tx!(&pool, uid, |tx| {
+            record_beacon_dwell(&mut tx, &pool, uid, dwell_req(beacon_id, biz_id, -65, 20, hmac1, day), &bus)
+                .await.unwrap()
+        });
 
         // Second dwell — same calendar date.
         let hmac2 = derive_witness_hmac(&secret, biz_id, day.date_naive(), i32::from(uid));
-        let mut tx2 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let resp = record_beacon_dwell(
-            &mut tx2, &pool, uid,
-            dwell_req(beacon_id, biz_id, -65, 20, hmac2, day + Duration::hours(2)),
-            &bus,
-        ).await.unwrap();
-        tx2.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, uid, |tx| {
+            record_beacon_dwell(
+                &mut tx, &pool, uid,
+                dwell_req(beacon_id, biz_id, -65, 20, hmac2, day + Duration::hours(2)),
+                &bus,
+            ).await.unwrap()
+        });
 
         assert_eq!(resp.event_count, 2, "two events recorded");
         assert_eq!(resp.days_count,  1, "only one distinct day — days_count must not double-count");
@@ -753,13 +754,13 @@ mod tests {
             let hmac = derive_witness_hmac(
                 &secret, biz_id, started_at.date_naive(), i32::from(uid),
             );
-            let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-            record_beacon_dwell(
-                &mut tx, &pool, uid,
-                dwell_req(beacon_id, biz_id, -65, 20, hmac, started_at),
-                &bus,
-            ).await.unwrap();
-            tx.commit().await.unwrap();
+            with_rls_tx!(&pool, uid, |tx| {
+                record_beacon_dwell(
+                    &mut tx, &pool, uid,
+                    dwell_req(beacon_id, biz_id, -65, 20, hmac, started_at),
+                    &bus,
+                ).await.unwrap()
+            });
         }
 
         let resp = get_presence_status(&pool, uid).await.unwrap();
@@ -825,15 +826,15 @@ mod tests {
         let hmac   = derive_witness_hmac(&secret, biz_id, Utc::now().date_naive(), i32::from(uid));
         let bus    = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let resp = record_nfc_tap(&mut tx, &pool, uid, RecordNfcTapRequest {
-            box_id,
-            business_id:          biz_id,
-            beacon_witness_hmac:  hmac,
-            app_attest_assertion: None,
-            device_identifier:    None,
-        }, &bus).await.expect("NFC tap must succeed");
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, uid, |tx| {
+            record_nfc_tap(&mut tx, &pool, uid, RecordNfcTapRequest {
+                box_id,
+                business_id:          biz_id,
+                beacon_witness_hmac:  hmac,
+                app_attest_assertion: None,
+                device_identifier:    None,
+            }, &bus).await.expect("NFC tap must succeed")
+        });
 
         assert_eq!(resp.event_count, 1, "threshold must advance after NFC tap");
 
@@ -866,9 +867,9 @@ mod tests {
 
         // First tap succeeds.
         let bus1 = EventBus::new();
-        let mut tx1 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        record_nfc_tap(&mut tx1, &pool, uid, make_req(), &bus1).await.expect("first tap must succeed");
-        tx1.commit().await.unwrap();
+        with_rls_tx!(&pool, uid, |tx| {
+            record_nfc_tap(&mut tx, &pool, uid, make_req(), &bus1).await.expect("first tap must succeed")
+        });
 
         // Second tap on same box must fail.
         let bus2 = EventBus::new();
@@ -894,11 +895,11 @@ mod tests {
         let hmac = derive_witness_hmac(&secret, biz_id, now.date_naive(), i32::from(uid));
         let bus  = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        record_beacon_dwell(
-            &mut tx, &pool, uid, dwell_req(beacon_id, biz_id, -65, 20, hmac, now), &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, uid, |tx| {
+            record_beacon_dwell(
+                &mut tx, &pool, uid, dwell_req(beacon_id, biz_id, -65, 20, hmac, now), &bus,
+            ).await.unwrap()
+        });
 
         let status = get_presence_status(&pool, uid).await.unwrap();
         assert_eq!(status.event_count, 1);
@@ -922,13 +923,13 @@ mod tests {
         let fake_hmac = derive_witness_hmac(fake_key, biz_id, now.date_naive(), i32::from(uid));
         let bus = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let resp = record_beacon_dwell(
-            &mut tx, &pool, uid,
-            dwell_req(beacon_id, biz_id, -65, 20, fake_hmac, now),
-            &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, uid, |tx| {
+            record_beacon_dwell(
+                &mut tx, &pool, uid,
+                dwell_req(beacon_id, biz_id, -65, 20, fake_hmac, now),
+                &bus,
+            ).await.unwrap()
+        });
 
         assert_eq!(resp.event_count, 0, "fake HMAC must not advance threshold");
 
@@ -960,9 +961,9 @@ mod tests {
             device_identifier:    None,
         };
 
-        let mut tx1 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        record_nfc_tap(&mut tx1, &pool, uid, make_req(), &bus).await.expect("first tap must succeed");
-        tx1.commit().await.unwrap();
+        with_rls_tx!(&pool, uid, |tx| {
+            record_nfc_tap(&mut tx, &pool, uid, make_req(), &bus).await.expect("first tap must succeed")
+        });
 
         let mut tx2 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         let err = record_nfc_tap(&mut tx2, &pool, uid, make_req(), &bus)

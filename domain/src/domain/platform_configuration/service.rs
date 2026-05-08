@@ -317,6 +317,7 @@ pub async fn set_feature_flag_enabled(
 mod tests {
     use super::*;
     use crate::types::UserId;
+    use crate::with_admin_tx;
     use sqlx::PgPool;
 
     async fn create_admin(pool: &PgPool, email: &str) -> UserId {
@@ -342,9 +343,9 @@ mod tests {
         initialize_defaults(&pool).await.expect("seed must succeed");
         let admin = create_admin(&pool, &SafeEmail().fake::<String>()).await;
 
-        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
-        let configs = get_all_configuration(&mut tx, &pool, admin).await.unwrap();
-        tx.commit().await.unwrap();
+        let configs = with_admin_tx!(&pool, |tx| {
+            get_all_configuration(&mut tx, &pool, admin).await.unwrap()
+        });
         assert_eq!(configs.len(), 18, "must have all 18 default keys (14 BFIP §15 + 4 rate-limit cleanup #8)");
 
         // Spot-check values.
@@ -375,12 +376,12 @@ mod tests {
         let admin = create_admin(&pool, &SafeEmail().fake::<String>()).await;
         let uid   = i32::from(admin);
 
-        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
-        let resp = update_configuration(
-            &mut tx, &pool, "cooling_period_days", admin,
-            UpdateConfigurationRequest { value: "14".to_string() },
-        ).await.expect("update must succeed");
-        tx.commit().await.unwrap();
+        let resp = with_admin_tx!(&pool, |tx| {
+            update_configuration(
+                &mut tx, &pool, "cooling_period_days", admin,
+                UpdateConfigurationRequest { value: "14".to_string() },
+            ).await.expect("update must succeed")
+        });
 
         assert_eq!(resp.value, "14");
 
@@ -436,15 +437,15 @@ mod tests {
         initialize_defaults(&pool).await.unwrap();
         let admin = create_admin(&pool, &SafeEmail().fake::<String>()).await;
 
-        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
-        update_configuration(&mut tx, &pool, "cooling_period_days", admin,
-            UpdateConfigurationRequest { value: "14".to_string() }).await.unwrap();
-        tx.commit().await.unwrap();
+        with_admin_tx!(&pool, |tx| {
+            update_configuration(&mut tx, &pool, "cooling_period_days", admin,
+                UpdateConfigurationRequest { value: "14".to_string() }).await.unwrap();
+        });
 
-        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
-        update_configuration(&mut tx, &pool, "cooling_period_days", admin,
-            UpdateConfigurationRequest { value: "21".to_string() }).await.unwrap();
-        tx.commit().await.unwrap();
+        with_admin_tx!(&pool, |tx| {
+            update_configuration(&mut tx, &pool, "cooling_period_days", admin,
+                UpdateConfigurationRequest { value: "21".to_string() }).await.unwrap();
+        });
 
         let mut conn = pool.acquire().await.unwrap();
         let hist = repository::get_history_by_key(&mut conn, "cooling_period_days").await.unwrap();
@@ -474,10 +475,10 @@ mod tests {
         let admin = create_admin(&pool, &SafeEmail().fake::<String>()).await;
 
         for v in &["10", "20", "30"] {
-            let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
-            update_configuration(&mut tx, &pool, "cooling_period_days", admin,
-                UpdateConfigurationRequest { value: v.to_string() }).await.unwrap();
-            tx.commit().await.unwrap();
+            with_admin_tx!(&pool, |tx| {
+                update_configuration(&mut tx, &pool, "cooling_period_days", admin,
+                    UpdateConfigurationRequest { value: v.to_string() }).await.unwrap();
+            });
         }
 
         let hist = get_configuration_history(&pool, "cooling_period_days", admin)

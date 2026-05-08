@@ -378,7 +378,7 @@ pub async fn get_cooling_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{event_bus::EventBus, transaction::RlsTransaction, types::UserId};
+    use crate::{event_bus::EventBus, transaction::RlsTransaction, types::UserId, with_rls_tx};
     use chrono::Duration;
     use sqlx::PgPool;
 
@@ -455,13 +455,13 @@ mod tests {
         let uid = create_registered_user(&pool, &SafeEmail().fake::<String>()).await;
         let bus = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let resp = initiate_verification(
-            &mut tx, &pool, uid,
-            InitiateVerificationRequest { stripe_session_id: "vs_test_abc123".into() },
-            &bus,
-        ).await.expect("initiate_verification must succeed");
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, uid, |tx| {
+            initiate_verification(
+                &mut tx, &pool, uid,
+                InitiateVerificationRequest { stripe_session_id: "vs_test_abc123".into() },
+                &bus,
+            ).await.expect("initiate_verification must succeed")
+        });
 
         assert_eq!(resp.credential_type, "stripe_identity");
         assert_eq!(resp.external_session_id.as_deref(), Some("vs_test_abc123"));
@@ -482,13 +482,13 @@ mod tests {
         let bus  = EventBus::new();
         let sess = "vs_test_dup999";
 
-        let mut tx1 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        initiate_verification(
-            &mut tx1, &pool, uid,
-            InitiateVerificationRequest { stripe_session_id: sess.into() },
-            &bus,
-        ).await.unwrap();
-        tx1.commit().await.unwrap();
+        with_rls_tx!(&pool, uid, |tx| {
+            initiate_verification(
+                &mut tx, &pool, uid,
+                InitiateVerificationRequest { stripe_session_id: sess.into() },
+                &bus,
+            ).await.unwrap();
+        });
 
         // Registering the same session again must be rejected.
         let uid2 = create_registered_user(&pool, &SafeEmail().fake::<String>()).await;
@@ -537,13 +537,13 @@ mod tests {
         let uid = create_registered_user(&pool, &SafeEmail().fake::<String>()).await;
         let bus = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let resp = initiate_verification(
-            &mut tx, &pool, uid,
-            InitiateVerificationRequest { stripe_session_id: "vs_webhook_test".into() },
-            &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, uid, |tx| {
+            initiate_verification(
+                &mut tx, &pool, uid,
+                InitiateVerificationRequest { stripe_session_id: "vs_webhook_test".into() },
+                &bus,
+            ).await.unwrap()
+        });
 
         let payload = serde_json::to_vec(&serde_json::json!({
             "type": "identity.verification_session.verified",
@@ -594,13 +594,13 @@ mod tests {
         let cred_id = create_past_cooling_credential(&pool, i32::from(uid)).await;
         let bus    = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let resp = record_app_open(
-            &mut tx, &pool, uid,
-            RecordAppOpenRequest { credential_id: cred_id, device_identifier: None, app_attest_assertion: None },
-            &bus,
-        ).await.expect("record_app_open must succeed");
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, uid, |tx| {
+            record_app_open(
+                &mut tx, &pool, uid,
+                RecordAppOpenRequest { credential_id: cred_id, device_identifier: None, app_attest_assertion: None },
+                &bus,
+            ).await.expect("record_app_open must succeed")
+        });
 
         assert_eq!(resp.days_completed, 1);
     }
@@ -618,13 +618,13 @@ mod tests {
             app_attest_assertion: None,
         };
 
-        let mut tx1 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let r1 = record_app_open(&mut tx1, &pool, uid, req(), &bus).await.unwrap();
-        tx1.commit().await.unwrap();
+        let r1 = with_rls_tx!(&pool, uid, |tx| {
+            record_app_open(&mut tx, &pool, uid, req(), &bus).await.unwrap()
+        });
 
-        let mut tx2 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let r2 = record_app_open(&mut tx2, &pool, uid, req(), &bus).await.unwrap();
-        tx2.commit().await.unwrap();
+        let r2 = with_rls_tx!(&pool, uid, |tx| {
+            record_app_open(&mut tx, &pool, uid, req(), &bus).await.unwrap()
+        });
 
         assert_eq!(r1.days_completed, 1, "first open counts as day 1");
         assert_eq!(r2.days_completed, 1, "same-day repeat must not advance count");
@@ -641,13 +641,13 @@ mod tests {
         insert_cooling_event_on_day(&pool, i32::from(uid), cred_id, -2).await;
         insert_cooling_event_on_day(&pool, i32::from(uid), cred_id, -1).await;
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let resp = record_app_open(
-            &mut tx, &pool, uid,
-            RecordAppOpenRequest { credential_id: cred_id, device_identifier: None, app_attest_assertion: None },
-            &bus,
-        ).await.unwrap();
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, uid, |tx| {
+            record_app_open(
+                &mut tx, &pool, uid,
+                RecordAppOpenRequest { credential_id: cred_id, device_identifier: None, app_attest_assertion: None },
+                &bus,
+            ).await.unwrap()
+        });
 
         assert_eq!(resp.days_completed, 3);
         assert!(resp.is_complete);
@@ -695,13 +695,13 @@ mod tests {
         // Complete the cooling.
         insert_cooling_event_on_day(&pool, i32::from(uid), cred_id, -2).await;
         insert_cooling_event_on_day(&pool, i32::from(uid), cred_id, -1).await;
-        let mut tx0 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        record_app_open(
-            &mut tx0, &pool, uid,
-            RecordAppOpenRequest { credential_id: cred_id, device_identifier: None, app_attest_assertion: None },
-            &bus,
-        ).await.unwrap();
-        tx0.commit().await.unwrap();
+        with_rls_tx!(&pool, uid, |tx| {
+            record_app_open(
+                &mut tx, &pool, uid,
+                RecordAppOpenRequest { credential_id: cred_id, device_identifier: None, app_attest_assertion: None },
+                &bus,
+            ).await.unwrap();
+        });
 
         // Get count before calling again.
         let count_before: i64 = sqlx::query_scalar(
@@ -710,13 +710,13 @@ mod tests {
         .bind(cred_id).fetch_one(&pool).await.unwrap();
 
         // Second call after completion must succeed and not insert a new event.
-        let mut tx1 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
-        let resp = record_app_open(
-            &mut tx1, &pool, uid,
-            RecordAppOpenRequest { credential_id: cred_id, device_identifier: None, app_attest_assertion: None },
-            &bus,
-        ).await.unwrap();
-        tx1.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, uid, |tx| {
+            record_app_open(
+                &mut tx, &pool, uid,
+                RecordAppOpenRequest { credential_id: cred_id, device_identifier: None, app_attest_assertion: None },
+                &bus,
+            ).await.unwrap()
+        });
         assert!(resp.is_complete);
 
         let count_after: i64 = sqlx::query_scalar(

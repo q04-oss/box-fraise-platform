@@ -410,8 +410,9 @@ mod tests {
             types::{ArriveAtVisitRequest, GrantRoleRequest, ScheduleVisitRequest},
         },
         event_bus::EventBus,
-        transaction::{AdminRlsTransaction, RlsTransaction},
+        transaction::RlsTransaction,
         types::UserId,
+        with_admin_tx, with_rls_tx,
     };
     use sqlx::PgPool;
 
@@ -516,8 +517,7 @@ mod tests {
         let loc_id = create_location(pool).await;
         let biz_id = create_business(pool, loc_id, i32::from(admin)).await;
 
-        {
-            let mut tx = AdminRlsTransaction::begin(pool).await.unwrap();
+        with_admin_tx!(pool, |tx| {
             staff_svc::grant_staff_role(
                 &mut tx, pool, admin,
                 GrantRoleRequest {
@@ -528,13 +528,11 @@ mod tests {
                     confirmed_by: None,
                 },
                 &bus,
-            ).await.unwrap();
-            tx.commit().await.unwrap();
-        }
+            ).await.unwrap()
+        });
 
-        let visit = {
-            let mut tx = RlsTransaction::begin(pool, i32::from(staff)).await.unwrap();
-            let visit = staff_svc::schedule_visit(
+        let visit = with_rls_tx!(pool, staff, |tx| {
+            staff_svc::schedule_visit(
                 &mut tx, pool, staff,
                 ScheduleVisitRequest {
                     location_id:              loc_id,
@@ -545,19 +543,15 @@ mod tests {
                     expected_box_count:       Some(5),
                 },
                 &bus,
-            ).await.unwrap();
-            tx.commit().await.unwrap();
-            visit
-        };
+            ).await.unwrap()
+        });
 
-        {
-            let mut tx = RlsTransaction::begin(pool, i32::from(staff)).await.unwrap();
+        with_rls_tx!(pool, staff, |tx| {
             staff_svc::arrive_at_visit(
                 &mut tx, pool, visit.id, staff,
                 ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
-            ).await.unwrap();
-            tx.commit().await.unwrap();
-        }
+            ).await.unwrap()
+        });
 
         (admin, staff, loc_id, biz_id, visit.id)
     }

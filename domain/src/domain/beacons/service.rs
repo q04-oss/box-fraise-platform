@@ -422,6 +422,7 @@ mod tests {
     use super::*;
     use crate::event_bus::EventBus;
     use crate::transaction::RlsTransaction;
+    use crate::with_rls_tx;
     use sqlx::PgPool;
 
     // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -489,11 +490,11 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, user_id).await;
         let bus                   = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
-        let resp = create_beacon(&mut tx, &pool, user_id, beacon_req(biz_id, loc_id), &bus)
-            .await
-            .expect("owner must be able to create a beacon");
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, user_id, |tx| {
+            create_beacon(&mut tx, &pool, user_id, beacon_req(biz_id, loc_id), &bus)
+                .await
+                .expect("owner must be able to create a beacon")
+        });
 
         assert_eq!(resp.business_id, Some(biz_id));
         assert_eq!(resp.location_id, loc_id);
@@ -539,16 +540,16 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, user_id).await;
         let bus                  = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
-        let beacon = create_beacon(&mut tx, &pool, user_id, beacon_req(biz_id, loc_id), &bus)
-            .await.unwrap();
-        tx.commit().await.unwrap();
+        let beacon = with_rls_tx!(&pool, user_id, |tx| {
+            create_beacon(&mut tx, &pool, user_id, beacon_req(biz_id, loc_id), &bus)
+                .await.unwrap()
+        });
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
-        let resp = get_daily_uuid(&mut tx, &pool, beacon.id, user_id)
-            .await
-            .expect("owner must get daily UUID");
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, user_id, |tx| {
+            get_daily_uuid(&mut tx, &pool, beacon.id, user_id)
+                .await
+                .expect("owner must get daily UUID")
+        });
 
         assert_eq!(resp.beacon_id, beacon.id);
         // UUID format: 8-4-4-4-12 (36 chars with hyphens)
@@ -563,10 +564,10 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, owner_id).await;
         let bus                  = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(owner_id)).await.unwrap();
-        let beacon = create_beacon(&mut tx, &pool, owner_id, beacon_req(biz_id, loc_id), &bus)
-            .await.unwrap();
-        tx.commit().await.unwrap();
+        let beacon = with_rls_tx!(&pool, owner_id, |tx| {
+            create_beacon(&mut tx, &pool, owner_id, beacon_req(biz_id, loc_id), &bus)
+                .await.unwrap()
+        });
 
         let mut tx = RlsTransaction::begin(&pool, i32::from(other_id)).await.unwrap();
         let err = get_daily_uuid(&mut tx, &pool, beacon.id, other_id)
@@ -584,10 +585,10 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, user_id).await;
         let bus                  = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
-        create_beacon(&mut tx, &pool, user_id, beacon_req(biz_id, loc_id), &bus)
-            .await.unwrap();
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, user_id, |tx| {
+            create_beacon(&mut tx, &pool, user_id, beacon_req(biz_id, loc_id), &bus)
+                .await.unwrap();
+        });
 
         // Fetch the beacon to get original secret_key.
         let (beacon_id,): (i32,) = sqlx::query_as(
@@ -607,9 +608,9 @@ mod tests {
         .unwrap();
 
         // Rotate the key.
-        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
-        rotate_key(&mut tx, &pool, beacon_id, user_id, &bus).await.unwrap();
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, user_id, |tx| {
+            rotate_key(&mut tx, &pool, beacon_id, user_id, &bus).await.unwrap();
+        });
 
         let (new_key, prev_key): (String, Option<String>) = sqlx::query_as(
             "SELECT secret_key, previous_secret_key FROM beacons WHERE id = $1"
@@ -698,10 +699,10 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, owner_id).await;
         let bus                  = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(owner_id)).await.unwrap();
-        let beacon = create_beacon(&mut tx, &pool, owner_id, beacon_req(biz_id, loc_id), &bus)
-            .await.unwrap();
-        tx.commit().await.unwrap();
+        let beacon = with_rls_tx!(&pool, owner_id, |tx| {
+            create_beacon(&mut tx, &pool, owner_id, beacon_req(biz_id, loc_id), &bus)
+                .await.unwrap()
+        });
 
         let mut tx = RlsTransaction::begin(&pool, i32::from(attacker_id)).await.unwrap();
         let err = get_daily_uuid(&mut tx, &pool, beacon.id, attacker_id)
@@ -718,10 +719,10 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, owner_id).await;
         let bus                  = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(owner_id)).await.unwrap();
-        let beacon = create_beacon(&mut tx, &pool, owner_id, beacon_req(biz_id, loc_id), &bus)
-            .await.unwrap();
-        tx.commit().await.unwrap();
+        let beacon = with_rls_tx!(&pool, owner_id, |tx| {
+            create_beacon(&mut tx, &pool, owner_id, beacon_req(biz_id, loc_id), &bus)
+                .await.unwrap()
+        });
 
         let mut tx = RlsTransaction::begin(&pool, i32::from(attacker_id)).await.unwrap();
         let err = rotate_key(&mut tx, &pool, beacon.id, attacker_id, &bus)
@@ -740,10 +741,10 @@ mod tests {
         let bus                  = EventBus::new();
 
         // Create beacon — get back BeaconResponse (no secret field).
-        let mut tx = RlsTransaction::begin(&pool, i32::from(owner_id)).await.unwrap();
-        let beacon = create_beacon(&mut tx, &pool, owner_id, beacon_req(biz_id, loc_id), &bus)
-            .await.unwrap();
-        tx.commit().await.unwrap();
+        let beacon = with_rls_tx!(&pool, owner_id, |tx| {
+            create_beacon(&mut tx, &pool, owner_id, beacon_req(biz_id, loc_id), &bus)
+                .await.unwrap()
+        });
 
         // Fetch the actual secret_key from the DB for the "does the value appear?" check.
         let actual_secret: String = sqlx::query_scalar(

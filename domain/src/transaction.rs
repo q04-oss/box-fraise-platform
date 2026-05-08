@@ -123,3 +123,66 @@ impl AdminRlsTransaction {
         Ok(())
     }
 }
+
+// ── Test ergonomics ──────────────────────────────────────────────────────────
+//
+// The two macros below collapse the canonical
+//
+//     let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
+//     let r     = service::fn(&mut tx, &pool, ...).await.unwrap();
+//     tx.commit().await.unwrap();
+//
+// pattern (which appeared ~75 times across test code) into a single line.
+//
+// **Closure-style binding (deviation from the original spec).** Rust's
+// `macro_rules!` hygiene prevents an internally-`let`-bound `tx` from
+// being visible inside a user-passed `$body:expr`. The macros therefore
+// take the binding name explicitly via a `|tx|` lead-in, which captures
+// the identifier from the call site so the body can refer to it.
+//
+// Usage:
+//
+//     let resp = with_rls_tx!(&pool, user_id, |tx| {
+//         users::service::request_erasure(&mut tx, &pool, i32::from(user_id))
+//             .await.unwrap()
+//     });
+//
+// The block is the only context in which `tx` is in scope; calls outside
+// the block must continue to begin/commit explicitly. `unwrap`-on-error
+// is intentional — these macros are test-only.
+
+/// Begin an `RlsTransaction`, run the body, commit, and return the result.
+///
+/// `$tx` is the local name bound to the transaction inside `$body`.
+#[macro_export]
+macro_rules! with_rls_tx {
+    ($pool:expr, $user_id:expr, |$tx:ident| $body:block) => {{
+        let mut $tx = $crate::transaction::RlsTransaction::begin(
+            $pool,
+            i32::from($user_id),
+        )
+        .await
+        .expect("RlsTransaction::begin failed in test");
+        let result = { $body };
+        $tx.commit()
+            .await
+            .expect("RlsTransaction::commit failed in test");
+        result
+    }};
+}
+
+/// Begin an `AdminRlsTransaction`, run the body, commit, and return the
+/// result. `$tx` is the local name bound inside `$body`.
+#[macro_export]
+macro_rules! with_admin_tx {
+    ($pool:expr, |$tx:ident| $body:block) => {{
+        let mut $tx = $crate::transaction::AdminRlsTransaction::begin($pool)
+            .await
+            .expect("AdminRlsTransaction::begin failed in test");
+        let result = { $body };
+        $tx.commit()
+            .await
+            .expect("AdminRlsTransaction::commit failed in test");
+        result
+    }};
+}

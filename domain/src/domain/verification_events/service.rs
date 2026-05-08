@@ -249,6 +249,7 @@ mod tests {
         },
         event_bus::EventBus,
         types::UserId,
+        with_rls_tx,
     };
     use sqlx::PgPool;
 
@@ -381,10 +382,10 @@ mod tests {
         let (user, _) = setup_full_user(&pool, &email).await;
         let uid = i32::from(user);
 
-        let mut tx = RlsTransaction::begin(&pool, uid).await.unwrap();
-        let trail = get_my_audit_trail(&mut tx, &pool, user)
-            .await.expect("get_my_audit_trail must succeed");
-        tx.commit().await.unwrap();
+        let trail = with_rls_tx!(&pool, uid, |tx| {
+            get_my_audit_trail(&mut tx, &pool, user)
+                .await.expect("get_my_audit_trail must succeed")
+        });
 
         assert_eq!(trail.user_id, uid);
         assert!(!trail.verification_journey.is_empty(), "journey must have events");
@@ -413,21 +414,21 @@ mod tests {
 
         // Issue an attestation token to ensure token_history is populated.
         let bus = EventBus::new();
-        let mut at_tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let at_resp = at_svc::issue_token(&mut at_tx, &pool, user,
-            IssueAttestationTokenRequest {
-                scope: "presence.verified".to_owned(),
-                requesting_business_soultoken_id: None,
-                user_device_id: None,
-                presentation_latitude: None,
-                presentation_longitude: None,
-            }, &bus,
-        ).await.expect("issue_token must succeed");
-        at_tx.commit().await.unwrap();
+        let at_resp = with_rls_tx!(&pool, user, |tx| {
+            at_svc::issue_token(&mut tx, &pool, user,
+                IssueAttestationTokenRequest {
+                    scope: "presence.verified".to_owned(),
+                    requesting_business_soultoken_id: None,
+                    user_device_id: None,
+                    presentation_latitude: None,
+                    presentation_longitude: None,
+                }, &bus,
+            ).await.expect("issue_token must succeed")
+        });
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let trail = get_my_audit_trail(&mut tx, &pool, user).await.unwrap();
-        tx.commit().await.unwrap();
+        let trail = with_rls_tx!(&pool, user, |tx| {
+            get_my_audit_trail(&mut tx, &pool, user).await.unwrap()
+        });
         let json  = serde_json::to_string(&trail).unwrap();
 
         // uuid must not appear in response.
@@ -464,9 +465,9 @@ mod tests {
         let email: String = SafeEmail().fake();
         let (user, _) = setup_full_user(&pool, &email).await;
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let trail = get_my_audit_trail(&mut tx, &pool, user).await.unwrap();
-        tx.commit().await.unwrap();
+        let trail = with_rls_tx!(&pool, user, |tx| {
+            get_my_audit_trail(&mut tx, &pool, user).await.unwrap()
+        });
 
         let journey = &trail.verification_journey;
         if journey.len() > 1 {
@@ -514,9 +515,9 @@ mod tests {
         let user = create_user(&pool, &email).await;
         let uid  = i32::from(user);
 
-        let mut tx = RlsTransaction::begin(&pool, uid).await.unwrap();
-        let _ = get_my_audit_trail(&mut tx, &pool, user).await.unwrap();
-        tx.commit().await.unwrap();
+        with_rls_tx!(&pool, uid, |tx| {
+            let _ = get_my_audit_trail(&mut tx, &pool, user).await.unwrap();
+        });
 
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM audit_request_log WHERE user_id = $1"
@@ -535,9 +536,9 @@ mod tests {
         let (user_b, _) = setup_full_user(&pool, &email_b).await;
 
         // user_a calls get_my_audit_trail — must only see their own data.
-        let mut tx = RlsTransaction::begin(&pool, i32::from(user_a)).await.unwrap();
-        let trail = get_my_audit_trail(&mut tx, &pool, user_a).await.unwrap();
-        tx.commit().await.unwrap();
+        let trail = with_rls_tx!(&pool, user_a, |tx| {
+            get_my_audit_trail(&mut tx, &pool, user_a).await.unwrap()
+        });
 
         assert_eq!(trail.user_id, i32::from(user_a),
             "audit trail must only contain the requesting user's data");
@@ -560,9 +561,9 @@ mod tests {
             "SELECT uuid::text FROM soultokens WHERE holder_user_id = $1 LIMIT 1"
         ).bind(i32::from(user)).fetch_one(&pool).await.unwrap();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let trail = get_my_audit_trail(&mut tx, &pool, user).await.unwrap();
-        tx.commit().await.unwrap();
+        let trail = with_rls_tx!(&pool, user, |tx| {
+            get_my_audit_trail(&mut tx, &pool, user).await.unwrap()
+        });
         let json  = serde_json::to_string(&trail).unwrap();
 
         assert!(!json.contains(&uuid_val),
@@ -576,26 +577,26 @@ mod tests {
         let (user, _) = setup_full_user(&pool, &email).await;
 
         let bus = EventBus::new();
-        let mut at_tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let _ = at_svc::issue_token(&mut at_tx, &pool, user,
-            IssueAttestationTokenRequest {
-                scope: "presence.verified".to_owned(),
-                requesting_business_soultoken_id: None,
-                user_device_id: None,
-                presentation_latitude: None,
-                presentation_longitude: None,
-            }, &bus,
-        ).await.unwrap();
-        at_tx.commit().await.unwrap();
+        with_rls_tx!(&pool, user, |tx| {
+            let _ = at_svc::issue_token(&mut tx, &pool, user,
+                IssueAttestationTokenRequest {
+                    scope: "presence.verified".to_owned(),
+                    requesting_business_soultoken_id: None,
+                    user_device_id: None,
+                    presentation_latitude: None,
+                    presentation_longitude: None,
+                }, &bus,
+            ).await.unwrap();
+        });
 
         // Fetch actual hash from DB.
         let stored_hash: String = sqlx::query_scalar(
             "SELECT token_hash FROM attestation_tokens WHERE user_id = $1 LIMIT 1"
         ).bind(i32::from(user)).fetch_one(&pool).await.unwrap();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-        let trail = get_my_audit_trail(&mut tx, &pool, user).await.unwrap();
-        tx.commit().await.unwrap();
+        let trail = with_rls_tx!(&pool, user, |tx| {
+            get_my_audit_trail(&mut tx, &pool, user).await.unwrap()
+        });
         let json  = serde_json::to_string(&trail).unwrap();
 
         assert!(!json.contains(&stored_hash),

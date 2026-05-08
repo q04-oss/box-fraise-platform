@@ -12,7 +12,7 @@ use axum::{
 };
 use box_fraise_domain::event_bus::EventBus;
 use box_fraise_domain::events::DomainEvent;
-use box_fraise_domain::transaction::{AdminRlsTransaction, RlsTransaction};
+use box_fraise_domain::{with_admin_tx, with_rls_tx};
 use deadpool_redis::redis;
 use sqlx::PgPool;
 use std::net::SocketAddr;
@@ -236,11 +236,11 @@ async fn create_business_end_to_end(pool: PgPool) {
         contact_email: Some("hello@e2ecafe.test".to_owned()),
         contact_phone: None,
     };
-    let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
-    let resp = service::create_business(&mut tx, &pool, user_id, req, &bus)
-        .await
-        .expect("create_business must succeed for attested user");
-    tx.commit().await.unwrap();
+    let resp = with_rls_tx!(&pool, user_id, |tx| {
+        service::create_business(&mut tx, &pool, user_id, req, &bus)
+            .await
+            .expect("create_business must succeed for attested user")
+    });
 
     assert_eq!(resp.name, "E2E Café");
     assert_eq!(resp.verification_status, "pending");
@@ -508,53 +508,53 @@ async fn create_beacon_end_to_end(pool: PgPool) {
 
     // Create a business via the business service.
     let bus      = EventBus::new();
-    let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
-    let biz_resp = business_service::create_business(
-        &mut tx,
-        &pool,
-        user_id,
-        CreateBusinessRequest {
-            name:          "E2E Beacon Café".to_owned(),
-            address:       "789 Beacon Rd, Edmonton, AB".to_owned(),
-            latitude:      None,
-            longitude:     None,
-            timezone:      None,
-            contact_email: None,
-            contact_phone: None,
-        },
-        &bus,
-    )
-    .await
-    .expect("business creation must succeed");
-    tx.commit().await.unwrap();
+    let biz_resp = with_rls_tx!(&pool, user_id, |tx| {
+        business_service::create_business(
+            &mut tx,
+            &pool,
+            user_id,
+            CreateBusinessRequest {
+                name:          "E2E Beacon Café".to_owned(),
+                address:       "789 Beacon Rd, Edmonton, AB".to_owned(),
+                latitude:      None,
+                longitude:     None,
+                timezone:      None,
+                contact_email: None,
+                contact_phone: None,
+            },
+            &bus,
+        )
+        .await
+        .expect("business creation must succeed")
+    });
 
     // Create a beacon via the beacon service.
-    let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
-    let beacon_resp = beacon_service::create_beacon(
-        &mut tx,
-        &pool,
-        user_id,
-        CreateBeaconRequest {
-            business_id:            biz_resp.id,
-            location_id:            biz_resp.location.id,
-            minimum_rssi_threshold: Some(-65),
-        },
-        &bus,
-    )
-    .await
-    .expect("beacon creation must succeed for business owner");
-    tx.commit().await.unwrap();
+    let beacon_resp = with_rls_tx!(&pool, user_id, |tx| {
+        beacon_service::create_beacon(
+            &mut tx,
+            &pool,
+            user_id,
+            CreateBeaconRequest {
+                business_id:            biz_resp.id,
+                location_id:            biz_resp.location.id,
+                minimum_rssi_threshold: Some(-65),
+            },
+            &bus,
+        )
+        .await
+        .expect("beacon creation must succeed for business owner")
+    });
 
     assert_eq!(beacon_resp.business_id, Some(biz_resp.id));
     assert_eq!(beacon_resp.minimum_rssi_threshold, -65);
     assert!(beacon_resp.is_active);
 
     // Fetch the daily UUID.
-    let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
-    let uuid_resp = beacon_service::get_daily_uuid(&mut tx, &pool, beacon_resp.id, user_id)
-        .await
-        .expect("owner must get daily UUID");
-    tx.commit().await.unwrap();
+    let uuid_resp = with_rls_tx!(&pool, user_id, |tx| {
+        beacon_service::get_daily_uuid(&mut tx, &pool, beacon_resp.id, user_id)
+            .await
+            .expect("owner must get daily UUID")
+    });
 
     assert_eq!(uuid_resp.beacon_id, beacon_resp.id);
     assert_eq!(uuid_resp.uuid.len(), 36, "UUID must be in 8-4-4-4-12 format");
@@ -866,13 +866,13 @@ async fn full_background_check_journey(pool: PgPool) {
     let bus = EventBus::new();
 
     // ── Step 1: initiate sanctions check ─────────────────────────────────────
-    let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
-    let sanctions = service::initiate_check(
-        &mut tx, &pool, user_id,
-        InitiateCheckRequest { check_type: "sanctions".to_owned(), provider: "comply_advantage".to_owned() },
-        &bus,
-    ).await.expect("sanctions check must initiate");
-    tx.commit().await.unwrap();
+    let sanctions = with_rls_tx!(&pool, user_id, |tx| {
+        service::initiate_check(
+            &mut tx, &pool, user_id,
+            InitiateCheckRequest { check_type: "sanctions".to_owned(), provider: "comply_advantage".to_owned() },
+            &bus,
+        ).await.expect("sanctions check must initiate")
+    });
 
     // Set external_check_id so the webhook can find the row.
     sqlx::query("UPDATE background_checks SET external_check_id = 'sanctions-ext-001' WHERE id = $1")
@@ -890,13 +890,13 @@ async fn full_background_check_journey(pool: PgPool) {
         .await.expect("sanctions webhook must succeed");
 
     // ── Step 3: initiate identity_fraud check ─────────────────────────────────
-    let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
-    let fraud = service::initiate_check(
-        &mut tx, &pool, user_id,
-        InitiateCheckRequest { check_type: "identity_fraud".to_owned(), provider: "comply_advantage".to_owned() },
-        &bus,
-    ).await.expect("identity_fraud check must initiate");
-    tx.commit().await.unwrap();
+    let fraud = with_rls_tx!(&pool, user_id, |tx| {
+        service::initiate_check(
+            &mut tx, &pool, user_id,
+            InitiateCheckRequest { check_type: "identity_fraud".to_owned(), provider: "comply_advantage".to_owned() },
+            &bus,
+        ).await.expect("identity_fraud check must initiate")
+    });
 
     sqlx::query("UPDATE background_checks SET external_check_id = 'fraud-ext-001' WHERE id = $1")
         .bind(fraud.id).execute(&pool).await.unwrap();
@@ -989,79 +989,79 @@ async fn full_staff_visit_journey(pool: PgPool) {
     let bus = EventBus::new();
 
     // ── Step 1: grant delivery_staff role ────────────────────────────────────
-    let mut atx = AdminRlsTransaction::begin(&pool).await.unwrap();
-    service::grant_staff_role(
-        &mut atx, &pool, admin,
-        GrantRoleRequest {
-            user_id:      admin_id,
-            role:         "delivery_staff".to_owned(),
-            location_id:  Some(loc_id),
-            expires_at:   None,
-            confirmed_by: None,
-        },
-        &bus,
-    ).await.expect("grant_staff_role must succeed");
-    atx.commit().await.unwrap();
+    with_admin_tx!(&pool, |atx| {
+        service::grant_staff_role(
+            &mut atx, &pool, admin,
+            GrantRoleRequest {
+                user_id:      admin_id,
+                role:         "delivery_staff".to_owned(),
+                location_id:  Some(loc_id),
+                expires_at:   None,
+                confirmed_by: None,
+            },
+            &bus,
+        ).await.expect("grant_staff_role must succeed")
+    });
 
     // ── Step 2: schedule visit ────────────────────────────────────────────────
-    let mut tx = RlsTransaction::begin(&pool, i32::from(admin)).await.unwrap();
-    let visit = service::schedule_visit(
-        &mut tx, &pool, admin,
-        ScheduleVisitRequest {
-            location_id:              loc_id,
-            visit_type:               "combined".to_owned(),
-            scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
-            window_hours:             Some(4),
-            support_booking_capacity: Some(0),
-            expected_box_count:       Some(10),
-        },
-        &bus,
-    ).await.expect("schedule_visit must succeed");
-    tx.commit().await.unwrap();
+    let visit = with_rls_tx!(&pool, admin, |tx| {
+        service::schedule_visit(
+            &mut tx, &pool, admin,
+            ScheduleVisitRequest {
+                location_id:              loc_id,
+                visit_type:               "combined".to_owned(),
+                scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
+                window_hours:             Some(4),
+                support_booking_capacity: Some(0),
+                expected_box_count:       Some(10),
+            },
+            &bus,
+        ).await.expect("schedule_visit must succeed")
+    });
 
     assert_eq!(visit.status, "scheduled");
 
     // ── Step 3: arrive ────────────────────────────────────────────────────────
-    let mut tx = RlsTransaction::begin(&pool, i32::from(admin)).await.unwrap();
-    let arrived = service::arrive_at_visit(
-        &mut tx, &pool, visit.id, admin,
-        ArriveAtVisitRequest { arrived_latitude: Some(53.5461), arrived_longitude: Some(-113.4938) },
-    ).await.expect("arrive_at_visit must succeed");
-    tx.commit().await.unwrap();
+    let arrived = with_rls_tx!(&pool, admin, |tx| {
+        service::arrive_at_visit(
+            &mut tx, &pool, visit.id, admin,
+            ArriveAtVisitRequest { arrived_latitude: Some(53.5461), arrived_longitude: Some(-113.4938) },
+        ).await.expect("arrive_at_visit must succeed")
+    });
 
     assert_eq!(arrived.status, "in_progress");
 
     // ── Step 4: submit quality assessment (pass) ──────────────────────────────
-    let mut tx = RlsTransaction::begin(&pool, i32::from(admin)).await.unwrap();
-    let assessment = service::submit_quality_assessment(
-        &mut tx, &pool, visit.id, admin,
-        QualityAssessmentRequest {
-            business_id:               biz_id,
-            beacon_functioning:        true,
-            staff_performing_correctly: true,
-            standards_maintained:      true,
-            notes:                     Some("All good.".to_owned()),
-        },
-        &bus,
-    ).await.expect("quality assessment must succeed");
-    tx.commit().await.unwrap();
+    let assessment = with_rls_tx!(&pool, admin, |tx| {
+        service::submit_quality_assessment(
+            &mut tx, &pool, visit.id, admin,
+            QualityAssessmentRequest {
+                business_id:               biz_id,
+                beacon_functioning:        true,
+                staff_performing_correctly: true,
+                standards_maintained:      true,
+                notes:                     Some("All good.".to_owned()),
+            },
+            &bus,
+        ).await.expect("quality assessment must succeed")
+    });
 
     assert!(assessment.overall_pass);
 
     // ── Step 5: complete visit ────────────────────────────────────────────────
-    let mut tx = RlsTransaction::begin(&pool, i32::from(admin)).await.unwrap();
-    let completed = service::complete_visit(
-        &mut tx, &pool, visit.id, admin,
-        CompleteVisitRequest {
-            actual_box_count:    10,
-            delivery_signature:  Some("sig-abc123".to_owned()),
-            // Valid 64-char SHA-256 hex; cleanup #5 enforces format.
-            evidence_hash:       Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned()),
-            evidence_storage_uri: Some("evidence/visits/journey/test".to_owned()),
-        },
-        &bus,
-    ).await.expect("complete_visit must succeed");
-    tx.commit().await.unwrap();
+    let completed = with_rls_tx!(&pool, admin, |tx| {
+        service::complete_visit(
+            &mut tx, &pool, visit.id, admin,
+            CompleteVisitRequest {
+                actual_box_count:    10,
+                delivery_signature:  Some("sig-abc123".to_owned()),
+                // Valid 64-char SHA-256 hex; cleanup #5 enforces format.
+                evidence_hash:       Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned()),
+                evidence_storage_uri: Some("evidence/visits/journey/test".to_owned()),
+            },
+            &bus,
+        ).await.expect("complete_visit must succeed")
+    });
 
     assert_eq!(completed.status, "completed");
     assert_eq!(completed.actual_box_count, Some(10));
@@ -1155,16 +1155,16 @@ async fn full_attestation_journey(pool: PgPool) {
     .unwrap();
 
     // ── Step 1: grant delivery_staff role ─────────────────────────────────────
-    let mut atx = AdminRlsTransaction::begin(&pool).await.unwrap();
-    staff_svc::grant_staff_role(
-        &mut atx, &pool, admin,
-        GrantRoleRequest {
-            user_id: staff_id, role: "delivery_staff".to_owned(),
-            location_id: Some(loc_id), expires_at: None, confirmed_by: None,
-        },
-        &bus,
-    ).await.expect("grant delivery_staff must succeed");
-    atx.commit().await.unwrap();
+    with_admin_tx!(&pool, |atx| {
+        staff_svc::grant_staff_role(
+            &mut atx, &pool, admin,
+            GrantRoleRequest {
+                user_id: staff_id, role: "delivery_staff".to_owned(),
+                location_id: Some(loc_id), expires_at: None, confirmed_by: None,
+            },
+            &bus,
+        ).await.expect("grant delivery_staff must succeed")
+    });
 
     // ── Step 2: grant 2 attestation_reviewer roles ────────────────────────────
     let (r1_id,): (i32,) = sqlx::query_as(
@@ -1184,37 +1184,37 @@ async fn full_attestation_journey(pool: PgPool) {
     .unwrap();
 
     for rid in [r1_id, r2_id] {
-        let mut atx = AdminRlsTransaction::begin(&pool).await.unwrap();
-        staff_svc::grant_staff_role(
-            &mut atx, &pool, admin,
-            GrantRoleRequest {
-                user_id: rid, role: "attestation_reviewer".to_owned(),
-                location_id: None, expires_at: None, confirmed_by: None,
-            },
-            &bus,
-        ).await.unwrap();
-        atx.commit().await.unwrap();
+        with_admin_tx!(&pool, |atx| {
+            staff_svc::grant_staff_role(
+                &mut atx, &pool, admin,
+                GrantRoleRequest {
+                    user_id: rid, role: "attestation_reviewer".to_owned(),
+                    location_id: None, expires_at: None, confirmed_by: None,
+                },
+                &bus,
+            ).await.unwrap()
+        });
     }
 
     // ── Step 3: schedule + arrive at visit ────────────────────────────────────
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    let visit = staff_svc::schedule_visit(
-        &mut tx, &pool, staff,
-        ScheduleVisitRequest {
-            location_id: loc_id, visit_type: "combined".to_owned(),
-            scheduled_at: chrono::Utc::now() + chrono::Duration::hours(1),
-            window_hours: Some(4), support_booking_capacity: Some(0), expected_box_count: Some(5),
-        },
-        &bus,
-    ).await.expect("schedule_visit must succeed");
-    tx.commit().await.unwrap();
+    let visit = with_rls_tx!(&pool, staff, |tx| {
+        staff_svc::schedule_visit(
+            &mut tx, &pool, staff,
+            ScheduleVisitRequest {
+                location_id: loc_id, visit_type: "combined".to_owned(),
+                scheduled_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                window_hours: Some(4), support_booking_capacity: Some(0), expected_box_count: Some(5),
+            },
+            &bus,
+        ).await.expect("schedule_visit must succeed")
+    });
 
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    staff_svc::arrive_at_visit(
-        &mut tx, &pool, visit.id, staff,
-        ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
-    ).await.expect("arrive must succeed");
-    tx.commit().await.unwrap();
+    with_rls_tx!(&pool, staff, |tx| {
+        staff_svc::arrive_at_visit(
+            &mut tx, &pool, visit.id, staff,
+            ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+        ).await.expect("arrive must succeed")
+    });
 
     // ── Step 4: presence-confirmed target user + met threshold ────────────────
     let (target_id,): (i32,) = sqlx::query_as(
@@ -1237,18 +1237,18 @@ async fn full_attestation_journey(pool: PgPool) {
     .unwrap();
 
     // ── Step 5: initiate attestation ─────────────────────────────────────────
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    let attest = attest_svc::initiate_attestation(
-        &mut tx, &pool, staff,
-        InitiateAttestationRequest {
-            visit_id: visit.id, user_id: target_id, presence_threshold_id: threshold_id,
-            // Valid 64-char SHA-256 hex; cleanup #5 enforces format.
-            photo_hash: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned()),
-            photo_storage_uri: None,
-        },
-        &bus,
-    ).await.expect("initiate_attestation must succeed");
-    tx.commit().await.unwrap();
+    let attest = with_rls_tx!(&pool, staff, |tx| {
+        attest_svc::initiate_attestation(
+            &mut tx, &pool, staff,
+            InitiateAttestationRequest {
+                visit_id: visit.id, user_id: target_id, presence_threshold_id: threshold_id,
+                // Valid 64-char SHA-256 hex; cleanup #5 enforces format.
+                photo_hash: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned()),
+                photo_storage_uri: None,
+            },
+            &bus,
+        ).await.expect("initiate_attestation must succeed")
+    });
 
     assert_eq!(attest.status, "pending");
     assert_ne!(attest.assigned_reviewer_1_id, attest.assigned_reviewer_2_id);
@@ -1257,19 +1257,19 @@ async fn full_attestation_journey(pool: PgPool) {
     use box_fraise_domain::domain::attestations::service::attestation_payload;
     let payload = attestation_payload(&attest);
     let staff_kp = common::test_ed25519_key_pair();
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    let after_staff_sign = attest_svc::staff_sign(
-        &mut tx, &pool, attest.id, staff,
-        StaffSignAttestationRequest {
-            staff_signature:        staff_kp.sign(payload.as_bytes()),
-            verifying_key_hex:      staff_kp.verifying_key_hex(),
-            photo_hash:             None,
-            location_confirmed:     true,
-            user_present_confirmed: true,
-        },
-        &bus,
-    ).await.expect("staff_sign must succeed");
-    tx.commit().await.unwrap();
+    let after_staff_sign = with_rls_tx!(&pool, staff, |tx| {
+        attest_svc::staff_sign(
+            &mut tx, &pool, attest.id, staff,
+            StaffSignAttestationRequest {
+                staff_signature:        staff_kp.sign(payload.as_bytes()),
+                verifying_key_hex:      staff_kp.verifying_key_hex(),
+                photo_hash:             None,
+                location_confirmed:     true,
+                user_present_confirmed: true,
+            },
+            &bus,
+        ).await.expect("staff_sign must succeed")
+    });
 
     assert_eq!(after_staff_sign.status, "co_sign_pending");
     assert!(after_staff_sign.co_sign_deadline.is_some());
@@ -1282,33 +1282,33 @@ async fn full_attestation_journey(pool: PgPool) {
 
     // ── Step 7: reviewer 1 sign ───────────────────────────────────────────────
     let r1 = UserId::from(attest.assigned_reviewer_1_id);
-    let mut tx = RlsTransaction::begin(&pool, i32::from(r1)).await.unwrap();
-    let after_r1 = attest_svc::reviewer_sign(
-        &mut tx, &pool, attest.id, r1,
-        ReviewerSignAttestationRequest {
-            signature:              r1_kp.sign(payload.as_bytes()),
-            verifying_key_hex:      r1_kp.verifying_key_hex(),
-            evidence_hash_reviewed: "r1-evidence".to_owned(),
-        },
-        &bus,
-    ).await.expect("reviewer_1 sign must succeed");
-    tx.commit().await.unwrap();
+    let after_r1 = with_rls_tx!(&pool, r1, |tx| {
+        attest_svc::reviewer_sign(
+            &mut tx, &pool, attest.id, r1,
+            ReviewerSignAttestationRequest {
+                signature:              r1_kp.sign(payload.as_bytes()),
+                verifying_key_hex:      r1_kp.verifying_key_hex(),
+                evidence_hash_reviewed: "r1-evidence".to_owned(),
+            },
+            &bus,
+        ).await.expect("reviewer_1 sign must succeed")
+    });
 
     assert_eq!(after_r1.status, "co_sign_pending", "one reviewer signed — still pending");
 
     // ── Step 8: reviewer 2 sign → approve ────────────────────────────────────
     let r2 = UserId::from(attest.assigned_reviewer_2_id);
-    let mut tx = RlsTransaction::begin(&pool, i32::from(r2)).await.unwrap();
-    let approved = attest_svc::reviewer_sign(
-        &mut tx, &pool, attest.id, r2,
-        ReviewerSignAttestationRequest {
-            signature:              r2_kp.sign(payload.as_bytes()),
-            verifying_key_hex:      r2_kp.verifying_key_hex(),
-            evidence_hash_reviewed: "r2-evidence".to_owned(),
-        },
-        &bus,
-    ).await.expect("reviewer_2 sign must succeed");
-    tx.commit().await.unwrap();
+    let approved = with_rls_tx!(&pool, r2, |tx| {
+        attest_svc::reviewer_sign(
+            &mut tx, &pool, attest.id, r2,
+            ReviewerSignAttestationRequest {
+                signature:              r2_kp.sign(payload.as_bytes()),
+                verifying_key_hex:      r2_kp.verifying_key_hex(),
+                evidence_hash_reviewed: "r2-evidence".to_owned(),
+            },
+            &bus,
+        ).await.expect("reviewer_2 sign must succeed")
+    });
 
     assert_eq!(approved.status, "approved");
 
@@ -1455,13 +1455,13 @@ async fn full_soultoken_lifecycle(pool: PgPool) {
     let bus = state.event_bus.clone();
 
     // ── Step 1: Issue soultoken ───────────────────────────────────────────────
-    let mut tx = RlsTransaction::begin(&state.db, uid).await.unwrap();
-    let token = st_svc::issue_soultoken(
-        &mut tx, &state.db, UserId::from(uid),
-        IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-        &hmac_key, &state.ed25519_key_pair, &bus,
-    ).await.expect("issue_soultoken must succeed");
-    tx.commit().await.unwrap();
+    let token = with_rls_tx!(&state.db, uid, |tx| {
+        st_svc::issue_soultoken(
+            &mut tx, &state.db, UserId::from(uid),
+            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+            &hmac_key, &state.ed25519_key_pair, &bus,
+        ).await.expect("issue_soultoken must succeed")
+    });
 
     // Display code format
     let code_re = regex::Regex::new(r"^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$").unwrap();
@@ -1485,27 +1485,27 @@ async fn full_soultoken_lifecycle(pool: PgPool) {
 
     // ── Step 2: Renew ─────────────────────────────────────────────────────────
     let before_renewal = token.expires_at;
-    let mut tx = RlsTransaction::begin(&state.db, uid).await.unwrap();
-    let renewal = st_svc::renew_soultoken(
-        &mut tx, &state.db, UserId::from(uid),
-        RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
-        &state.ed25519_key_pair, &bus,
-    ).await.expect("renew_soultoken must succeed");
-    tx.commit().await.unwrap();
+    let renewal = with_rls_tx!(&state.db, uid, |tx| {
+        st_svc::renew_soultoken(
+            &mut tx, &state.db, UserId::from(uid),
+            RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
+            &state.ed25519_key_pair, &bus,
+        ).await.expect("renew_soultoken must succeed")
+    });
 
     assert!(renewal.new_expires_at > before_renewal,
         "renewal must extend expires_at");
 
     // ── Step 3: Revoke ────────────────────────────────────────────────────────
-    let mut tx = RlsTransaction::begin(&state.db, admin_id).await.unwrap();
-    st_svc::revoke_soultoken(
-        &mut tx, &state.db, token.id, UserId::from(admin_id),
-        RevokeSoultokenRequest {
-            revocation_reason:   "staff_rescission".to_owned(),
-            revocation_visit_id: None,
-        },
-    ).await.expect("revoke_soultoken must succeed");
-    tx.commit().await.unwrap();
+    with_rls_tx!(&state.db, admin_id, |tx| {
+        st_svc::revoke_soultoken(
+            &mut tx, &state.db, token.id, UserId::from(admin_id),
+            RevokeSoultokenRequest {
+                revocation_reason:   "staff_rescission".to_owned(),
+                revocation_visit_id: None,
+            },
+        ).await.expect("revoke_soultoken must succeed")
+    });
 
     // user.verification_status reset to 'registered'
     let status: String = sqlx::query_scalar(
@@ -1612,79 +1612,79 @@ async fn full_order_and_collection_journey(pool: PgPool) {
     .bind(loc_id).bind(admin_id).fetch_one(&pool).await.unwrap();
 
     // ── Step 1: Create order ──────────────────────────────────────────────────
-    let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-    let order = ord_svc::create_order(
-        &mut tx, &pool, user,
-        CreateOrderRequest {
-            business_id:         biz_id,
-            variety_description: Some("Albion".to_owned()),
-            box_count:           1,
-            amount_cents:        1500,
-        },
-        &bus,
-    ).await.expect("create_order must succeed");
-    tx.commit().await.unwrap();
+    let order = with_rls_tx!(&pool, user, |tx| {
+        ord_svc::create_order(
+            &mut tx, &pool, user,
+            CreateOrderRequest {
+                business_id:         biz_id,
+                variety_description: Some("Albion".to_owned()),
+                box_count:           1,
+                amount_cents:        1500,
+            },
+            &bus,
+        ).await.expect("create_order must succeed")
+    });
 
     assert_eq!(order.status, "pending");
     assert!(order.pickup_deadline.is_some(), "pickup_deadline must be set (food safety)");
 
     // ── Step 2: Grant delivery_staff role ─────────────────────────────────────
-    let mut atx = AdminRlsTransaction::begin(&pool).await.unwrap();
-    staff_svc::grant_staff_role(
-        &mut atx, &pool, admin,
-        GrantRoleRequest {
-            user_id: staff_id, role: "delivery_staff".to_owned(),
-            location_id: Some(loc_id), expires_at: None, confirmed_by: None,
-        },
-        &bus,
-    ).await.expect("grant_staff_role must succeed");
-    atx.commit().await.unwrap();
+    with_admin_tx!(&pool, |atx| {
+        staff_svc::grant_staff_role(
+            &mut atx, &pool, admin,
+            GrantRoleRequest {
+                user_id: staff_id, role: "delivery_staff".to_owned(),
+                location_id: Some(loc_id), expires_at: None, confirmed_by: None,
+            },
+            &bus,
+        ).await.expect("grant_staff_role must succeed")
+    });
 
     // ── Step 3: Schedule + arrive at visit ────────────────────────────────────
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    let visit = staff_svc::schedule_visit(
-        &mut tx, &pool, staff,
-        ScheduleVisitRequest {
-            location_id:              loc_id,
-            visit_type:               "delivery".to_owned(),
-            scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
-            window_hours:             Some(4),
-            support_booking_capacity: Some(0),
-            expected_box_count:       Some(5),
-        },
-        &bus,
-    ).await.expect("schedule_visit must succeed");
-    tx.commit().await.unwrap();
+    let visit = with_rls_tx!(&pool, staff, |tx| {
+        staff_svc::schedule_visit(
+            &mut tx, &pool, staff,
+            ScheduleVisitRequest {
+                location_id:              loc_id,
+                visit_type:               "delivery".to_owned(),
+                scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
+                window_hours:             Some(4),
+                support_booking_capacity: Some(0),
+                expected_box_count:       Some(5),
+            },
+            &bus,
+        ).await.expect("schedule_visit must succeed")
+    });
 
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    staff_svc::arrive_at_visit(
-        &mut tx, &pool, visit.id, staff,
-        ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
-    ).await.expect("arrive must succeed");
-    tx.commit().await.unwrap();
+    with_rls_tx!(&pool, staff, |tx| {
+        staff_svc::arrive_at_visit(
+            &mut tx, &pool, visit.id, staff,
+            ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+        ).await.expect("arrive must succeed")
+    });
 
     // ── Step 4: Activate NFC box ──────────────────────────────────────────────
     let nfc_uid = "NFC-JOURNEY-001";
 
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    ord_svc::activate_box(
-        &mut tx, &pool, visit.id, staff,
-        ActivateBoxRequest {
-            nfc_chip_uid:       nfc_uid.to_owned(),
-            delivery_signature: "staff-sig-journey".to_owned(),
-            expires_at:         chrono::Utc::now() + chrono::Duration::hours(4),
-        },
-    ).await.expect("activate_box must succeed");
-    tx.commit().await.unwrap();
+    with_rls_tx!(&pool, staff, |tx| {
+        ord_svc::activate_box(
+            &mut tx, &pool, visit.id, staff,
+            ActivateBoxRequest {
+                nfc_chip_uid:       nfc_uid.to_owned(),
+                delivery_signature: "staff-sig-journey".to_owned(),
+                expires_at:         chrono::Utc::now() + chrono::Duration::hours(4),
+            },
+        ).await.expect("activate_box must succeed")
+    });
 
     // ── Step 5: Collect order via NFC tap ─────────────────────────────────────
-    let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-    let collected = ord_svc::collect_order(
-        &mut tx, &pool, user,
-        CollectOrderRequest { nfc_chip_uid: nfc_uid.to_owned() },
-        &bus,
-    ).await.expect("collect_order must succeed");
-    tx.commit().await.unwrap();
+    let collected = with_rls_tx!(&pool, user, |tx| {
+        ord_svc::collect_order(
+            &mut tx, &pool, user,
+            CollectOrderRequest { nfc_chip_uid: nfc_uid.to_owned() },
+            &bus,
+        ).await.expect("collect_order must succeed")
+    });
 
     // ── Step 6: Assertions ────────────────────────────────────────────────────
 
@@ -1764,48 +1764,48 @@ async fn full_support_booking_journey(pool: PgPool) {
          RETURNING id"
     ).fetch_one(&pool).await.unwrap();
 
-    let mut atx = AdminRlsTransaction::begin(&pool).await.unwrap();
-    staff_svc::grant_staff_role(&mut atx, &pool, admin,
-        GrantRoleRequest {
-            user_id:      staff_id,
-            role:         "delivery_staff".to_owned(),
-            location_id:  Some(loc_id),
-            expires_at:   None,
-            confirmed_by: None,
-        }, &bus,
-    ).await.expect("grant_staff_role must succeed");
-    atx.commit().await.unwrap();
+    with_admin_tx!(&pool, |atx| {
+        staff_svc::grant_staff_role(&mut atx, &pool, admin,
+            GrantRoleRequest {
+                user_id:      staff_id,
+                role:         "delivery_staff".to_owned(),
+                location_id:  Some(loc_id),
+                expires_at:   None,
+                confirmed_by: None,
+            }, &bus,
+        ).await.expect("grant_staff_role must succeed")
+    });
 
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    let visit = staff_svc::schedule_visit(&mut tx, &pool, staff,
-        ScheduleVisitRequest {
-            location_id:              loc_id,
-            visit_type:               "support".to_owned(),
-            scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
-            window_hours:             Some(4),
-            support_booking_capacity: Some(2),
-            expected_box_count:       Some(0),
-        }, &bus,
-    ).await.expect("schedule_visit must succeed");
-    tx.commit().await.unwrap();
+    let visit = with_rls_tx!(&pool, staff, |tx| {
+        staff_svc::schedule_visit(&mut tx, &pool, staff,
+            ScheduleVisitRequest {
+                location_id:              loc_id,
+                visit_type:               "support".to_owned(),
+                scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
+                window_hours:             Some(4),
+                support_booking_capacity: Some(2),
+                expected_box_count:       Some(0),
+            }, &bus,
+        ).await.expect("schedule_visit must succeed")
+    });
 
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    staff_svc::arrive_at_visit(&mut tx, &pool, visit.id, staff,
-        ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
-    ).await.expect("arrive_at_visit must succeed");
-    tx.commit().await.unwrap();
+    with_rls_tx!(&pool, staff, |tx| {
+        staff_svc::arrive_at_visit(&mut tx, &pool, visit.id, staff,
+            ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+        ).await.expect("arrive_at_visit must succeed")
+    });
 
     // ── Step 1: User creates support booking ─────────────────────────────────
 
-    let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-    let booking = sup_svc::create_booking(&mut tx, &pool, user,
-        CreateBookingRequest {
-            visit_id:          visit.id,
-            issue_description: Some("Need help with identity verification".to_owned()),
-            priority:          Some("urgent".to_owned()),
-        }, &bus,
-    ).await.expect("create_booking must succeed");
-    tx.commit().await.unwrap();
+    let booking = with_rls_tx!(&pool, user, |tx| {
+        sup_svc::create_booking(&mut tx, &pool, user,
+            CreateBookingRequest {
+                visit_id:          visit.id,
+                issue_description: Some("Need help with identity verification".to_owned()),
+                priority:          Some("urgent".to_owned()),
+            }, &bus,
+        ).await.expect("create_booking must succeed")
+    });
 
     assert_eq!(booking.status, "booked");
     assert_eq!(booking.priority, "urgent");
@@ -1813,27 +1813,27 @@ async fn full_support_booking_journey(pool: PgPool) {
 
     // ── Step 2: Staff marks user as attended ─────────────────────────────────
 
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    let attended = sup_svc::attend_booking(&mut tx, &pool, booking.id, staff)
-        .await.expect("attend_booking must succeed");
-    tx.commit().await.unwrap();
+    let attended = with_rls_tx!(&pool, staff, |tx| {
+        sup_svc::attend_booking(&mut tx, &pool, booking.id, staff)
+            .await.expect("attend_booking must succeed")
+    });
 
     assert_eq!(attended.status, "attended");
     assert!(attended.attended_at.is_some());
 
     // ── Step 3: Staff resolves with platform gift box ─────────────────────────
 
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    let resolved = sup_svc::resolve_booking(
-        &mut tx, &pool, booking.id, staff,
-        ResolveBookingRequest {
-            resolution_description: "Helped user complete identity verification".to_owned(),
-            resolution_signature:   "staff-resolve-sig".to_owned(),
-            gift_box_provided:      true,
-            gift_box_id:            None,
-        }, &bus,
-    ).await.expect("resolve_booking must succeed");
-    tx.commit().await.unwrap();
+    let resolved = with_rls_tx!(&pool, staff, |tx| {
+        sup_svc::resolve_booking(
+            &mut tx, &pool, booking.id, staff,
+            ResolveBookingRequest {
+                resolution_description: "Helped user complete identity verification".to_owned(),
+                resolution_signature:   "staff-resolve-sig".to_owned(),
+                gift_box_provided:      true,
+                gift_box_id:            None,
+            }, &bus,
+        ).await.expect("resolve_booking must succeed")
+    });
 
     assert_eq!(resolved.status, "resolved");
     assert!(resolved.resolved_at.is_some());
@@ -1883,47 +1883,47 @@ async fn full_support_booking_journey(pool: PgPool) {
     // Reuse the same user as user2 to test the 6-month limit.
     // Give the first user a second booking at a new visit.
 
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    let visit2 = staff_svc::schedule_visit(&mut tx, &pool, staff,
-        ScheduleVisitRequest {
-            location_id:              loc_id,
-            visit_type:               "support".to_owned(),
-            scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(2),
-            window_hours:             Some(4),
-            support_booking_capacity: Some(2),
-            expected_box_count:       Some(0),
-        }, &bus,
-    ).await.unwrap();
-    tx.commit().await.unwrap();
+    let visit2 = with_rls_tx!(&pool, staff, |tx| {
+        staff_svc::schedule_visit(&mut tx, &pool, staff,
+            ScheduleVisitRequest {
+                location_id:              loc_id,
+                visit_type:               "support".to_owned(),
+                scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(2),
+                window_hours:             Some(4),
+                support_booking_capacity: Some(2),
+                expected_box_count:       Some(0),
+            }, &bus,
+        ).await.unwrap()
+    });
 
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    staff_svc::arrive_at_visit(&mut tx, &pool, visit2.id, staff,
-        ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
-    ).await.unwrap();
-    tx.commit().await.unwrap();
+    with_rls_tx!(&pool, staff, |tx| {
+        staff_svc::arrive_at_visit(&mut tx, &pool, visit2.id, staff,
+            ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+        ).await.unwrap()
+    });
 
-    let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
-    let booking2 = sup_svc::create_booking(&mut tx, &pool, user,
-        CreateBookingRequest { visit_id: visit2.id, issue_description: None, priority: None },
-        &bus,
-    ).await.expect("second booking must succeed");
-    tx.commit().await.unwrap();
+    let booking2 = with_rls_tx!(&pool, user, |tx| {
+        sup_svc::create_booking(&mut tx, &pool, user,
+            CreateBookingRequest { visit_id: visit2.id, issue_description: None, priority: None },
+            &bus,
+        ).await.expect("second booking must succeed")
+    });
 
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    sup_svc::attend_booking(&mut tx, &pool, booking2.id, staff).await.unwrap();
-    tx.commit().await.unwrap();
+    with_rls_tx!(&pool, staff, |tx| {
+        sup_svc::attend_booking(&mut tx, &pool, booking2.id, staff).await.unwrap()
+    });
 
-    let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
-    sup_svc::resolve_booking(
-        &mut tx, &pool, booking2.id, staff,
-        ResolveBookingRequest {
-            resolution_description: "Resolved second visit".to_owned(),
-            resolution_signature:   "staff-sig-2".to_owned(),
-            gift_box_provided:      true,
-            gift_box_id:            None,
-        }, &bus,
-    ).await.unwrap();
-    tx.commit().await.unwrap();
+    with_rls_tx!(&pool, staff, |tx| {
+        sup_svc::resolve_booking(
+            &mut tx, &pool, booking2.id, staff,
+            ResolveBookingRequest {
+                resolution_description: "Resolved second visit".to_owned(),
+                resolution_signature:   "staff-sig-2".to_owned(),
+                gift_box_provided:      true,
+                gift_box_id:            None,
+            }, &bus,
+        ).await.unwrap()
+    });
 
     // Second gift within 6 months must be user-covered.
     let gift_rows: Vec<String> = sqlx::query_scalar(
@@ -2012,28 +2012,28 @@ async fn full_attestation_token_lifecycle(pool: PgPool) {
         .bind(uid).execute(&pool).await.unwrap();
 
     let kp = common::test_ed25519_key_pair();
-    let mut tx = RlsTransaction::begin(&pool, uid).await.unwrap();
-    st_svc::issue_soultoken(&mut tx, &pool, user,
-        IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-        b"test-soultoken-hmac-key-32bytes!!", &kp, &bus,
-    ).await.expect("issue_soultoken must succeed");
-    tx.commit().await.unwrap();
+    with_rls_tx!(&pool, uid, |tx| {
+        st_svc::issue_soultoken(&mut tx, &pool, user,
+            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+            b"test-soultoken-hmac-key-32bytes!!", &kp, &bus,
+        ).await.expect("issue_soultoken must succeed")
+    });
 
     let user_id = uid;
 
     // ── Step 1: Issue attestation token ──────────────────────────────────────
 
-    let mut tx = RlsTransaction::begin(&pool, uid).await.unwrap();
-    let issued = at_svc::issue_token(&mut tx, &pool, user,
-        IssueAttestationTokenRequest {
-            scope: "presence.verified".to_owned(),
-            requesting_business_soultoken_id: None,
-            user_device_id: Some("device-abc".to_owned()),
-            presentation_latitude: None,
-            presentation_longitude: None,
-        }, &bus,
-    ).await.expect("issue_token must succeed");
-    tx.commit().await.unwrap();
+    let issued = with_rls_tx!(&pool, uid, |tx| {
+        at_svc::issue_token(&mut tx, &pool, user,
+            IssueAttestationTokenRequest {
+                scope: "presence.verified".to_owned(),
+                requesting_business_soultoken_id: None,
+                user_device_id: Some("device-abc".to_owned()),
+                presentation_latitude: None,
+                presentation_longitude: None,
+            }, &bus,
+        ).await.expect("issue_token must succeed")
+    });
 
     assert_eq!(issued.scope, "presence.verified");
     assert_eq!(issued.raw_token.len(), 64, "raw_token must be 64 hex chars");
@@ -2194,19 +2194,19 @@ async fn full_audit_trail_completeness(pool: PgPool) {
     ).bind(uid).execute(&pool).await.unwrap();
 
     let kp = common::test_ed25519_key_pair();
-    let mut tx = RlsTransaction::begin(&pool, uid).await.unwrap();
-    st_svc::issue_soultoken(&mut tx, &pool, user,
-        IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-        b"test-soultoken-hmac-key-32bytes!!", &kp, &bus,
-    ).await.expect("issue_soultoken must succeed");
-    tx.commit().await.unwrap();
+    with_rls_tx!(&pool, uid, |tx| {
+        st_svc::issue_soultoken(&mut tx, &pool, user,
+            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+            b"test-soultoken-hmac-key-32bytes!!", &kp, &bus,
+        ).await.expect("issue_soultoken must succeed")
+    });
 
     // ── Request audit trail ───────────────────────────────────────────────────
 
-    let mut tx = RlsTransaction::begin(&pool, uid).await.unwrap();
-    let trail = ve_svc::get_my_audit_trail(&mut tx, &pool, user)
-        .await.expect("get_my_audit_trail must succeed");
-    tx.commit().await.unwrap();
+    let trail = with_rls_tx!(&pool, uid, |tx| {
+        ve_svc::get_my_audit_trail(&mut tx, &pool, user)
+            .await.expect("get_my_audit_trail must succeed")
+    });
 
     // ── Assert all sections populated ─────────────────────────────────────────
 
@@ -2288,9 +2288,9 @@ async fn full_configuration_lifecycle(pool: PgPool) {
 
     cfg_svc::initialize_defaults(&pool).await.expect("initialize_defaults must succeed");
 
-    let mut atx = AdminRlsTransaction::begin(&pool).await.unwrap();
-    let all = cfg_svc::get_all_configuration(&mut atx, &pool, admin).await.unwrap();
-    atx.commit().await.unwrap();
+    let all = with_admin_tx!(&pool, |atx| {
+        cfg_svc::get_all_configuration(&mut atx, &pool, admin).await.unwrap()
+    });
     assert_eq!(all.len(), 18, "must have all 18 default keys (14 BFIP §15 + 4 rate-limit cleanup #8)");
 
     let cooling = all.iter().find(|c| c.key == "cooling_period_days").unwrap();
@@ -2298,12 +2298,12 @@ async fn full_configuration_lifecycle(pool: PgPool) {
 
     // ── Step 2: Admin updates cooling_period_days ─────────────────────────────
 
-    let mut atx = AdminRlsTransaction::begin(&pool).await.unwrap();
-    let updated = cfg_svc::update_configuration(
-        &mut atx, &pool, "cooling_period_days", admin,
-        UpdateConfigurationRequest { value: "14".to_string() },
-    ).await.expect("update must succeed");
-    atx.commit().await.unwrap();
+    let updated = with_admin_tx!(&pool, |atx| {
+        cfg_svc::update_configuration(
+            &mut atx, &pool, "cooling_period_days", admin,
+            UpdateConfigurationRequest { value: "14".to_string() },
+        ).await.expect("update must succeed")
+    });
 
     assert_eq!(updated.value, "14", "value must be updated");
 

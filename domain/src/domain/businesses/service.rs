@@ -216,6 +216,7 @@ pub async fn list_my_businesses(
 mod tests {
     use super::*;
     use crate::event_bus::EventBus;
+    use crate::with_rls_tx;
     use sqlx::PgPool;
 
     fn test_req(name: &str) -> CreateBusinessRequest {
@@ -261,11 +262,11 @@ mod tests {
         let user_id = create_attested_user(&pool, "attested@biz.test").await;
         let bus     = EventBus::new();
 
-        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
-        let resp = create_business(&mut tx, &pool, user_id, test_req("Test Café"), &bus)
-            .await
-            .expect("attested user must be able to create a business");
-        tx.commit().await.unwrap();
+        let resp = with_rls_tx!(&pool, user_id, |tx| {
+            create_business(&mut tx, &pool, user_id, test_req("Test Café"), &bus)
+                .await
+                .expect("attested user must be able to create a business")
+        });
 
         assert_eq!(resp.name, "Test Café");
         assert_eq!(resp.verification_status, "pending");
@@ -395,15 +396,15 @@ mod tests {
             let address = format!("{} {}, Edmonton, AB",
                 (i + 1) * 100,
                 StreetName().fake::<String>());
-            let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
-            create_business(&mut tx, &pool, user_id, CreateBusinessRequest {
-                name, address,
-                latitude: None, longitude: None, timezone: None,
-                contact_email: None, contact_phone: None,
-            }, &bus)
-            .await
-            .unwrap_or_else(|e| panic!("business {i} creation failed: {e:?}"));
-            tx.commit().await.unwrap();
+            with_rls_tx!(&pool, user_id, |tx| {
+                create_business(&mut tx, &pool, user_id, CreateBusinessRequest {
+                    name, address,
+                    latitude: None, longitude: None, timezone: None,
+                    contact_email: None, contact_phone: None,
+                }, &bus)
+                .await
+                .unwrap_or_else(|e| panic!("business {i} creation failed: {e:?}"));
+            });
         }
 
         // 6th attempt must fail.
