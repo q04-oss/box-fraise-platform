@@ -2721,3 +2721,575 @@ async fn presence_same_day_increments_events_but_not_days(pool: PgPool) {
     assert_eq!(event_rows, 2,
         "two presence_events rows must exist — events themselves are not deduped");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Full BFIP protocol journey — registration → cleared-for-attestation →
+// soultoken → order → NFC collection. Walks one user through every stage
+// of the protocol. Long by design — this is the proof that the chain
+// holds together as a system, not just stage-by-stage.
+//
+// Stages that depend on real time passage (cooling) or external systems
+// (Stripe / background-check provider webhooks) are simulated by direct
+// DB writes — the unit tests cover those mechanisms in isolation; the
+// purpose here is to verify state transitions across the full chain.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[sqlx::test(migrations = "../server/migrations")]
+async fn full_bfip_protocol_journey(pool: PgPool) {
+    use box_fraise_domain::crypto::Ed25519KeyPair;
+    use box_fraise_domain::domain::{
+        attestations::{
+            service as attest_svc,
+            service::attestation_payload,
+            types::{
+                InitiateAttestationRequest, ReviewerSignAttestationRequest,
+                StaffSignAttestationRequest,
+            },
+        },
+        background_checks::{service as bc_svc, types::InitiateCheckRequest},
+        beacons::service::derive_witness_hmac,
+        identity_credentials::{
+            service as ic_svc,
+            types::{InitiateVerificationRequest, RecordAppOpenRequest},
+        },
+        orders::{
+            service as orders_svc,
+            types::{ActivateBoxRequest, CollectOrderRequest, CreateOrderRequest},
+        },
+        presence::{
+            service as presence_svc, types::RecordBeaconDwellRequest,
+        },
+        soultokens::{service as st_svc, types::IssueSoultokenRequest},
+        staff::{
+            service as staff_svc,
+            types::{
+                ArriveAtVisitRequest, GrantRoleRequest, ScheduleVisitRequest,
+            },
+        },
+    };
+    use box_fraise_domain::types::UserId;
+
+    let bus = EventBus::new();
+
+    // Hardcoded calendar dates so cooling-day distinctness and presence-day
+    // distinctness are deterministic.
+    let day_jan_15 = chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+    let day_jan_16 = chrono::NaiveDate::from_ymd_opt(2026, 1, 16).unwrap();
+    let day_jan_17 = chrono::NaiveDate::from_ymd_opt(2026, 1, 17).unwrap();
+    let presence_day_a = chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+    let presence_day_b = chrono::NaiveDate::from_ymd_opt(2026, 2, 2).unwrap();
+    let presence_day_c = chrono::NaiveDate::from_ymd_opt(2026, 2, 3).unwrap();
+
+    // ── Stage 0 — Registration ───────────────────────────────────────────────
+    //
+    // For the test we INSERT directly (the auth path creates users via
+    // `find_or_create_user_by_email`, which is exercised by the magic-link
+    // tests; here we just want a registered user).
+    let (user_id_i,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('bfip-journey@test.bfip', true, 'registered') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let user = UserId::from(user_id_i);
+
+    let status: String = sqlx::query_scalar(
+        "SELECT verification_status FROM users WHERE id = $1",
+    ).bind(user_id_i).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "registered", "Stage 0: user must start as registered");
+
+    // ── Stage 1 — Identity confirmation ──────────────────────────────────────
+    //
+    // `initiate_verification` BOTH creates the credential AND advances the
+    // user to `identity_confirmed`, AND writes the cooling_period_started
+    // verification_event. (The Stripe webhook in production updates the
+    // raw verification status; we skip simulating it here — `handle_stripe_webhook`
+    // requires a live HMAC over the payload, which is a separate concern
+    // covered by unit tests.)
+    let cred = with_rls_tx!(&pool, user, |tx| {
+        ic_svc::initiate_verification(
+            &mut tx, &pool, user,
+            InitiateVerificationRequest {
+                stripe_session_id: "sess_bfip_journey".to_owned(),
+            },
+            &bus,
+        ).await.expect("Stage 1: initiate_verification must succeed")
+    });
+
+    let status: String = sqlx::query_scalar(
+        "SELECT verification_status FROM users WHERE id = $1",
+    ).bind(user_id_i).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "identity_confirmed", "Stage 1: user must be identity_confirmed");
+    assert!(cred.cooling_ends_at > chrono::Utc::now(),
+        "Stage 1: cooling_ends_at must be in the future");
+
+    let ve_count_identity: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM verification_events \
+         WHERE user_id = $1 AND event_type IN ('identity_confirmed', 'cooling_period_started')",
+    ).bind(user_id_i).fetch_one(&pool).await.unwrap();
+    assert_eq!(ve_count_identity, 2,
+        "Stage 1: identity_confirmed + cooling_period_started events must be written");
+
+    // ── Stage 2 — Cooling period ─────────────────────────────────────────────
+    //
+    // The service uses `Utc::now().date_naive()` for the calendar day, so we
+    // can't pass fixed dates through `record_app_open`. Two options:
+    //   (a) call record_app_open three times — but they'd all land on
+    //       today's date, failing the distinct-days requirement.
+    //   (b) seed the cooling_period_events table directly with the three
+    //       fixed dates, plus pull cooling_ends_at into the past so the
+    //       window is satisfied. Then a single record_app_open call (which
+    //       inserts today's row, sees count >= 3, completes cooling).
+    //
+    // (b) is what we do — it exercises the completion-detection logic
+    // without waiting 7 days.
+    sqlx::query(
+        "UPDATE identity_credentials SET cooling_ends_at = $1 WHERE id = $2",
+    )
+    .bind(chrono::Utc::now() - chrono::Duration::hours(1))
+    .bind(cred.id)
+    .execute(&pool).await.unwrap();
+
+    for day in [day_jan_15, day_jan_16, day_jan_17] {
+        sqlx::query(
+            "INSERT INTO cooling_period_events \
+             (user_id, credential_id, calendar_date) VALUES ($1, $2, $3)",
+        )
+        .bind(user_id_i).bind(cred.id).bind(day)
+        .execute(&pool).await.unwrap();
+    }
+
+    let cooling = with_rls_tx!(&pool, user, |tx| {
+        ic_svc::record_app_open(
+            &mut tx, &pool, user,
+            RecordAppOpenRequest {
+                credential_id: cred.id,
+                device_identifier: None,
+                app_attest_assertion: None,
+            },
+            &bus,
+        ).await.expect("Stage 2: record_app_open must succeed")
+    });
+
+    assert!(cooling.cooling_completed_at.is_some(),
+        "Stage 2: cooling_completed_at must be set after enough days + window");
+    assert!(cooling.days_completed >= 3,
+        "Stage 2: at least 3 distinct days recorded, got {}", cooling.days_completed);
+
+    let ve_cooling_complete: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM verification_events \
+         WHERE user_id = $1 AND event_type = 'cooling_period_completed'",
+    ).bind(user_id_i).fetch_one(&pool).await.unwrap();
+    assert_eq!(ve_cooling_complete, 1,
+        "Stage 2: cooling_period_completed event must be written");
+
+    // ── Stage 3 — Background checks ──────────────────────────────────────────
+    //
+    // Initiate sanctions + identity_fraud, then simulate provider webhooks
+    // by directly UPDATEing the rows to `passed`. The webhook path itself
+    // is exercised by background_checks unit tests.
+    for check_type in ["sanctions", "identity_fraud"] {
+        let check = with_rls_tx!(&pool, user, |tx| {
+            bc_svc::initiate_check(
+                &mut tx, &pool, user,
+                InitiateCheckRequest {
+                    check_type: check_type.to_owned(),
+                    provider:   "comply_advantage".to_owned(),
+                },
+                &bus,
+            ).await.expect(&format!("Stage 3: initiate {check_type} check must succeed"))
+        });
+
+        // Simulated webhook completion.
+        sqlx::query(
+            "UPDATE background_checks \
+             SET status = 'passed', checked_at = now(), \
+                 expires_at = now() + INTERVAL '12 months' \
+             WHERE id = $1",
+        ).bind(check.id).execute(&pool).await.unwrap();
+
+        // The webhook also writes a verification_event in production.
+        // Mirror that here so the final event-sequence assertion is honest
+        // about what production would produce.
+        sqlx::query(
+            "INSERT INTO verification_events \
+             (user_id, event_type, reference_type, reference_id, actor_id, metadata) \
+             VALUES ($1, 'background_check_passed', 'identity_credential', $2, $1, $3)",
+        )
+        .bind(user_id_i).bind(cred.id)
+        .bind(serde_json::json!({ "check_type": check_type }))
+        .execute(&pool).await.unwrap();
+    }
+
+    let bc_status = bc_svc::get_status(&pool, user).await.unwrap();
+    assert!(bc_status.all_required_passed,
+        "Stage 3: all required background checks must be passed (sanctions + identity_fraud)");
+
+    let ve_bg: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM verification_events \
+         WHERE user_id = $1 AND event_type = 'background_check_passed'",
+    ).bind(user_id_i).fetch_one(&pool).await.unwrap();
+    assert_eq!(ve_bg, 2, "Stage 3: 2 background_check_passed events must be written");
+
+    // ── Stage 4 — Presence verification ──────────────────────────────────────
+    //
+    // Set up: a business owner (attested), a business at a location, a beacon.
+    // Then record 3 qualifying beacon dwells on 3 distinct calendar dates.
+    let (owner_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('bfip-owner@test.bfip', true, 'attested') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('BFIP Loc', 'box_fraise_store', '1 BFIP', 'America/Edmonton') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'BFIP Biz', 'active') RETURNING id",
+    ).bind(loc_id).bind(owner_id).fetch_one(&pool).await.unwrap();
+
+    let secret = "00".repeat(32);
+    let (beacon_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO beacons (business_id, location_id, secret_key, is_active, \
+         minimum_rssi_threshold) VALUES ($1, $2, $3, true, -70) RETURNING id",
+    ).bind(biz_id).bind(loc_id).bind(&secret).fetch_one(&pool).await.unwrap();
+
+    let dwell_at = |day: chrono::NaiveDate| -> chrono::DateTime<chrono::Utc> {
+        // Mid-day UTC so the witness HMAC's calendar_date == this date.
+        chrono::DateTime::parse_from_rfc3339(
+            &format!("{day}T10:00:00Z"),
+        ).unwrap().with_timezone(&chrono::Utc)
+    };
+
+    for day in [presence_day_a, presence_day_b, presence_day_c] {
+        let hmac = derive_witness_hmac(&secret, biz_id, day, user_id_i);
+        let started = dwell_at(day);
+        with_rls_tx!(&pool, user, |tx| {
+            presence_svc::record_beacon_dwell(
+                &mut tx, &pool, user,
+                RecordBeaconDwellRequest {
+                    beacon_id, business_id: biz_id, rssi: -65,
+                    dwell_minutes: 20,
+                    beacon_witness_hmac: hmac,
+                    app_attest_assertion: None,
+                    device_identifier: None,
+                    started_at: started,
+                    ended_at:   started + chrono::Duration::minutes(20),
+                },
+                &bus,
+            ).await.expect("Stage 4: presence dwell must succeed")
+        });
+    }
+
+    let (event_count, days_count, met_at): (i32, i32, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as(
+            "SELECT event_count, days_count, threshold_met_at \
+             FROM presence_thresholds WHERE user_id = $1 AND business_id = $2",
+        ).bind(user_id_i).bind(biz_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(event_count, 3, "Stage 4: 3 qualifying events recorded");
+    assert_eq!(days_count, 3, "Stage 4: 3 distinct days recorded");
+    assert!(met_at.is_some(), "Stage 4: threshold_met_at must be set after 3rd day");
+
+    let status: String = sqlx::query_scalar(
+        "SELECT verification_status FROM users WHERE id = $1",
+    ).bind(user_id_i).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "presence_confirmed", "Stage 4: user must be presence_confirmed");
+
+    let ve_threshold: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM verification_events \
+         WHERE user_id = $1 AND event_type = 'presence_threshold_met'",
+    ).bind(user_id_i).fetch_one(&pool).await.unwrap();
+    assert_eq!(ve_threshold, 1, "Stage 4: presence_threshold_met event written");
+
+    let (threshold_id,): (i32,) = sqlx::query_as(
+        "SELECT id FROM presence_thresholds WHERE user_id = $1 AND business_id = $2",
+    ).bind(user_id_i).bind(biz_id).fetch_one(&pool).await.unwrap();
+
+    // ── Stage 5 — Staff attestation ──────────────────────────────────────────
+    //
+    // Mirrors `full_attestation_journey`: admin grants delivery_staff +
+    // attestation_reviewer roles, schedule + arrive at a visit, initiate +
+    // staff_sign + reviewer_sign x2 → approved → user attested.
+    let (admin_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, is_platform_admin) \
+         VALUES ('bfip-admin@test.bfip', true, true) RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let admin = UserId::from(admin_id);
+
+    let (staff_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('bfip-staff@test.bfip', true) RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let staff = UserId::from(staff_id);
+
+    let (r1_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('bfip-r1@test.bfip', true) RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (r2_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('bfip-r2@test.bfip', true) RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+
+    with_admin_tx!(&pool, |atx| {
+        staff_svc::grant_staff_role(
+            &mut atx, &pool, admin,
+            GrantRoleRequest {
+                user_id: staff_id, role: "delivery_staff".to_owned(),
+                location_id: Some(loc_id), expires_at: None, confirmed_by: None,
+            },
+            &bus,
+        ).await.unwrap()
+    });
+    for rid in [r1_id, r2_id] {
+        with_admin_tx!(&pool, |atx| {
+            staff_svc::grant_staff_role(
+                &mut atx, &pool, admin,
+                GrantRoleRequest {
+                    user_id: rid, role: "attestation_reviewer".to_owned(),
+                    location_id: None, expires_at: None, confirmed_by: None,
+                },
+                &bus,
+            ).await.unwrap()
+        });
+    }
+
+    let visit = with_rls_tx!(&pool, staff, |tx| {
+        staff_svc::schedule_visit(
+            &mut tx, &pool, staff,
+            ScheduleVisitRequest {
+                location_id: loc_id, visit_type: "combined".to_owned(),
+                scheduled_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                window_hours: Some(4), support_booking_capacity: Some(0),
+                expected_box_count: Some(5),
+            },
+            &bus,
+        ).await.expect("Stage 5: schedule_visit must succeed")
+    });
+
+    with_rls_tx!(&pool, staff, |tx| {
+        staff_svc::arrive_at_visit(
+            &mut tx, &pool, visit.id, staff,
+            ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+        ).await.expect("Stage 5: arrive_at_visit must succeed")
+    });
+
+    let attest = with_rls_tx!(&pool, staff, |tx| {
+        attest_svc::initiate_attestation(
+            &mut tx, &pool, staff,
+            InitiateAttestationRequest {
+                visit_id: visit.id, user_id: user_id_i,
+                presence_threshold_id: threshold_id,
+                photo_hash: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned()),
+                photo_storage_uri: None,
+            },
+            &bus,
+        ).await.expect("Stage 5: initiate_attestation must succeed")
+    });
+
+    let staff_kp = Ed25519KeyPair::generate();
+    let r1_kp    = Ed25519KeyPair::generate();
+    let r2_kp    = Ed25519KeyPair::generate();
+    let payload  = attestation_payload(&attest);
+
+    with_rls_tx!(&pool, staff, |tx| {
+        attest_svc::staff_sign(
+            &mut tx, &pool, attest.id, staff,
+            StaffSignAttestationRequest {
+                staff_signature:        staff_kp.sign(payload.as_bytes()),
+                verifying_key_hex:      staff_kp.verifying_key_hex(),
+                photo_hash:             None,
+                location_confirmed:     true,
+                user_present_confirmed: true,
+            },
+            &bus,
+        ).await.expect("Stage 5: staff_sign must succeed")
+    });
+
+    let r1_uid = UserId::from(attest.assigned_reviewer_1_id);
+    with_rls_tx!(&pool, r1_uid, |tx| {
+        attest_svc::reviewer_sign(
+            &mut tx, &pool, attest.id, r1_uid,
+            ReviewerSignAttestationRequest {
+                signature:              if attest.assigned_reviewer_1_id == r1_id {
+                    r1_kp.sign(payload.as_bytes())
+                } else {
+                    r2_kp.sign(payload.as_bytes())
+                },
+                verifying_key_hex:      if attest.assigned_reviewer_1_id == r1_id {
+                    r1_kp.verifying_key_hex()
+                } else {
+                    r2_kp.verifying_key_hex()
+                },
+                evidence_hash_reviewed: "r1-evidence".to_owned(),
+            },
+            &bus,
+        ).await.expect("Stage 5: reviewer_1 sign must succeed")
+    });
+
+    let r2_uid = UserId::from(attest.assigned_reviewer_2_id);
+    let approved = with_rls_tx!(&pool, r2_uid, |tx| {
+        attest_svc::reviewer_sign(
+            &mut tx, &pool, attest.id, r2_uid,
+            ReviewerSignAttestationRequest {
+                signature:              if attest.assigned_reviewer_2_id == r2_id {
+                    r2_kp.sign(payload.as_bytes())
+                } else {
+                    r1_kp.sign(payload.as_bytes())
+                },
+                verifying_key_hex:      if attest.assigned_reviewer_2_id == r2_id {
+                    r2_kp.verifying_key_hex()
+                } else {
+                    r1_kp.verifying_key_hex()
+                },
+                evidence_hash_reviewed: "r2-evidence".to_owned(),
+            },
+            &bus,
+        ).await.expect("Stage 5: reviewer_2 sign must succeed")
+    });
+
+    assert_eq!(approved.status, "approved", "Stage 5: attestation must be approved");
+
+    let (status, attested_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT verification_status, attested_at FROM users WHERE id = $1")
+            .bind(user_id_i).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "attested", "Stage 5: user must be attested");
+    assert!(attested_at.is_some(), "Stage 5: attested_at must be set");
+
+    // Production: attestations service writes audit_events + a DomainEvent
+    // for approval but NOT a verification_events row. The audit row's
+    // `user_id` column records the *reviewer* (acting party); the attested
+    // user is in metadata. Match by event_kind + metadata.
+    let ae_attest: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events \
+         WHERE event_kind = 'attestation.approved' \
+           AND (metadata->>'user_id')::int = $1",
+    ).bind(user_id_i).fetch_one(&pool).await.unwrap();
+    assert_eq!(ae_attest, 1, "Stage 5: attestation.approved audit event written");
+
+    let attempt_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM attestation_attempts \
+         WHERE attestation_id = $1 AND outcome = 'approved'",
+    ).bind(attest.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(attempt_count, 1, "Stage 5: attestation_attempts row with outcome='approved'");
+
+    // ── Stage 6 — Soultoken issuance ─────────────────────────────────────────
+    let st_kp = Ed25519KeyPair::generate();
+    let soultoken = with_rls_tx!(&pool, user, |tx| {
+        st_svc::issue_soultoken(
+            &mut tx, &pool, user,
+            IssueSoultokenRequest {
+                attestation_id: attest.id,
+                token_type:     "user".to_owned(),
+            },
+            b"test-hmac-key-32-bytes-exactly!!", &st_kp, &bus,
+        ).await.expect("Stage 6: issue_soultoken must succeed")
+    });
+
+    let display_re = regex::Regex::new(r"^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$").unwrap();
+    assert!(display_re.is_match(&soultoken.display_code),
+        "Stage 6: display_code must be XXXX-XXXX-XXXX, got: {}", soultoken.display_code);
+
+    let st_id_on_user: Option<i32> = sqlx::query_scalar(
+        "SELECT soultoken_id FROM users WHERE id = $1",
+    ).bind(user_id_i).fetch_one(&pool).await.unwrap();
+    assert_eq!(st_id_on_user, Some(soultoken.id),
+        "Stage 6: users.soultoken_id must point at the new soultoken");
+
+    let ve_st_issued: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM verification_events \
+         WHERE user_id = $1 AND event_type = 'soultoken_issued'",
+    ).bind(user_id_i).fetch_one(&pool).await.unwrap();
+    assert_eq!(ve_st_issued, 1, "Stage 6: soultoken_issued event written");
+
+    // ── Stage 7 — Order + box activation + NFC collection ───────────────────
+    let order = with_rls_tx!(&pool, user, |tx| {
+        orders_svc::create_order(
+            &mut tx, &pool, user,
+            CreateOrderRequest {
+                business_id:         biz_id,
+                variety_description: Some("strawberries — chocolate covered".to_owned()),
+                box_count:           1,
+                amount_cents:        2500,
+            },
+            &bus,
+        ).await.expect("Stage 7: create_order must succeed")
+    });
+
+    let nfc_uid = "nfc-bfip-journey-001";
+    let _activated = with_rls_tx!(&pool, staff, |tx| {
+        orders_svc::activate_box(
+            &mut tx, &pool, visit.id, staff,
+            ActivateBoxRequest {
+                nfc_chip_uid:       nfc_uid.to_owned(),
+                delivery_signature: "staff-delivery-sig".to_owned(),
+                expires_at:         chrono::Utc::now() + chrono::Duration::hours(48),
+            },
+        ).await.expect("Stage 7: activate_box must succeed")
+    });
+
+    let collected = with_rls_tx!(&pool, user, |tx| {
+        orders_svc::collect_order(
+            &mut tx, &pool, user,
+            CollectOrderRequest { nfc_chip_uid: nfc_uid.to_owned() },
+            &bus,
+        ).await.expect("Stage 7: collect_order must succeed")
+    });
+
+    assert_eq!(collected.id, order.id, "Stage 7: collected order must match the created one");
+    assert_eq!(collected.status, "collected", "Stage 7: order status must be 'collected'");
+
+    let (tapped_at, clone_detected): (Option<chrono::DateTime<chrono::Utc>>, bool) =
+        sqlx::query_as("SELECT tapped_at, clone_detected FROM visit_boxes WHERE nfc_chip_uid = $1")
+            .bind(nfc_uid).fetch_one(&pool).await.unwrap();
+    assert!(tapped_at.is_some(), "Stage 7: visit_box.tapped_at must be set");
+    assert!(!clone_detected, "Stage 7: clone_detected must be false on first tap");
+
+    let ae_collected: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events \
+         WHERE user_id = $1 AND event_kind = 'order.collected'",
+    ).bind(user_id_i).fetch_one(&pool).await.unwrap();
+    assert_eq!(ae_collected, 1, "Stage 7: order.collected audit event must be written");
+
+    // ── Final assertions ────────────────────────────────────────────────────
+
+    // Every expected verification_event type appeared, in chronological
+    // order. We don't assert no-other-events because background_check_passed
+    // x2 + cooling_app_open_recorded x0 (we seeded directly) etc. produce
+    // their own counts; the assertion is on the SET of event types observed.
+    let event_types: Vec<String> = sqlx::query_scalar(
+        "SELECT event_type FROM verification_events \
+         WHERE user_id = $1 ORDER BY created_at ASC, id ASC",
+    ).bind(user_id_i).fetch_all(&pool).await.unwrap();
+
+    // NB: attestation approval does NOT write a verification_events row
+    // in production — only an audit_event. Asserted above. The
+    // attestation surface is otherwise fully exercised by Stage 5.
+    let expected_subset = [
+        "identity_confirmed",
+        "cooling_period_started",
+        "cooling_period_completed",
+        "background_check_passed",
+        "presence_threshold_met",
+        "soultoken_issued",
+    ];
+    for ev in expected_subset {
+        assert!(
+            event_types.iter().any(|t| t == ev),
+            "Final: event_types must contain '{ev}', got sequence: {event_types:?}",
+        );
+    }
+
+    // Audit count: counts events whose `user_id` IS the journey user.
+    // Stage-5 attestation/sign events record the reviewer/staff as
+    // `user_id` (target user is in metadata) so they don't show up here;
+    // measured count is exactly the events where the journey user is the
+    // acting party (identity, cooling, presence, soultoken, order …).
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE user_id = $1",
+    ).bind(user_id_i).fetch_one(&pool).await.unwrap();
+    assert!(
+        audit_count >= 10,
+        "Final: full BFIP journey must produce >= 10 audit events for the user, got {audit_count}",
+    );
+}

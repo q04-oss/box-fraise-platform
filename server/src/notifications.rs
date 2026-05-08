@@ -122,4 +122,110 @@ mod tests {
         };
         assert_eq!(soul.target_user_id(), 16);
     }
+
+    // ── Channel-delivery tests (cleanup task 5) ──────────────────────────────
+
+    use tokio::sync::broadcast;
+
+    fn make_channel() -> (
+        broadcast::Sender<NotificationEvent>,
+        broadcast::Receiver<NotificationEvent>,
+    ) {
+        broadcast::channel(16)
+    }
+
+    /// Round-trip: a published `AttestationApproved` reaches a subscriber on
+    /// the same channel with payload intact. Smoke test for the wiring —
+    /// any broken `Clone`/`Send` bound on `NotificationEvent` would surface
+    /// here, not in the (otherwise identical) variant-shape tests above.
+    #[tokio::test]
+    async fn attestation_approved_event_reaches_subscriber() {
+        let (tx, mut rx) = make_channel();
+
+        tx.send(NotificationEvent::AttestationApproved {
+            attestation_id: 42,
+            user_id:        1,
+        }).expect("at least one receiver — rx is in scope");
+
+        let event = rx.recv().await.expect("recv");
+        match event {
+            NotificationEvent::AttestationApproved { attestation_id, user_id } => {
+                assert_eq!(attestation_id, 42);
+                assert_eq!(user_id, 1);
+            }
+            other => panic!("wrong event variant: {other:?}"),
+        }
+    }
+
+    /// `SoultokenIssued` carries `display_code` through the channel
+    /// (cleanup #6 plumbed this end-to-end; this asserts the wire payload
+    /// at the channel boundary specifically — DomainEvent → handler →
+    /// NotificationEvent → SSE).
+    #[tokio::test]
+    async fn soultoken_issued_event_carries_display_code() {
+        let (tx, mut rx) = make_channel();
+
+        tx.send(NotificationEvent::SoultokenIssued {
+            user_id:      1,
+            display_code: "ABCD-EFGH-IJKL".to_owned(),
+        }).expect("at least one receiver");
+
+        let event = rx.recv().await.expect("recv");
+        match event {
+            NotificationEvent::SoultokenIssued { user_id, display_code } => {
+                assert_eq!(user_id, 1);
+                assert_eq!(display_code, "ABCD-EFGH-IJKL");
+            }
+            other => panic!("wrong event variant: {other:?}"),
+        }
+    }
+
+    /// User-scoped filtering: an event whose `target_user_id()` is user_a's id
+    /// must NOT match user_b's filter `(target == user_b || target == 0)`.
+    /// This is the exact predicate the SSE handler uses to decide whether to
+    /// forward a received event to its connected client.
+    #[tokio::test]
+    async fn user_b_does_not_receive_user_a_events() {
+        let (tx, mut rx) = make_channel();
+        let user_a_id = 1;
+        let user_b_id = 2;
+
+        tx.send(NotificationEvent::AttestationApproved {
+            attestation_id: 1,
+            user_id:        user_a_id,
+        }).expect("at least one receiver");
+
+        let event = rx.recv().await.expect("recv");
+        let target = event.target_user_id();
+
+        // User B's filter, exactly as the SSE handler applies it.
+        let user_b_should_receive = target == user_b_id || target == 0;
+        assert!(
+            !user_b_should_receive,
+            "user_b filter must reject user_a's event (target_user_id = {target})",
+        );
+    }
+
+    /// Broadcast variants (`target_user_id() == 0`) reach every subscriber.
+    /// `tokio::sync::broadcast` fan-out is tested by tokio itself, but this
+    /// pins down our intent: a 0-target event must not be filtered out by
+    /// the per-user predicate for ANY subscriber.
+    #[tokio::test]
+    async fn broadcast_event_reaches_all_subscribers() {
+        let (tx, mut rx1) = make_channel();
+        let mut rx2 = tx.subscribe();
+
+        tx.send(NotificationEvent::DeliveryRevealed {
+            visit_id:     1,
+            business_id:  1,
+            window_start: chrono::Utc::now(),
+            window_hours: 4,
+        }).expect("two receivers");
+
+        let event1 = rx1.recv().await.expect("rx1");
+        let event2 = rx2.recv().await.expect("rx2");
+
+        assert_eq!(event1.target_user_id(), 0, "rx1 sees broadcast sentinel");
+        assert_eq!(event2.target_user_id(), 0, "rx2 sees broadcast sentinel");
+    }
 }
