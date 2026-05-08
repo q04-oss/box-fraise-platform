@@ -23,8 +23,10 @@ use p256::{
     pkcs8::DecodePublicKey,
 };
 use sha2::{Digest, Sha256};
+use sqlx::PgConnection;
 use x509_parser::prelude::*;
 
+use crate::domain::identity_credentials::repository as ic_repo;
 use crate::error::DomainError;
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -50,38 +52,58 @@ impl AppAttestPolicy {
     pub const ENABLED: Self  = Self { enabled: true };
 }
 
-/// Gate a presence-class request on a present, non-empty App Attest assertion.
+/// Gate a presence-class request on a cryptographically valid App Attest
+/// assertion.
 ///
 /// When `policy.enabled` is false, this is a silent no-op (dev/test mode).
 ///
-/// When enabled, requires both `assertion` and `key_id` to be `Some(non-empty)`.
-/// Returns `DomainError::Forbidden` otherwise. Once present, the call falls
-/// through to a presence-only check — full cryptographic verification (via
-/// [`verify_assertion`]) is deferred until the per-device public-key DER is
-/// persisted at attestation registration. A `tracing::warn!` records that the
-/// stub path was taken so this is visible in production logs.
-pub fn enforce_assertion(
-    policy:    AppAttestPolicy,
-    assertion: Option<&str>,
-    key_id:    Option<&str>,
+/// When enabled the request must:
+///   1. Carry a non-empty `X-App-Attest-Assertion` and `X-App-Attest-Key-Id`.
+///   2. Reference a `key_id` previously registered via `register_app_attest_key`
+///      on one of the caller's `identity_credentials` rows.
+///   3. Pass `verify_assertion` against that registered public key — the
+///      ECDSA-P256 signature must verify over `SHA-256(authenticatorData ‖
+///      SHA-256(request_body))`. Any failure surfaces as `Forbidden` with
+///      a `tracing::warn!` carrying the precise reason for forensics
+///      (the HTTP body never echoes which gate failed).
+pub async fn enforce_assertion(
+    policy:       AppAttestPolicy,
+    assertion:    Option<&str>,
+    key_id:       Option<&str>,
+    request_body: &[u8],
+    conn:         &mut PgConnection,
 ) -> Result<(), DomainError> {
     if !policy.enabled {
         return Ok(());
     }
-    let assertion_ok = assertion.map(|s| !s.is_empty()).unwrap_or(false);
-    let key_id_ok    = key_id.map(|s| !s.is_empty()).unwrap_or(false);
-    if !assertion_ok || !key_id_ok {
-        return Err(DomainError::Forbidden);
-    }
-    // TODO(app-attest-full): wire `verify_assertion` here once
-    // `identity_credentials` carries the per-device public-key DER.
-    // The crypto routine in this module is complete; only the registered
-    // public-key lookup by key_id is missing.
-    tracing::warn!(
-        "App Attest: presence-only enforcement (full crypto verification \
-         pending per-device public-key storage)"
-    );
-    Ok(())
+
+    let assertion = match assertion {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            tracing::warn!("App Attest reject: missing assertion header");
+            return Err(DomainError::Forbidden);
+        }
+    };
+    let key_id = match key_id {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            tracing::warn!("App Attest reject: missing key_id header");
+            return Err(DomainError::Forbidden);
+        }
+    };
+
+    let public_key_der = ic_repo::get_app_attest_public_key(conn, key_id)
+        .await
+        .map_err(DomainError::Db)?
+        .ok_or_else(|| {
+            tracing::warn!(key_id = %key_id, "App Attest reject: key not registered");
+            DomainError::Forbidden
+        })?;
+
+    verify_assertion(assertion, &public_key_der, request_body).map_err(|_| {
+        tracing::warn!(key_id = %key_id, "App Attest reject: signature verification failed");
+        DomainError::Forbidden
+    })
 }
 
 // ── Attestation parsing ───────────────────────────────────────────────────────
@@ -269,5 +291,162 @@ fn map_bytes<'a>(map: &'a [(Cbor, Cbor)], key: &str) -> Option<&'a [u8]> {
     match map_value(map, key)? {
         Cbor::Bytes(b) => Some(b.as_slice()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Full-crypto tests for `enforce_assertion`. These don't use real
+    //! Apple-issued attestations — we generate a P-256 keypair, persist the
+    //! DER SPKI ourselves, and produce CBOR assertions whose signature is
+    //! valid against `verify_assertion`'s exact reconstruction. That gives
+    //! us end-to-end coverage of the lookup + crypto path without needing
+    //! a real iOS device in the loop.
+    use super::*;
+    use p256::ecdsa::signature::hazmat::PrehashSigner;
+    use p256::ecdsa::{DerSignature as P256DerSignature, SigningKey};
+    use p256::pkcs8::EncodePublicKey;
+    use rand::rngs::OsRng;
+    use sqlx::PgPool;
+
+    /// Create a user + identity_credentials row so `register_app_attest_key`
+    /// has something to UPDATE.
+    async fn setup_user(pool: &PgPool, email: &str) -> i32 {
+        let (uid,): (i32,) = sqlx::query_as(
+            "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
+        )
+        .bind(email).fetch_one(pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO identity_credentials (user_id, credential_type, verified_at, cooling_ends_at) \
+             VALUES ($1, 'stripe_identity', now(), now() + interval '7 days')"
+        )
+        .bind(uid).execute(pool).await.unwrap();
+        uid
+    }
+
+    /// Build a CBOR App Attest assertion that verifies under `signing_key`
+    /// for the supplied `request_message` and arbitrary `auth_data`.
+    fn make_assertion(
+        signing_key:     &SigningKey,
+        auth_data:       &[u8],
+        request_message: &[u8],
+    ) -> String {
+        let client_data_hash: [u8; 32] = Sha256::digest(request_message).into();
+        let mut to_hash = Vec::with_capacity(auth_data.len() + 32);
+        to_hash.extend_from_slice(auth_data);
+        to_hash.extend_from_slice(&client_data_hash);
+        let digest: [u8; 32] = Sha256::digest(&to_hash).into();
+
+        let sig: P256DerSignature = signing_key.sign_prehash(&digest)
+            .expect("sign_prehash");
+        let sig_bytes: Vec<u8> = sig.as_bytes().to_vec();
+
+        let cbor = Cbor::Map(vec![
+            (Cbor::Text("signature".into()),         Cbor::Bytes(sig_bytes)),
+            (Cbor::Text("authenticatorData".into()), Cbor::Bytes(auth_data.to_vec())),
+        ]);
+        let mut out = Vec::new();
+        ciborium::ser::into_writer(&cbor, &mut out).unwrap();
+        STANDARD.encode(&out)
+    }
+
+    fn keypair_and_der() -> (SigningKey, Vec<u8>) {
+        let sk  = SigningKey::random(&mut OsRng);
+        let vk  = sk.verifying_key();
+        let der = vk.to_public_key_der().expect("SPKI DER").as_bytes().to_vec();
+        (sk, der)
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn enforce_assertion_verifies_with_real_key_pair(pool: PgPool) {
+        let uid = setup_user(&pool, "attest1@test.com").await;
+        let (sk, der) = keypair_and_der();
+        let key_id = "kid-real-1";
+
+        let mut conn = pool.acquire().await.unwrap();
+        ic_repo::register_app_attest_key(&mut conn, uid, key_id, der).await.unwrap();
+
+        let body = b"presence event payload";
+        let assertion = make_assertion(&sk, b"auth-data-bytes", body);
+
+        let mut conn = pool.acquire().await.unwrap();
+        let result = enforce_assertion(
+            AppAttestPolicy::ENABLED,
+            Some(&assertion),
+            Some(key_id),
+            body,
+            &mut conn,
+        ).await;
+        assert!(result.is_ok(), "valid assertion must verify: {:?}", result);
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn enforce_assertion_rejects_wrong_key(pool: PgPool) {
+        let uid = setup_user(&pool, "attest2@test.com").await;
+        // Register key A's public key, but sign with key B — verification must fail.
+        let (_sk_a, der_a) = keypair_and_der();
+        let (sk_b, _der_b) = keypair_and_der();
+        let key_id = "kid-wrong-key";
+
+        let mut conn = pool.acquire().await.unwrap();
+        ic_repo::register_app_attest_key(&mut conn, uid, key_id, der_a).await.unwrap();
+
+        let body = b"presence event payload";
+        let assertion = make_assertion(&sk_b, b"auth-data-bytes", body);
+
+        let mut conn = pool.acquire().await.unwrap();
+        let err = enforce_assertion(
+            AppAttestPolicy::ENABLED,
+            Some(&assertion),
+            Some(key_id),
+            body,
+            &mut conn,
+        ).await.expect_err("wrong-key signature must reject");
+        assert!(matches!(err, DomainError::Forbidden), "expected Forbidden, got: {err:?}");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn enforce_assertion_rejects_tampered_body(pool: PgPool) {
+        let uid = setup_user(&pool, "attest3@test.com").await;
+        let (sk, der) = keypair_and_der();
+        let key_id = "kid-tampered-body";
+
+        let mut conn = pool.acquire().await.unwrap();
+        ic_repo::register_app_attest_key(&mut conn, uid, key_id, der).await.unwrap();
+
+        // Sign over original body, but submit with mutated bytes.
+        let original = b"the original request payload";
+        let mutated  = b"the mutated  request payload"; // same length, different content
+        let assertion = make_assertion(&sk, b"auth-data-bytes", original);
+
+        let mut conn = pool.acquire().await.unwrap();
+        let err = enforce_assertion(
+            AppAttestPolicy::ENABLED,
+            Some(&assertion),
+            Some(key_id),
+            mutated,
+            &mut conn,
+        ).await.expect_err("tampered body must reject");
+        assert!(matches!(err, DomainError::Forbidden), "expected Forbidden, got: {err:?}");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn enforce_assertion_rejects_unregistered_key(pool: PgPool) {
+        let _uid = setup_user(&pool, "attest4@test.com").await;
+        let (sk, _der) = keypair_and_der();
+
+        let body = b"presence event payload";
+        let assertion = make_assertion(&sk, b"auth-data-bytes", body);
+
+        // key_id was never registered for any user.
+        let mut conn = pool.acquire().await.unwrap();
+        let err = enforce_assertion(
+            AppAttestPolicy::ENABLED,
+            Some(&assertion),
+            Some("kid-never-registered"),
+            body,
+            &mut conn,
+        ).await.expect_err("unregistered key must reject");
+        assert!(matches!(err, DomainError::Forbidden), "expected Forbidden, got: {err:?}");
     }
 }

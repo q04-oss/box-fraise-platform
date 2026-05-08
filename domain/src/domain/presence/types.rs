@@ -86,7 +86,7 @@ pub const PRESENCE_THRESHOLD_COLS: &str =
 
 /// Request body for `POST /api/presence/beacon-dwell`.
 #[allow(missing_docs)]
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct RecordBeaconDwellRequest {
     pub beacon_id:             i32,
     pub business_id:           i32,
@@ -102,7 +102,7 @@ pub struct RecordBeaconDwellRequest {
 
 /// Request body for `POST /api/presence/nfc-tap`.
 #[allow(missing_docs)]
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct RecordNfcTapRequest {
     pub box_id:               i32,
     pub business_id:          i32,

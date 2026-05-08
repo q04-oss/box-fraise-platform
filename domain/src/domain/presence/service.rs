@@ -226,12 +226,15 @@ pub async fn record_beacon_dwell(
     bus:     &EventBus,
     policy:  AppAttestPolicy,
 ) -> AppResult<PresenceStatusResponse> {
-    // 0. App Attest gate (Hardening §3a / Grade A item 2).
+    // 0. App Attest gate (Hardening §3a / Grade A item 1).
+    let request_bytes = serde_json::to_vec(&req).unwrap_or_default();
     apple_attest::enforce_assertion(
         policy,
         req.app_attest_assertion.as_deref(),
         req.app_attest_key_id.as_deref(),
-    )?;
+        &request_bytes,
+        tx.as_mut(),
+    ).await?;
 
     let uid = i32::from(user_id);
 
@@ -371,12 +374,15 @@ pub async fn record_nfc_tap(
     bus:     &EventBus,
     policy:  AppAttestPolicy,
 ) -> AppResult<PresenceStatusResponse> {
-    // 0. App Attest gate (Hardening §3a / Grade A item 2).
+    // 0. App Attest gate (Hardening §3a / Grade A item 1).
+    let request_bytes = serde_json::to_vec(&req).unwrap_or_default();
     apple_attest::enforce_assertion(
         policy,
         req.app_attest_assertion.as_deref(),
         req.app_attest_key_id.as_deref(),
-    )?;
+        &request_bytes,
+        tx.as_mut(),
+    ).await?;
 
     let uid = i32::from(user_id);
 

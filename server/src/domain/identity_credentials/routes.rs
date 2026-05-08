@@ -16,9 +16,10 @@ use super::{service, types::*};
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/identity/verify",            post(initiate_verification))
-        .route("/api/identity/cooling/app-open",  post(app_open))
-        .route("/api/identity/cooling/status",    get(cooling_status))
+        .route("/api/identity/verify",                post(initiate_verification))
+        .route("/api/identity/cooling/app-open",      post(app_open))
+        .route("/api/identity/cooling/status",        get(cooling_status))
+        .route("/api/identity/app-attest/register",   post(register_app_attest))
 }
 
 /// Webhook routes that need a longer timeout (Stripe Identity callbacks).
@@ -145,4 +146,60 @@ pub async fn cooling_status(
 ) -> AppResult<Json<CoolingStatusResponse>> {
     let resp = service::get_cooling_status(&state.db, user_id).await?;
     Ok(Json(resp))
+}
+
+/// POST /api/identity/app-attest/register
+///
+/// Persist the device's App Attest public key on the caller's identity
+/// credential row (Grade A item 1). Called once per device, after iOS has
+/// generated an attestation via `DCAppAttestService`. Subsequent
+/// presence/beacon requests carry per-request assertions that are
+/// verified against this key by `enforce_assertion`.
+///
+/// Returns 409 if the user already has a registered key (re-registration
+/// requires explicit clearing — admin-only). Returns 400 if the supplied
+/// `public_key_der_b64` is not valid base64.
+#[utoipa::path(
+    post, path = "/api/identity/app-attest/register", tag = "identity",
+    request_body = RegisterAppAttestKeyRequest,
+    responses(
+        (status = 200, description = "App Attest key registered"),
+        (status = 400, description = "public_key_der_b64 is not valid base64"),
+        (status = 409, description = "An App Attest key is already registered for this user"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn register_app_attest(
+    State(state):         State<AppState>,
+    RequireUser(user_id): RequireUser,
+    AppJson(body):        AppJson<RegisterAppAttestKeyRequest>,
+) -> AppResult<StatusCode> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    if body.key_id.trim().is_empty() {
+        return Err(AppError::bad_request("key_id is required"));
+    }
+    let public_key_der = STANDARD.decode(&body.public_key_der_b64)
+        .map_err(|_| AppError::bad_request("public_key_der_b64 is not valid base64"))?;
+
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+
+    let updated = box_fraise_domain::domain::identity_credentials::repository::register_app_attest_key(
+        tx.as_mut(),
+        i32::from(user_id),
+        &body.key_id,
+        public_key_der,
+    )
+    .await
+    .map_err(|e| AppError::Db(e))?;
+
+    tx.commit().await?;
+
+    if updated == 0 {
+        Err(AppError::conflict("App Attest key already registered or no identity credential"))
+    } else {
+        Ok(StatusCode::OK)
+    }
 }

@@ -158,3 +158,57 @@ pub async fn count_cooling_days(
     .await
     .map_err(DomainError::Db)
 }
+
+// ── App Attest key storage (Grade A item 1) ──────────────────────────────────
+
+/// Look up the registered App Attest public key (DER SPKI) for a given key_id.
+///
+/// Returns `Ok(None)` when no row matches — the assertion came from a key
+/// that was never registered, so verification cannot proceed. Under
+/// app_user RLS, only the requesting user's own credential rows are
+/// visible, which is the correct scope: a user must use their own attested
+/// device.
+pub async fn get_app_attest_public_key(
+    conn:   &mut PgConnection,
+    key_id: &str,
+) -> Result<Option<Vec<u8>>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT app_attest_public_key_der \
+         FROM identity_credentials \
+         WHERE app_attest_key_id = $1 \
+           AND app_attest_public_key_der IS NOT NULL \
+         LIMIT 1"
+    )
+    .bind(key_id)
+    .fetch_optional(conn)
+    .await
+}
+
+/// Persist the device public key on the caller's most recent identity
+/// credential row. The `app_attest_key_id IS NULL` guard makes this a
+/// one-shot registration — re-registering must explicitly clear the
+/// previous key first (admin-only path).
+///
+/// Returns the number of rows updated: 0 means either the user has no
+/// identity credential yet OR they've already registered a key on it
+/// — the route handler maps 0 → `Conflict`.
+pub async fn register_app_attest_key(
+    conn:           &mut PgConnection,
+    user_id:        i32,
+    key_id:         &str,
+    public_key_der: Vec<u8>,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE identity_credentials \
+         SET app_attest_key_id         = $1, \
+             app_attest_public_key_der = $2 \
+         WHERE user_id = $3 \
+           AND app_attest_key_id IS NULL"
+    )
+    .bind(key_id)
+    .bind(public_key_der)
+    .bind(user_id)
+    .execute(conn)
+    .await?;
+    Ok(result.rows_affected())
+}

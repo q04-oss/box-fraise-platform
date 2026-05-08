@@ -18,6 +18,15 @@ pub struct IdentityCredentialRow {
     pub cooling_ends_at:            DateTime<Utc>,
     pub cooling_completed_at:       Option<DateTime<Utc>>,
     pub created_at:                 DateTime<Utc>,
+    /// Apple App Attest device key ID, opaque to the server. Set once at
+    /// attestation registration and used on every subsequent request to look
+    /// up the matching public key for `verify_assertion`. NULL for users who
+    /// haven't completed App Attest registration (e.g. dev/CI).
+    pub app_attest_key_id:          Option<String>,
+    /// DER-encoded SubjectPublicKeyInfo of the leaf certificate, extracted
+    /// by `parse_attestation` and persisted here so per-request assertions
+    /// can be verified without re-parsing the full attestation chain.
+    pub app_attest_public_key_der:  Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -38,7 +47,8 @@ pub struct CoolingPeriodEventRow {
 pub const IDENTITY_CREDENTIAL_COLS: &str =
     "id, user_id, credential_type, external_session_id, stripe_identity_report_id, \
      raw_verification_status, response_hash, cooling_app_opens_required, \
-     verified_at, cooling_ends_at, cooling_completed_at, created_at";
+     verified_at, cooling_ends_at, cooling_completed_at, created_at, \
+     app_attest_key_id, app_attest_public_key_der";
 
 /// All columns of `cooling_period_events` for SELECT queries.
 pub const COOLING_PERIOD_EVENT_COLS: &str =
@@ -59,6 +69,22 @@ pub struct RecordAppOpenRequest {
     pub credential_id:        i32,
     pub device_identifier:    Option<String>,
     pub app_attest_assertion: Option<String>,
+}
+
+/// Request body for `POST /api/identity/app-attest/register`.
+///
+/// Sent once per device after `DCAppAttestService` returns a fresh
+/// attestation. The server parses the attestation via `parse_attestation`,
+/// extracts the leaf-cert SPKI, and persists it on the caller's
+/// `identity_credentials` row keyed by `key_id`.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct RegisterAppAttestKeyRequest {
+    pub key_id:             String,
+    /// Base64-encoded DER SubjectPublicKeyInfo of the leaf certificate.
+    /// In production this comes from `parse_attestation(attestation_b64)`;
+    /// the iOS client posts the raw attestation, the server parses it,
+    /// and stores the extracted SPKI.
+    pub public_key_der_b64: String,
 }
 
 // ── Response bodies ───────────────────────────────────────────────────────────
