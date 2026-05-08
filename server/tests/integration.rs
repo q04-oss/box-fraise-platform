@@ -2336,3 +2336,388 @@ async fn full_configuration_lifecycle(pool: PgPool) {
     assert_eq!(after_reseed.value, "14",
         "re-seeding must not overwrite custom value — ON CONFLICT DO NOTHING");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// === Transaction integrity tests ===
+//
+// Prove that failed operations leave no partial state. Each test seeds a
+// known-good baseline, drives a service into the error path, and asserts
+// the database is unchanged from the baseline (or unchanged in the
+// specific way the invariant requires).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Test 1 — `issue_soultoken` aborts on a non-existent attestation_id and
+/// writes nothing to `soultokens`. The error returns at step 3
+/// (attestation lookup) before any write. The tx is dropped without commit
+/// (rollback), so even the read-side state is untouched.
+#[sqlx::test]
+async fn issue_soultoken_invalid_attestation_writes_no_soultoken(pool: PgPool) {
+    use box_fraise_domain::crypto::Ed25519KeyPair;
+    use box_fraise_domain::domain::soultokens::{
+        service as st_svc, types::IssueSoultokenRequest,
+    };
+    use box_fraise_domain::error::DomainError;
+    use box_fraise_domain::types::UserId;
+
+    let bus = EventBus::new();
+
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('st-rollback@integrity.test', true, 'attested') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let user = UserId::from(uid);
+
+    // Pre-baseline: no soultoken, soultoken_id NULL.
+    let pre_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM soultokens WHERE holder_user_id = $1",
+    ).bind(uid).fetch_one(&pool).await.unwrap();
+    assert_eq!(pre_count, 0, "baseline must have no soultokens");
+
+    let kp = Ed25519KeyPair::generate();
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool, uid)
+        .await.unwrap();
+    let result = st_svc::issue_soultoken(
+        &mut tx, &pool, user,
+        IssueSoultokenRequest {
+            attestation_id: 999_999, // does not exist
+            token_type:     "user".to_owned(),
+        },
+        b"test-hmac-key-32-bytes-exactly!!", &kp, &bus,
+    ).await;
+    // Drop tx without commit (= rollback). Macro can't be used here
+    // because the success-path `unwrap()` would panic before commit.
+    drop(tx);
+
+    assert!(
+        matches!(result, Err(DomainError::InvalidInput(_))),
+        "expected InvalidInput for missing attestation, got: {result:?}",
+    );
+
+    let post_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM soultokens WHERE holder_user_id = $1",
+    ).bind(uid).fetch_one(&pool).await.unwrap();
+    assert_eq!(post_count, 0, "no soultoken row may exist after failure");
+
+    let st_id: Option<i32> = sqlx::query_scalar(
+        "SELECT soultoken_id FROM users WHERE id = $1",
+    ).bind(uid).fetch_one(&pool).await.unwrap();
+    assert_eq!(st_id, None, "users.soultoken_id must remain NULL");
+}
+
+/// Test 2 — `reviewer_sign` rejects an invalid Ed25519 signature BEFORE
+/// any write. Verifies that on the error path: (a) no `visit_signatures`
+/// row is inserted for this reviewer, (b) the attestation status remains
+/// `co_sign_pending`, (c) the target user's verification_status remains
+/// `presence_confirmed`. Setup uses raw SQL to drop the attestation
+/// directly into co_sign_pending — the staff_sign chain is exercised by
+/// `full_attestation_journey`.
+#[sqlx::test]
+async fn reviewer_sign_invalid_signature_leaves_state_unchanged(pool: PgPool) {
+    use box_fraise_domain::domain::attestations::{
+        service as attest_svc, types::ReviewerSignAttestationRequest,
+    };
+    use box_fraise_domain::error::DomainError;
+    use box_fraise_domain::types::UserId;
+
+    let bus = EventBus::new();
+
+    // Setup: admin, staff, two reviewers, target user, location, business, visit.
+    let (admin_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, is_platform_admin) \
+         VALUES ('rs-admin@integrity.test', true, true) RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (staff_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('rs-staff@integrity.test', true) RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (r1_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('rs-r1@integrity.test', true) RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (r2_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('rs-r2@integrity.test', true) RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (target_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('rs-target@integrity.test', true, 'presence_confirmed') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('RS Loc', 'box_fraise_store', '1 RS', 'America/Edmonton') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'RS Biz', 'active') RETURNING id",
+    ).bind(loc_id).bind(admin_id).fetch_one(&pool).await.unwrap();
+    let (threshold_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO presence_thresholds \
+         (user_id, business_id, event_count, days_count, threshold_met_at) \
+         VALUES ($1, $2, 3, 3, now()) RETURNING id",
+    ).bind(target_id).bind(biz_id).fetch_one(&pool).await.unwrap();
+    let (visit_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO staff_visits \
+         (location_id, staff_id, scheduled_at, window_hours, expected_box_count, \
+          arrived_at, status, visit_type) \
+         VALUES ($1, $2, now(), 4, 5, now(), 'in_progress', 'combined') RETURNING id",
+    ).bind(loc_id).bind(staff_id).fetch_one(&pool).await.unwrap();
+    let (attest_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO visit_attestations \
+         (visit_id, user_id, staff_id, presence_threshold_id, \
+          assigned_reviewer_1_id, assigned_reviewer_2_id, status, \
+          co_sign_deadline, photo_hash) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'co_sign_pending', \
+                 now() + INTERVAL '48 hours', \
+                 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef') \
+         RETURNING id",
+    )
+    .bind(visit_id).bind(target_id).bind(staff_id)
+    .bind(threshold_id).bind(r1_id).bind(r2_id)
+    .fetch_one(&pool).await.unwrap();
+
+    let r1 = UserId::from(r1_id);
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool, r1_id)
+        .await.unwrap();
+    let result = attest_svc::reviewer_sign(
+        &mut tx, &pool, attest_id, r1,
+        ReviewerSignAttestationRequest {
+            // Plausibly-shaped but cryptographically wrong:
+            signature:              "00".repeat(64),
+            verifying_key_hex:      "00".repeat(32),
+            evidence_hash_reviewed: "deadbeef".repeat(8),
+        },
+        &bus,
+    ).await;
+    drop(tx);
+
+    assert!(
+        matches!(result, Err(DomainError::InvalidInput(_))),
+        "expected InvalidInput for bad signature, got: {result:?}",
+    );
+
+    // Invariant a — no visit_signatures row inserted for r1 by this attempt.
+    let sig_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM visit_signatures WHERE visit_id = $1 AND reviewer_id = $2",
+    ).bind(visit_id).bind(r1_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(sig_count, 0, "no visit_signatures row may exist for the failed signer");
+
+    // Invariant b — attestation status untouched.
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM visit_attestations WHERE id = $1",
+    ).bind(attest_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "co_sign_pending", "attestation status must not advance");
+
+    // Invariant c — target user status untouched.
+    let user_status: String = sqlx::query_scalar(
+        "SELECT verification_status FROM users WHERE id = $1",
+    ).bind(target_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(user_status, "presence_confirmed",
+        "target user must not be promoted to attested by a failed signature");
+}
+
+/// Test 3 — `request_erasure` rejects when the user holds an active
+/// soultoken; verifies the user record is left exactly as it was. Uses
+/// a `business` soultoken so the chain of CHECK constraints
+/// (`user_soultoken_requires_attestation/_credential/_threshold`) does
+/// not need to be satisfied.
+#[sqlx::test]
+async fn request_erasure_with_active_soultoken_leaves_user_intact(pool: PgPool) {
+    use box_fraise_domain::domain::users::service as user_svc;
+    use box_fraise_domain::error::DomainError;
+
+    let (holder_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, display_name, verification_status) \
+         VALUES ('erase-conflict@integrity.test', true, 'Original Name', 'attested') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (biz_owner_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('erase-bizowner@integrity.test', true, 'attested') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('Erase Loc', 'box_fraise_store', '1 Erase', 'America/Edmonton') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'Erase Biz', 'active') RETURNING id",
+    ).bind(loc_id).bind(biz_owner_id).fetch_one(&pool).await.unwrap();
+
+    let (st_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO soultokens \
+         (uuid, display_code, display_code_key_version, schema_version, \
+          holder_user_id, token_type, business_id, issued_at, expires_at) \
+         VALUES (gen_random_uuid(), 'CONF-LICT-TEST', 1, 1, \
+                 $1, 'business', $2, now(), now() + INTERVAL '1 year') \
+         RETURNING id",
+    ).bind(holder_id).bind(biz_id).fetch_one(&pool).await.unwrap();
+
+    sqlx::query("UPDATE users SET soultoken_id = $1 WHERE id = $2")
+        .bind(st_id).bind(holder_id).execute(&pool).await.unwrap();
+
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool, holder_id)
+        .await.unwrap();
+    let result = user_svc::request_erasure(&mut tx, &pool, holder_id).await;
+    drop(tx);
+
+    assert!(
+        matches!(result, Err(DomainError::Conflict(_))),
+        "expected Conflict due to active soultoken, got: {result:?}",
+    );
+
+    let row: (String, Option<String>, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+        "SELECT email, display_name, deleted_at FROM users WHERE id = $1",
+    ).bind(holder_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(row.0, "erase-conflict@integrity.test", "email must NOT be anonymised");
+    assert_eq!(row.1.as_deref(), Some("Original Name"), "display_name must be untouched");
+    assert!(row.2.is_none(), "deleted_at must remain NULL");
+
+    let st_still_there: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM soultokens WHERE id = $1 AND revoked_at IS NULL",
+    ).bind(st_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(st_still_there, 1, "soultoken must still exist and not be revoked");
+}
+
+/// Test 4 — second `initiate_check` for the same user + check_type while
+/// the first is still `pending` returns Conflict and creates no row.
+#[sqlx::test]
+async fn initiate_check_duplicate_pending_returns_conflict(pool: PgPool) {
+    use box_fraise_domain::domain::background_checks::{
+        service as bc_svc, types::InitiateCheckRequest,
+    };
+    use box_fraise_domain::error::DomainError;
+    use box_fraise_domain::types::UserId;
+
+    let bus = EventBus::new();
+
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('bc-dup@integrity.test', true, 'identity_confirmed') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let user = UserId::from(uid);
+
+    // Identity credential with cooling complete (required by initiate_check).
+    sqlx::query(
+        "INSERT INTO identity_credentials \
+         (user_id, credential_type, external_session_id, verified_at, \
+          cooling_ends_at, cooling_app_opens_required, cooling_completed_at) \
+         VALUES ($1, 'stripe_identity', 'sess_dup', now(), now(), 3, now())",
+    ).bind(uid).execute(&pool).await.unwrap();
+
+    let req = || InitiateCheckRequest {
+        check_type: "sanctions".to_owned(),
+        provider:   "comply_advantage".to_owned(),
+    };
+
+    // First call — succeeds.
+    let first = with_rls_tx!(&pool, user, |tx| {
+        bc_svc::initiate_check(&mut tx, &pool, user, req(), &bus)
+            .await.expect("first initiate_check must succeed")
+    });
+    assert_eq!(first.status, "pending");
+
+    // Second call — must Conflict.
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool, uid)
+        .await.unwrap();
+    let second = bc_svc::initiate_check(&mut tx, &pool, user, req(), &bus).await;
+    drop(tx);
+
+    assert!(
+        matches!(second, Err(DomainError::Conflict(_))),
+        "expected Conflict on duplicate pending check, got: {second:?}",
+    );
+
+    let row_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM background_checks \
+         WHERE user_id = $1 AND check_type = 'sanctions'",
+    ).bind(uid).fetch_one(&pool).await.unwrap();
+    assert_eq!(row_count, 1,
+        "exactly one sanctions row must exist — second call rolled back");
+}
+
+/// Test 5 — two qualifying beacon dwell events on the same calendar date
+/// are both recorded, but `presence_thresholds.days_count` advances by 1
+/// only. Same-day deduplication is a business invariant on the threshold,
+/// not the events table.
+#[sqlx::test]
+async fn presence_same_day_increments_events_but_not_days(pool: PgPool) {
+    use box_fraise_domain::domain::presence::{
+        service as presence_svc, types::RecordBeaconDwellRequest,
+    };
+    use box_fraise_domain::types::UserId;
+    use chrono::DateTime;
+
+    let bus = EventBus::new();
+
+    // Identity-confirmed user (presence requires this status).
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('presence-dup@integrity.test', true, 'identity_confirmed') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let user = UserId::from(uid);
+
+    // Business owner + business + beacon (the business must be attested-owned).
+    let (owner_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('presence-owner@integrity.test', true, 'attested') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('PresLoc', 'box_fraise_store', '1 Pres', 'America/Edmonton') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'PresBiz', 'active') RETURNING id",
+    ).bind(loc_id).bind(owner_id).fetch_one(&pool).await.unwrap();
+    let secret = "00".repeat(32);
+    let (beacon_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO beacons (business_id, location_id, secret_key, is_active, \
+         minimum_rssi_threshold) \
+         VALUES ($1, $2, $3, true, -70) RETURNING id",
+    ).bind(biz_id).bind(loc_id).bind(&secret).fetch_one(&pool).await.unwrap();
+
+    // Fixed timestamp — mid-day UTC so `+2h` cannot roll over midnight
+    // (same fix as the unit-level dedup test in presence/service.rs).
+    let day = DateTime::parse_from_rfc3339("2026-01-15T10:00:00Z")
+        .unwrap().with_timezone(&chrono::Utc);
+
+    let hmac1 = box_fraise_domain::domain::beacons::service::derive_witness_hmac(
+        &secret, biz_id, day.date_naive(), uid,
+    );
+    let hmac2 = box_fraise_domain::domain::beacons::service::derive_witness_hmac(
+        &secret, biz_id, day.date_naive(), uid,
+    );
+
+    let dwell_req = |hmac: String, t: chrono::DateTime<chrono::Utc>| RecordBeaconDwellRequest {
+        beacon_id, business_id: biz_id, rssi: -65, dwell_minutes: 20,
+        beacon_witness_hmac: hmac,
+        app_attest_assertion: None,
+        device_identifier: None,
+        started_at: t,
+        ended_at:   t + chrono::Duration::minutes(20),
+    };
+
+    // Event 1.
+    with_rls_tx!(&pool, user, |tx| {
+        presence_svc::record_beacon_dwell(&mut tx, &pool, user, dwell_req(hmac1, day), &bus)
+            .await.expect("first dwell must succeed")
+    });
+
+    // Event 2 — same calendar date.
+    let resp = with_rls_tx!(&pool, user, |tx| {
+        presence_svc::record_beacon_dwell(
+            &mut tx, &pool, user,
+            dwell_req(hmac2, day + chrono::Duration::hours(2)),
+            &bus,
+        ).await.expect("second dwell must succeed")
+    });
+
+    assert_eq!(resp.event_count, 2, "both events must be recorded");
+    assert_eq!(resp.days_count, 1, "same-day dedup — days_count must not double-count");
+
+    // Belt-and-suspenders: confirm presence_events table actually has 2 rows.
+    let event_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM presence_events WHERE user_id = $1 AND business_id = $2",
+    ).bind(uid).bind(biz_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(event_rows, 2,
+        "two presence_events rows must exist — events themselves are not deduped");
+}
