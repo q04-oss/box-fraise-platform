@@ -3056,3 +3056,120 @@ async fn get_analytics_conversion_returns_200_for_admin(pool: PgPool) {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(json.is_array(), "conversion response must be a JSON array");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-user rate limiting (Hardening §6 / Grade A item 3)
+//
+// Wired in `server/src/http/middleware/user_rate_limit.rs`. These tests use
+// the `/api/attestations` route — the rate check runs *first* in that
+// handler, so the request body need not produce a 2xx for the test to be
+// honest about whether the limiter fired. A non-2xx response from the
+// service layer just means "rate-check passed, business logic rejected" —
+// that's still a successful pass through the limiter, and it's what we
+// assert with `assert_ne!(429)`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn per_user_rate_limit_blocks_after_limit_exceeded(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let Some((_container, redis_pool)) = common::start_redis().await else {
+        eprintln!("skipping: Redis unavailable");
+        return;
+    };
+
+    // Lower the per-hour attestation limit to 2 for the duration of this test.
+    sqlx::query("UPDATE platform_configuration SET value = '2' WHERE key = 'rate_limit_attestations_per_hour'")
+        .execute(&pool).await.unwrap();
+
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+    let token = common::valid_token(uid);
+
+    let state = common::build_state(pool, Some(redis_pool));
+    let app   = box_fraise_server::app::build(state);
+
+    // Body shape doesn't matter — handler runs the rate-check before
+    // touching the body. Bogus IDs are fine; we only assert the *status*
+    // distinguishes "rate-check passed" from "rate-limited".
+    let body = serde_json::json!({
+        "visit_id":              -1,
+        "user_id":               -1,
+        "presence_threshold_id": -1,
+        "photo_hash":            null,
+        "photo_storage_uri":     null,
+    });
+
+    for i in 1..=2u8 {
+        let resp = app.clone()
+            .oneshot(authed_json_req("POST", "/api/attestations", &token, body.clone()))
+            .await.unwrap();
+        assert_ne!(resp.status(), StatusCode::TOO_MANY_REQUESTS,
+            "request {i} must pass the per-user rate check");
+    }
+
+    let resp = app
+        .oneshot(authed_json_req("POST", "/api/attestations", &token, body))
+        .await.unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS,
+        "3rd request must be rate-limited (limit=2)");
+
+    let retry_after = resp.headers().get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    assert!(retry_after.is_some(),
+        "429 must include a numeric Retry-After header");
+    assert!(retry_after.unwrap() > 0,
+        "Retry-After must be positive, got {retry_after:?}");
+}
+
+#[sqlx::test]
+async fn per_user_rate_limit_is_per_user_not_global(pool: PgPool) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let Some((_container, redis_pool)) = common::start_redis().await else {
+        eprintln!("skipping: Redis unavailable");
+        return;
+    };
+
+    // Tightest possible: 1 attestation per hour per user.
+    sqlx::query("UPDATE platform_configuration SET value = '1' WHERE key = 'rate_limit_attestations_per_hour'")
+        .execute(&pool).await.unwrap();
+
+    let (uid_a,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+    let (uid_b,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
+    )
+    .bind(&SafeEmail().fake::<String>())
+    .fetch_one(&pool).await.unwrap();
+    let token_a = common::valid_token(uid_a);
+    let token_b = common::valid_token(uid_b);
+
+    let state = common::build_state(pool, Some(redis_pool));
+    let app   = box_fraise_server::app::build(state);
+
+    let body = serde_json::json!({
+        "visit_id":              -1,
+        "user_id":               -1,
+        "presence_threshold_id": -1,
+        "photo_hash":            null,
+        "photo_storage_uri":     null,
+    });
+
+    let resp_a = app.clone()
+        .oneshot(authed_json_req("POST", "/api/attestations", &token_a, body.clone()))
+        .await.unwrap();
+    assert_ne!(resp_a.status(), StatusCode::TOO_MANY_REQUESTS,
+        "user A's first request must pass — separate counter from user B");
+
+    let resp_b = app
+        .oneshot(authed_json_req("POST", "/api/attestations", &token_b, body))
+        .await.unwrap();
+    assert_ne!(resp_b.status(), StatusCode::TOO_MANY_REQUESTS,
+        "user B's first request must pass — separate counter from user A");
+}

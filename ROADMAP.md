@@ -185,3 +185,4 @@ TODO marker in code or docs at the relevant call site.
 - **§11 `constant_time_eq` utility crate**: would let `integrations` import the canonical impl instead of duplicating.
 - **§1c `SOULTOKEN_HMAC_KEY` multi-version key rotation**: the version field is recorded; multi-key lookup deferred until rotation is operationally required.
 - **§10 Stripe billing webhook**: the `business_subscriptions` table is scaffolding; row creation/updates ship with the iOS app.
+- ~~**§6 per-user rate-limit middleware**: limit values seeded in `platform_configuration` (migration 009); per-user keying deferred pending post-auth middleware.~~ — **shipped Grade A item 3**: see `server/src/http/middleware/user_rate_limit.rs`. Wired into `attestations`, `background_checks`, `identity`, `dorotka` initiate routes; reads from `platform_configuration` so ops retune without redeploy.

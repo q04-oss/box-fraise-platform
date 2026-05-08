@@ -2,7 +2,6 @@ use chrono::{NaiveDate, Utc};
 use sqlx::{PgConnection, PgPool};
 
 use crate::{
-    audit,
     auth::apple_attest::{self, AppAttestPolicy},
     error::{AppResult, DomainError},
     event_bus::EventBus,

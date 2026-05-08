@@ -144,7 +144,7 @@ not by section:
 | `constant_time_eq` shared utility crate                       | §11     | `integrations/src/stripe.rs` doc-comment                        |
 | `SOULTOKEN_HMAC_KEY` multi-version key rotation               | §1c     | `domain/src/domain/soultokens/service.rs::derive_display_code`  |
 | Stripe billing subscription webhook                           | §10     | `business_subscriptions` table left empty                       |
-| Per-endpoint rate-limit tuning (config rows seeded in migration 009; per-user keying requires post-auth middleware refactor) | §6 / §10 | `server/src/http/middleware/rate_limit.rs`                      |
+| ~~Per-endpoint rate-limit tuning (config rows seeded in migration 009; per-user keying requires post-auth middleware refactor)~~ — **shipped Grade A item 3**: per-user limiter wired into `attestations`, `background_checks`, `identity`, `dorotka` routes; reads limit values from `platform_configuration` so ops retune without redeploy. | §6 / §10 | `server/src/http/middleware/user_rate_limit.rs`                 |
 
 None of the above block production launch — they're either operational
 work, follow-up refactors, or fail-safe defaults that require the next

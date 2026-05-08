@@ -33,6 +33,11 @@ pub enum AppError {
     #[error("rate limit exceeded")]
     TooManyRequests,
 
+    /// Per-user rate limit hit. Carries the seconds-until-window-reset
+    /// so the response can return an accurate `Retry-After`.
+    #[error("rate limit exceeded")]
+    RateLimited(u64),
+
     #[error("payment required")]
     PaymentRequired,
 
@@ -61,6 +66,12 @@ impl AppError {
     pub fn unprocessable(msg: impl Into<String>) -> Self {
         Self::Unprocessable(msg.into())
     }
+
+    /// Construct a per-user rate-limit response with a precise
+    /// `Retry-After` value (seconds until the window resets).
+    pub fn rate_limited(retry_after_secs: u64) -> Self {
+        Self::RateLimited(retry_after_secs)
+    }
 }
 
 impl IntoResponse for AppError {
@@ -79,6 +90,7 @@ impl IntoResponse for AppError {
             Self::Conflict(m)           => (StatusCode::CONFLICT,              "conflict",            m.clone()),
             Self::Unprocessable(m)      => (StatusCode::UNPROCESSABLE_ENTITY,  "unprocessable",       m.clone()),
             Self::TooManyRequests       => (StatusCode::TOO_MANY_REQUESTS,     "rate_limited",        self.to_string()),
+            Self::RateLimited(_)        => (StatusCode::TOO_MANY_REQUESTS,     "rate_limited",        "Too many requests".to_owned()),
             Self::PaymentRequired       => (StatusCode::PAYMENT_REQUIRED,      "payment_required",    self.to_string()),
             Self::BadGateway(m)         => (StatusCode::BAD_GATEWAY,           "bad_gateway",         m.clone()),
             Self::ServiceUnavailable(m) => (StatusCode::SERVICE_UNAVAILABLE,   "service_unavailable", m.clone()),
@@ -92,12 +104,28 @@ impl IntoResponse for AppError {
             }
         };
         // Hardening §6 — Retry-After on 429 lets clients schedule retries
-        // instead of busy-looping. 60 s matches the global rate-limit window.
-        let body = Json(json!({ "error": error_slug, "message": message }));
-        if matches!(self, Self::TooManyRequests) {
-            (status, [(axum::http::header::RETRY_AFTER, "60")], body).into_response()
-        } else {
-            (status, body).into_response()
+        // instead of busy-looping. The global IP limiter uses a fixed 60s
+        // window; the per-user limiter (Grade A item 3) computes the actual
+        // remaining TTL and ships it in the header + body.
+        match self {
+            Self::TooManyRequests => {
+                let body = Json(json!({ "error": error_slug, "message": message }));
+                (status, [(axum::http::header::RETRY_AFTER, "60")], body).into_response()
+            }
+            Self::RateLimited(retry_after) => {
+                let body = Json(json!({
+                    "error":       error_slug,
+                    "message":     message,
+                    "retry_after": retry_after,
+                }));
+                (status,
+                 [(axum::http::header::RETRY_AFTER, retry_after.to_string())],
+                 body).into_response()
+            }
+            _ => {
+                let body = Json(json!({ "error": error_slug, "message": message }));
+                (status, body).into_response()
+            }
         }
     }
 }

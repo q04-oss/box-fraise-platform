@@ -20,7 +20,11 @@ use box_fraise_server::{
     app::{prometheus_pair, AppState},
     auth::new_revoked_tokens,
     config::Config,
-    http::middleware::{hmac::new_nonce_cache, rate_limit::RateLimiter},
+    http::middleware::{
+        hmac::new_nonce_cache,
+        rate_limit::RateLimiter,
+        user_rate_limit::UserRateLimiter,
+    },
     types::UserId,
 };
 
@@ -124,6 +128,7 @@ fn swap_to_app_user_pool_if_configured(db: PgPool) -> PgPool {
 pub fn build_state_with_config(db: PgPool, redis: Option<RedisPool>, cfg: Config) -> AppState {
     let (_layer, metric_handle) = prometheus_pair();
     let db = swap_to_app_user_pool_if_configured(db);
+    let user_rate_limiter = UserRateLimiter::new(redis.clone(), db.clone());
     AppState {
         db,
         cfg:              Arc::new(cfg),
@@ -132,6 +137,7 @@ pub fn build_state_with_config(db: PgPool, redis: Option<RedisPool>, cfg: Config
         redis,
         rate:             RateLimiter::new(120, 60),
         dorotka_rate:     RateLimiter::new(20, 60),
+        user_rate_limiter,
         http:             reqwest::Client::new(),
         event_bus:        EventBus::new(),
         ed25519_key_pair: Arc::new(test_ed25519_key_pair()),

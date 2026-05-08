@@ -13,6 +13,7 @@ use crate::{
     error::{AppError, AppResult},
     http::extractors::auth::RequireUser,
     http::middleware::rate_limit::client_ip,
+    http::middleware::user_rate_limit::RateLimitWindow,
 };
 use super::service;
 
@@ -65,6 +66,16 @@ pub async fn ask(
     // applied across the codebase. Even denied users contribute to the
     // bucket, so an unauthenticated bot can't sneak past via 403s.
     rate_check(&state, ip)?;
+
+    // Per-user (Grade A item 3) — independent of the per-IP bucket.
+    // Limit value lives in `platform_configuration` so ops can retune
+    // without a redeploy.
+    state.user_rate_limiter.check(
+        i32::from(user_id),
+        "dorotka",
+        "rate_limit_dorotka_per_hour",
+        RateLimitWindow::Hourly,
+    ).await.map_err(AppError::rate_limited)?;
 
     // Hardening cleanup #3 — open a single per-request RLS-scoped tx so
     // the soultoken gate read and the (currently audit-only) ask call run

@@ -10,6 +10,7 @@ use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::{auth::RequireUser, json::AppJson},
+    http::middleware::user_rate_limit::RateLimitWindow,
 };
 use super::{service, types::*};
 
@@ -44,6 +45,13 @@ pub async fn initiate_verification(
     if body.stripe_session_id.trim().is_empty() {
         return Err(AppError::bad_request("stripe_session_id is required"));
     }
+    state.user_rate_limiter.check(
+        i32::from(user_id),
+        "identity",
+        "rate_limit_identity_initiations_per_day",
+        RateLimitWindow::Daily,
+    ).await.map_err(AppError::rate_limited)?;
+
     // Hardening cleanup #3 — RLS-scoped per-request transaction.
     let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
         &state.db, i32::from(user_id),

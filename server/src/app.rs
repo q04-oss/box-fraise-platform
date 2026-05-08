@@ -41,6 +41,7 @@ use crate::http::{
         correlation_id,
         hmac::{new_nonce_cache, NonceCache},
         rate_limit::{RateLimiter, SharedRateLimiter},
+        user_rate_limit::UserRateLimiter,
     },
     routes::meta,
 };
@@ -56,6 +57,11 @@ pub struct AppState {
     pub redis:        Option<RedisPool>,
     pub rate:         SharedRateLimiter,
     pub dorotka_rate: SharedRateLimiter,
+    /// Per-user, per-endpoint limiter (Hardening §6 / Grade A item 3).
+    /// Backed by Redis when available; silently allows when Redis is absent
+    /// (the global IP limiter and HMAC middleware remain the always-on
+    /// backstops). Reads its limit values from `platform_configuration`.
+    pub user_rate_limiter: Arc<UserRateLimiter>,
     pub http:         reqwest::Client,
     pub event_bus:    EventBus,
     /// Ed25519 key pair for soultoken signing (BFIP cryptography.md Section 4 /
@@ -140,6 +146,8 @@ impl AppState {
             "Ed25519 soultoken signing key loaded",
         );
 
+        let user_rate_limiter = UserRateLimiter::new(redis.clone(), db.clone());
+
         Self {
             db,
             cfg:          Arc::new(cfg),
@@ -148,6 +156,7 @@ impl AppState {
             redis,
             rate:         RateLimiter::new(120, 60),
             dorotka_rate: RateLimiter::new(20, 60),
+            user_rate_limiter,
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()

@@ -10,6 +10,7 @@ use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::{auth::RequireUser, json::AppJson},
+    http::middleware::user_rate_limit::RateLimitWindow,
 };
 use super::{service, types::*};
 
@@ -50,6 +51,13 @@ pub async fn initiate(
     if body.provider.trim().is_empty() {
         return Err(AppError::bad_request("provider is required"));
     }
+    state.user_rate_limiter.check(
+        i32::from(user_id),
+        "background_checks",
+        "rate_limit_background_checks_per_day",
+        RateLimitWindow::Daily,
+    ).await.map_err(AppError::rate_limited)?;
+
     // Hardening cleanup #3 — RLS-scoped per-request transaction.
     // Begin → call service with `&mut tx` → on Ok, commit; on Err, the
     // `?` operator drops `tx` and Postgres rolls back automatically.

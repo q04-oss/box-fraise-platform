@@ -9,6 +9,7 @@ use crate::{
     app::AppState,
     error::{AppError, AppResult},
     http::extractors::{auth::RequireUser, json::AppJson},
+    http::middleware::user_rate_limit::RateLimitWindow,
 };
 use super::{service, types::*};
 
@@ -40,6 +41,13 @@ pub async fn initiate(
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<InitiateAttestationRequest>,
 ) -> AppResult<(StatusCode, Json<VisitAttestationRow>)> {
+    state.user_rate_limiter.check(
+        i32::from(user_id),
+        "attestations",
+        "rate_limit_attestations_per_hour",
+        RateLimitWindow::Hourly,
+    ).await.map_err(AppError::rate_limited)?;
+
     let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
         &state.db, i32::from(user_id),
     ).await?;
