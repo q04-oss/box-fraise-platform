@@ -3,9 +3,17 @@
 //! There is no global "admin middleware" in this codebase; the established
 //! pattern is `RequireUser` + a service-layer `is_platform_admin` check.
 //! `require_platform_admin` below is the single check helper for this module.
+//!
+//! Reads run inside an `AdminRlsTransaction` so that under `app_user` (RLS
+//! active) the queries see all rows via the admin-bypass policies. Under
+//! `fraise` (BYPASSRLS) the tag is harmless.
 
 use axum::{extract::State, routing::get, Json, Router};
-use box_fraise_domain::types::UserId;
+use box_fraise_domain::{
+    domain::auth::repository as user_repo,
+    transaction::AdminRlsTransaction,
+    types::UserId,
+};
 use sqlx::PgPool;
 
 use super::queries::{
@@ -35,17 +43,15 @@ pub fn router() -> Router<AppState> {
 // ── Auth helper ───────────────────────────────────────────────────────────────
 
 async fn require_platform_admin(pool: &PgPool, user_id: UserId) -> Result<(), AppError> {
-    let is_admin: Option<bool> = sqlx::query_scalar(
-        "SELECT is_platform_admin FROM users WHERE id = $1 AND deleted_at IS NULL"
-    )
-    .bind(i32::from(user_id))
-    .fetch_optional(pool)
-    .await
-    .map_err(AppError::Db)?;
-    match is_admin {
-        Some(true)  => Ok(()),
-        _           => Err(AppError::Forbidden),
-    }
+    let user = user_repo::find_by_id(pool, user_id)
+        .await
+        .map_err(AppError::from)?
+        .ok_or(AppError::Forbidden)?;
+    if user.is_platform_admin { Ok(()) } else { Err(AppError::Forbidden) }
+}
+
+async fn admin_tx(pool: &PgPool) -> AppResult<AdminRlsTransaction> {
+    AdminRlsTransaction::begin(pool).await.map_err(AppError::from)
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -60,7 +66,10 @@ pub async fn funnel(
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<FunnelStage>>> {
     require_platform_admin(&state.db, user_id).await?;
-    Ok(Json(verification_funnel(&state.db).await?))
+    let mut tx = admin_tx(&state.db).await?;
+    let out = verification_funnel(tx.as_mut()).await.map_err(AppError::Db)?;
+    tx.commit().await.map_err(AppError::from)?;
+    Ok(Json(out))
 }
 
 #[utoipa::path(
@@ -73,7 +82,10 @@ pub async fn attestations_daily(
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<DailyCount>>> {
     require_platform_admin(&state.db, user_id).await?;
-    Ok(Json(daily_attestations(&state.db).await?))
+    let mut tx = admin_tx(&state.db).await?;
+    let out = daily_attestations(tx.as_mut()).await.map_err(AppError::Db)?;
+    tx.commit().await.map_err(AppError::from)?;
+    Ok(Json(out))
 }
 
 #[utoipa::path(
@@ -86,7 +98,10 @@ pub async fn attestations_time_to_attest(
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<TimeToAttest>> {
     require_platform_admin(&state.db, user_id).await?;
-    Ok(Json(time_to_attest(&state.db).await?))
+    let mut tx = admin_tx(&state.db).await?;
+    let out = time_to_attest(tx.as_mut()).await.map_err(AppError::Db)?;
+    tx.commit().await.map_err(AppError::from)?;
+    Ok(Json(out))
 }
 
 #[utoipa::path(
@@ -99,7 +114,10 @@ pub async fn businesses(
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<BusinessStats>> {
     require_platform_admin(&state.db, user_id).await?;
-    Ok(Json(business_stats(&state.db).await?))
+    let mut tx = admin_tx(&state.db).await?;
+    let out = business_stats(tx.as_mut()).await.map_err(AppError::Db)?;
+    tx.commit().await.map_err(AppError::from)?;
+    Ok(Json(out))
 }
 
 #[utoipa::path(
@@ -112,7 +130,10 @@ pub async fn presence_daily(
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<DailyCount>>> {
     require_platform_admin(&state.db, user_id).await?;
-    Ok(Json(daily_presence_events(&state.db).await?))
+    let mut tx = admin_tx(&state.db).await?;
+    let out = daily_presence_events(tx.as_mut()).await.map_err(AppError::Db)?;
+    tx.commit().await.map_err(AppError::from)?;
+    Ok(Json(out))
 }
 
 #[utoipa::path(
@@ -125,7 +146,10 @@ pub async fn soultokens(
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<SoultokenStats>> {
     require_platform_admin(&state.db, user_id).await?;
-    Ok(Json(soultoken_stats(&state.db).await?))
+    let mut tx = admin_tx(&state.db).await?;
+    let out = soultoken_stats(tx.as_mut()).await.map_err(AppError::Db)?;
+    tx.commit().await.map_err(AppError::from)?;
+    Ok(Json(out))
 }
 
 #[utoipa::path(
@@ -138,7 +162,10 @@ pub async fn background_checks(
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<BackgroundCheckStats>>> {
     require_platform_admin(&state.db, user_id).await?;
-    Ok(Json(background_check_stats(&state.db).await?))
+    let mut tx = admin_tx(&state.db).await?;
+    let out = background_check_stats(tx.as_mut()).await.map_err(AppError::Db)?;
+    tx.commit().await.map_err(AppError::from)?;
+    Ok(Json(out))
 }
 
 #[utoipa::path(
@@ -151,5 +178,8 @@ pub async fn conversion(
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<DropOff>>> {
     require_platform_admin(&state.db, user_id).await?;
-    Ok(Json(conversion_dropoff(&state.db).await?))
+    let mut tx = admin_tx(&state.db).await?;
+    let out = conversion_dropoff(tx.as_mut()).await.map_err(AppError::Db)?;
+    tx.commit().await.map_err(AppError::from)?;
+    Ok(Json(out))
 }

@@ -92,10 +92,36 @@ pub fn build_state(db: PgPool, redis: Option<RedisPool>) -> AppState {
     build_state_with_config(db, redis, test_config())
 }
 
+/// If `APP_USER_DATABASE_URL` is set, swap the test's superuser pool for a
+/// new pool that connects as `app_user_prod` against the *same* test
+/// database. The `#[sqlx::test]` fixture creates a fresh DB as `fraise`
+/// and gives us a pool for it; we extract that DB's name from the pool's
+/// connect_options and rebuild a pool against it with the app-user URL's
+/// credentials. `connect_lazy_with` keeps this synchronous — actual TCP
+/// connect happens on first `acquire()`.
+///
+/// Returns the original pool when the env var isn't set (the default
+/// dev/CI mode where RLS is inert because `fraise` has BYPASSRLS).
+fn swap_to_app_user_pool_if_configured(db: PgPool) -> PgPool {
+    use std::str::FromStr;
+    let Ok(url) = std::env::var("APP_USER_DATABASE_URL") else { return db; };
+    let Some(test_db_name) = db.connect_options().get_database().map(|s| s.to_owned()) else {
+        return db;
+    };
+    let opts = match sqlx::postgres::PgConnectOptions::from_str(&url) {
+        Ok(o)  => o.database(&test_db_name),
+        Err(_) => return db,
+    };
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(20)
+        .connect_lazy_with(opts)
+}
+
 /// Build an AppState using a fully custom Config — used by tests that need
 /// to override specific fields (e.g., `anthropic_base_url` for Dorotka tests).
 pub fn build_state_with_config(db: PgPool, redis: Option<RedisPool>, cfg: Config) -> AppState {
     let (_layer, metric_handle) = prometheus_pair();
+    let db = swap_to_app_user_pool_if_configured(db);
     AppState {
         db,
         cfg:              Arc::new(cfg),

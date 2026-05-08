@@ -6,7 +6,7 @@
 
 use chrono::NaiveDate;
 use serde::Serialize;
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 // ── Verification funnel ─────────────────────────────────────────────────────
 
@@ -21,7 +21,7 @@ pub struct FunnelStage {
 ///
 /// `users.is_banned` is the schema's flag for banned users (the section spec
 /// referred to a non-existent `banned_at` column).
-pub async fn verification_funnel(pool: &PgPool) -> Result<Vec<FunnelStage>, sqlx::Error> {
+pub async fn verification_funnel(conn: &mut PgConnection) -> Result<Vec<FunnelStage>, sqlx::Error> {
     sqlx::query_as::<_, FunnelStage>(
         "SELECT \
             verification_status AS stage, \
@@ -39,7 +39,7 @@ pub async fn verification_funnel(pool: &PgPool) -> Result<Vec<FunnelStage>, sqlx
                 ELSE 5 \
             END"
     )
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
 }
 
@@ -52,7 +52,7 @@ pub struct DailyCount {
 }
 
 /// Soultokens issued per day (last 30 days), sourced from `verification_events`.
-pub async fn daily_attestations(pool: &PgPool) -> Result<Vec<DailyCount>, sqlx::Error> {
+pub async fn daily_attestations(conn: &mut PgConnection) -> Result<Vec<DailyCount>, sqlx::Error> {
     sqlx::query_as::<_, DailyCount>(
         "SELECT \
             DATE(created_at)::date AS date, \
@@ -63,12 +63,12 @@ pub async fn daily_attestations(pool: &PgPool) -> Result<Vec<DailyCount>, sqlx::
          GROUP BY DATE(created_at) \
          ORDER BY date DESC"
     )
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
 }
 
 /// Presence events per day (last 14 days).
-pub async fn daily_presence_events(pool: &PgPool) -> Result<Vec<DailyCount>, sqlx::Error> {
+pub async fn daily_presence_events(conn: &mut PgConnection) -> Result<Vec<DailyCount>, sqlx::Error> {
     sqlx::query_as::<_, DailyCount>(
         "SELECT \
             calendar_date AS date, \
@@ -78,7 +78,7 @@ pub async fn daily_presence_events(pool: &PgPool) -> Result<Vec<DailyCount>, sql
          GROUP BY calendar_date \
          ORDER BY calendar_date DESC"
     )
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
 }
 
@@ -92,7 +92,7 @@ pub struct TimeToAttest {
 }
 
 /// Distribution of days from `identity_confirmed` to `soultoken_issued`.
-pub async fn time_to_attest(pool: &PgPool) -> Result<TimeToAttest, sqlx::Error> {
+pub async fn time_to_attest(conn: &mut PgConnection) -> Result<TimeToAttest, sqlx::Error> {
     sqlx::query_as::<_, TimeToAttest>(
         "SELECT \
             AVG(EXTRACT(EPOCH FROM (attested.created_at - registered.created_at)) / 86400.0)::float8 AS avg_days, \
@@ -108,7 +108,7 @@ pub async fn time_to_attest(pool: &PgPool) -> Result<TimeToAttest, sqlx::Error> 
          WHERE attested.event_type   = 'soultoken_issued' \
            AND registered.event_type = 'identity_confirmed'"
     )
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
 }
 
@@ -121,7 +121,7 @@ pub struct BusinessStats {
     pub suspended:    i64,
 }
 
-pub async fn business_stats(pool: &PgPool) -> Result<BusinessStats, sqlx::Error> {
+pub async fn business_stats(conn: &mut PgConnection) -> Result<BusinessStats, sqlx::Error> {
     sqlx::query_as::<_, BusinessStats>(
         "SELECT \
             COUNT(*) FILTER (WHERE is_active)::bigint AS total_active, \
@@ -134,7 +134,7 @@ pub async fn business_stats(pool: &PgPool) -> Result<BusinessStats, sqlx::Error>
             COUNT(*) FILTER (WHERE beacon_suspended)::bigint AS suspended \
          FROM businesses"
     )
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
 }
 
@@ -149,7 +149,7 @@ pub struct SoultokenStats {
     pub renewal_rate_30d: Option<f64>,
 }
 
-pub async fn soultoken_stats(pool: &PgPool) -> Result<SoultokenStats, sqlx::Error> {
+pub async fn soultoken_stats(conn: &mut PgConnection) -> Result<SoultokenStats, sqlx::Error> {
     sqlx::query_as::<_, SoultokenStats>(
         "SELECT \
             COUNT(*)::bigint AS total_issued, \
@@ -164,7 +164,7 @@ pub async fn soultoken_stats(pool: &PgPool) -> Result<SoultokenStats, sqlx::Erro
          FROM soultokens \
          WHERE token_type = 'user'"
     )
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
 }
 
@@ -179,7 +179,7 @@ pub struct BackgroundCheckStats {
     pub pass_rate:  Option<f64>,
 }
 
-pub async fn background_check_stats(pool: &PgPool) -> Result<Vec<BackgroundCheckStats>, sqlx::Error> {
+pub async fn background_check_stats(conn: &mut PgConnection) -> Result<Vec<BackgroundCheckStats>, sqlx::Error> {
     sqlx::query_as::<_, BackgroundCheckStats>(
         "SELECT \
             check_type, \
@@ -192,7 +192,7 @@ pub async fn background_check_stats(pool: &PgPool) -> Result<Vec<BackgroundCheck
          GROUP BY check_type \
          ORDER BY check_type"
     )
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
 }
 
@@ -216,8 +216,8 @@ pub struct DropOff {
 /// and `registered`. So `from_count` for each pair is the sum of the "from"
 /// stage AND every stage past it; `to_count` is the sum of the "to" stage
 /// onward.
-pub async fn conversion_dropoff(pool: &PgPool) -> Result<Vec<DropOff>, sqlx::Error> {
-    let funnel = verification_funnel(pool).await?;
+pub async fn conversion_dropoff(conn: &mut PgConnection) -> Result<Vec<DropOff>, sqlx::Error> {
+    let funnel = verification_funnel(conn).await?;
     let order = ["registered", "identity_confirmed", "presence_confirmed", "attested"];
 
     let count_of = |stage: &str| -> i64 {

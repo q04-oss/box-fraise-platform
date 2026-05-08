@@ -302,11 +302,19 @@ pub async fn get_my_soultoken(
     pool:    &PgPool,
     user_id: UserId,
 ) -> AppResult<SoultokenResponse> {
+    // Wrap in a tx that sets `app.user_id` so the `soultokens_self`
+    // policy permits reading own soultoken under app_user (RLS active).
     let uid = i32::from(user_id);
-    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
-    let row = repository::get_active_soultoken_by_user(&mut conn, uid)
+    let mut tx = pool.begin().await.map_err(DomainError::Db)?;
+    sqlx::query("SELECT set_config('app.user_id', $1, true)")
+        .bind(uid.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(DomainError::Db)?;
+    let row = repository::get_active_soultoken_by_user(&mut *tx, uid)
         .await?
         .ok_or(DomainError::NotFound)?;
+    tx.rollback().await.map_err(DomainError::Db)?;
     Ok(to_response(row))
 }
 

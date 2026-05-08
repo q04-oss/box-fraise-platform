@@ -40,12 +40,21 @@ pub async fn set_rls_user_context(
 /// Mark the current transaction as running with platform-admin authority.
 ///
 /// Only call after the application layer has verified the requesting user
-/// is `platform_admin` — RLS admin-bypass policies trust this flag without
-/// re-checking the user's role.
+/// is `platform_admin` — the RLS admin-bypass policies in `002_rls.sql` are
+/// gated on `current_user = app_admin` (the role itself), so we must
+/// `SET LOCAL ROLE app_admin` for those policies to fire. Under a superuser
+/// connection (`fraise` in dev) RLS is bypassed regardless and the role
+/// switch is a harmless no-op.
+///
+/// We also keep the legacy `app.is_admin` GUC in lock-step in case any
+/// code reads it for signalling.
 pub async fn set_rls_admin_context(
     conn: &mut PgConnection,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT set_config('app.is_admin', 'true', true)")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("SET LOCAL ROLE app_admin")
         .execute(conn)
         .await?;
     Ok(())

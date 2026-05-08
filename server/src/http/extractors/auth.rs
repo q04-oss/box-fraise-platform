@@ -70,13 +70,28 @@ where
 
         // Check ban status on every protected request so banned users cannot
         // access any route that uses RequireUser — not just the auth endpoints.
+        //
+        // The query runs in a short tx that sets `app.user_id` to the JWT's
+        // claimed user id. Under app_user (RLS active), the `users_self`
+        // policy permits `SELECT WHERE id = app.user_id` — i.e. the user
+        // can read their own row. Without the tx + setting, the policy's
+        // `current_setting('app.user_id', true)::integer` cast crashes on
+        // the empty string and the SELECT returns nothing → spurious 401.
+        let uid = i32::from(claims.user_id);
+        let mut tx = app.db.begin().await.map_err(AppError::Db)?;
+        sqlx::query("SELECT set_config('app.user_id', $1, true)")
+            .bind(uid.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Db)?;
         let is_banned: Option<bool> = sqlx::query_scalar(
             "SELECT is_banned FROM users WHERE id = $1 AND deleted_at IS NULL"
         )
-        .bind(i32::from(claims.user_id))
-        .fetch_optional(&app.db)
+        .bind(uid)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(AppError::Db)?;
+        tx.rollback().await.map_err(AppError::Db)?;
 
         match is_banned {
             Some(true) => return Err(AppError::Forbidden),
