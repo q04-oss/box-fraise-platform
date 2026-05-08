@@ -76,6 +76,71 @@ jobs:
       - name: cargo test (workspace)
         run: cargo test --workspace
 
+  test-rls:
+    name: Test suite under RLS enforcement (app_user)
+    runs-on: ubuntu-latest
+    needs: [test]
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: fraise
+          POSTGRES_PASSWORD: fraise
+          POSTGRES_DB: fraise_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL:           postgres://fraise:fraise@localhost:5432/fraise_test
+      APP_USER_DATABASE_URL:  postgres://app_user_prod:ci_rls_test@localhost:5432/fraise_test
+      REDIS_URL:              redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Provision the cluster-wide roles BEFORE cargo test runs. Migration
+      # 002_rls.sql also creates app_user/app_admin/app_readonly with
+      # IF NOT EXISTS guards, but app_user_prod (the login role used by
+      # APP_USER_DATABASE_URL) must exist before any test pool tries to
+      # connect, and it must already be a MEMBER of app_user + app_admin
+      # so the RLS policies (which target those group roles) apply to it.
+      - name: Provision app_user_prod role
+        env:
+          PGPASSWORD: fraise
+        run: |
+          psql -h localhost -U fraise -d fraise_test <<'SQL'
+            DO $$
+            BEGIN
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_user') THEN
+                CREATE ROLE app_user;
+              END IF;
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_admin') THEN
+                CREATE ROLE app_admin;
+              END IF;
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_readonly') THEN
+                CREATE ROLE app_readonly;
+              END IF;
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_user_prod') THEN
+                CREATE USER app_user_prod WITH PASSWORD 'ci_rls_test';
+              END IF;
+            END $$;
+            GRANT app_user  TO app_user_prod;
+            GRANT app_admin TO app_user_prod;
+          SQL
+      - name: cargo test (workspace) under app_user
+        run: cargo test --workspace
+
   audit:
     name: security audit (cargo audit + deny)
     runs-on: ubuntu-latest
