@@ -131,13 +131,29 @@ pub async fn initiate_check(
     }
 
     // 6. Create the check record.
-    let check = repository::create_check(
+    //
+    // The pre-check at step 5 is a fast-path optimization. The DB-level
+    // partial UNIQUE INDEX `background_checks_one_pending_per_user_type`
+    // (migration 010) is the authoritative dedup — two concurrent txs
+    // both pass the pre-check, but only one INSERT can succeed. The
+    // loser hits the unique-violation, which we map to Conflict.
+    let check = match repository::create_check(
         tx.as_mut(),
         uid,
         cred.id,
         &req.provider,
         &req.check_type,
-    ).await?;
+    ).await {
+        Ok(c) => c,
+        Err(DomainError::Db(sqlx::Error::Database(db_err)))
+            if db_err.constraint() == Some("background_checks_one_pending_per_user_type") =>
+        {
+            return Err(DomainError::conflict(
+                "a pending check of this type already exists",
+            ));
+        }
+        Err(e) => return Err(e),
+    };
 
     // 7. Audit event.
     //    Audit writes use `pool` (separate connection) — they commit

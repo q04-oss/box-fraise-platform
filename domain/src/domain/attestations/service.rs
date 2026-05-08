@@ -425,8 +425,15 @@ pub async fn reviewer_sign(
 ) -> AppResult<VisitAttestationRow> {
     let uid = i32::from(requesting_user_id);
 
-    // 1. Load attestation — must be 'co_sign_pending'.
-    let attest = repository::get_attestation_by_id(tx.as_mut(), attestation_id)
+    // 1. Load attestation — must be 'co_sign_pending'. Acquire a
+    //    row-level FOR UPDATE lock to serialise concurrent reviewer
+    //    signs through this attestation row. Without the lock, two
+    //    reviewers signing simultaneously each only see their own
+    //    signature in step 6's count, neither triggers approval, and
+    //    the attestation is left un-approved despite both signatures
+    //    landing. The lock makes the second reviewer's tx wait for
+    //    the first to commit so step 6 sees both signatures.
+    let attest = repository::get_attestation_by_id_for_update(tx.as_mut(), attestation_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 

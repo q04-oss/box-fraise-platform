@@ -3293,3 +3293,453 @@ async fn full_bfip_protocol_journey(pool: PgPool) {
         "Final: full BFIP journey must produce >= 10 audit events for the user, got {audit_count}",
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// === Concurrent access tests ===
+//
+// Prove (or disprove) that atomic operations hold under simulated
+// concurrent requests. Each test spawns N tokio tasks against the same
+// pool; they execute against shared state. Spec assertions encode the
+// invariant the production code is *intended* to provide; if the test
+// fails, the code's "atomicity" claim is wishful and the assertion
+// itself is the bug report.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 5 concurrent `collect_order` calls for the same NFC chip UID. The
+/// underlying single-use guarantee is `WHERE tapped_at IS NULL` in
+/// `repository::tap_box`'s UPDATE — atomic at the row level.
+#[sqlx::test]
+async fn concurrent_nfc_collect_yields_exactly_one_winner(pool: PgPool) {
+    use box_fraise_domain::domain::orders::{
+        service as orders_svc,
+        types::{ActivateBoxRequest, CollectOrderRequest, CreateOrderRequest},
+    };
+    use box_fraise_domain::types::UserId;
+
+    let bus = EventBus::new();
+
+    // Setup: collector + business owner + business + visit + activated box + order.
+    let (collector_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('concurrent-collect@test', true) RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let collector = UserId::from(collector_id);
+
+    let (owner_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('concurrent-owner@test', true, 'attested') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (staff_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('concurrent-staff@test', true) RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let staff = UserId::from(staff_id);
+
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('CC Loc', 'box_fraise_store', '1 CC', 'America/Edmonton') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'CC Biz', 'active') RETURNING id",
+    ).bind(loc_id).bind(owner_id).fetch_one(&pool).await.unwrap();
+
+    // delivery_staff role for the staff user (required by activate_box).
+    sqlx::query(
+        "INSERT INTO staff_roles (user_id, location_id, role, granted_by) \
+         VALUES ($1, $2, 'delivery_staff', $3)",
+    ).bind(staff_id).bind(loc_id).bind(owner_id)
+     .execute(&pool).await.unwrap();
+
+    let (visit_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO staff_visits \
+         (location_id, staff_id, scheduled_at, window_hours, expected_box_count, \
+          arrived_at, status, visit_type) \
+         VALUES ($1, $2, now(), 4, 5, now(), 'in_progress', 'combined') RETURNING id",
+    ).bind(loc_id).bind(staff_id).fetch_one(&pool).await.unwrap();
+
+    let nfc = "concurrent-nfc-001";
+    with_rls_tx!(&pool, staff, |tx| {
+        orders_svc::activate_box(
+            &mut tx, &pool, visit_id, staff,
+            ActivateBoxRequest {
+                nfc_chip_uid:       nfc.to_owned(),
+                delivery_signature: "staff-sig".to_owned(),
+                expires_at:         chrono::Utc::now() + chrono::Duration::hours(48),
+            },
+        ).await.expect("activate_box must succeed")
+    });
+
+    let _order = with_rls_tx!(&pool, collector, |tx| {
+        orders_svc::create_order(
+            &mut tx, &pool, collector,
+            CreateOrderRequest {
+                business_id:         biz_id,
+                variety_description: Some("strawberries".to_owned()),
+                box_count:           1,
+                amount_cents:        2500,
+            },
+            &bus,
+        ).await.expect("create_order must succeed")
+    });
+
+    // Concurrent: 3 tasks all calling collect_order with the same NFC uid.
+    // (Was 5 in the spec — but each task uses ~2 pool connections [tx + the
+    // pool-backed user_repo::find_by_id and audit::write], and sqlx::test's
+    // default pool max is 10. 5 tasks × 2 conns + the test thread itself
+    // → PoolTimedOut. 3 tasks still meaningfully exercises the atomic
+    // `WHERE tapped_at IS NULL` race window.)
+    let mut handles = Vec::new();
+    for _ in 0..3 {
+        let pool_c = pool.clone();
+        let bus_c  = bus.clone();
+        let nfc_c  = nfc.to_owned();
+        handles.push(tokio::spawn(async move {
+            let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+                &pool_c, collector_id,
+            ).await.unwrap();
+            let r = orders_svc::collect_order(
+                &mut tx, &pool_c, collector,
+                CollectOrderRequest { nfc_chip_uid: nfc_c },
+                &bus_c,
+            ).await;
+            if r.is_ok() { let _ = tx.commit().await; }
+            r
+        }));
+    }
+
+    let mut successes = 0;
+    let mut conflicts = 0;
+    for h in handles {
+        let r = h.await.expect("task join");
+        match r {
+            Ok(o) => {
+                assert_eq!(o.status, "collected", "successful collect must yield status=collected");
+                successes += 1;
+            }
+            Err(box_fraise_domain::error::DomainError::Conflict(_)) => conflicts += 1,
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    assert_eq!(successes, 1, "exactly one task must win the NFC tap race");
+    assert_eq!(conflicts, 2, "the other 2 must lose with Conflict");
+
+    let (tapped_at, _clone_detected): (Option<chrono::DateTime<chrono::Utc>>, bool) =
+        sqlx::query_as("SELECT tapped_at, clone_detected FROM visit_boxes WHERE nfc_chip_uid = $1")
+            .bind(nfc).fetch_one(&pool).await.unwrap();
+    assert!(tapped_at.is_some(), "visit_box.tapped_at must be set exactly once");
+
+    // `clone_detected` is intentionally NOT asserted on. Whether it's set
+    // depends on the interleaving:
+    //  - If losers run their box-row READ before the winner commits, they
+    //    pass the pre-check, then their atomic UPDATE returns 0 rows and
+    //    they call `record_clone_detected` (true).
+    //  - If losers READ after the winner commits, the pre-check
+    //    (`tapped_at.is_some()`) short-circuits with Conflict before
+    //    `record_clone_detected` is called (false).
+    // Both are correct. The ATOMICITY invariant (exactly one winner) is
+    // the strict guarantee, and that's asserted above.
+}
+
+/// Two reviewers signing concurrently. Both signatures must land; the
+/// approval logic (idempotent UPDATE) must end with status='approved' and
+/// user='attested' regardless of the order their commits interleave.
+#[sqlx::test]
+async fn concurrent_reviewer_signs_both_land_and_approve(pool: PgPool) {
+    use box_fraise_domain::crypto::Ed25519KeyPair;
+    use box_fraise_domain::domain::attestations::{
+        service as attest_svc,
+        service::attestation_payload,
+        types::{
+            InitiateAttestationRequest, ReviewerSignAttestationRequest,
+            StaffSignAttestationRequest,
+        },
+    };
+    use box_fraise_domain::domain::staff::{
+        service as staff_svc,
+        types::{ArriveAtVisitRequest, GrantRoleRequest, ScheduleVisitRequest},
+    };
+    use box_fraise_domain::types::UserId;
+
+    let bus = EventBus::new();
+
+    let (admin_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, is_platform_admin) \
+         VALUES ('cc-attest-admin@test', true, true) RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let admin = UserId::from(admin_id);
+    let (staff_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('cc-attest-staff@test', true) RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let staff = UserId::from(staff_id);
+    let (r1_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('cc-attest-r1@test', true) RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (r2_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified) \
+         VALUES ('cc-attest-r2@test', true) RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (target_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('cc-attest-target@test', true, 'presence_confirmed') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('CC Attest Loc', 'box_fraise_store', '1 CCA', 'America/Edmonton') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'CCA Biz', 'active') RETURNING id",
+    ).bind(loc_id).bind(admin_id).fetch_one(&pool).await.unwrap();
+    let (threshold_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO presence_thresholds \
+         (user_id, business_id, event_count, days_count, threshold_met_at) \
+         VALUES ($1, $2, 3, 3, now()) RETURNING id",
+    ).bind(target_id).bind(biz_id).fetch_one(&pool).await.unwrap();
+
+    // Grant delivery_staff + reviewer roles, schedule + arrive at visit.
+    with_admin_tx!(&pool, |atx| {
+        staff_svc::grant_staff_role(
+            &mut atx, &pool, admin,
+            GrantRoleRequest {
+                user_id: staff_id, role: "delivery_staff".to_owned(),
+                location_id: Some(loc_id), expires_at: None, confirmed_by: None,
+            },
+            &bus,
+        ).await.unwrap()
+    });
+    for rid in [r1_id, r2_id] {
+        with_admin_tx!(&pool, |atx| {
+            staff_svc::grant_staff_role(
+                &mut atx, &pool, admin,
+                GrantRoleRequest {
+                    user_id: rid, role: "attestation_reviewer".to_owned(),
+                    location_id: None, expires_at: None, confirmed_by: None,
+                },
+                &bus,
+            ).await.unwrap()
+        });
+    }
+    let visit = with_rls_tx!(&pool, staff, |tx| {
+        staff_svc::schedule_visit(
+            &mut tx, &pool, staff,
+            ScheduleVisitRequest {
+                location_id: loc_id, visit_type: "combined".to_owned(),
+                scheduled_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                window_hours: Some(4), support_booking_capacity: Some(0),
+                expected_box_count: Some(5),
+            },
+            &bus,
+        ).await.unwrap()
+    });
+    with_rls_tx!(&pool, staff, |tx| {
+        staff_svc::arrive_at_visit(
+            &mut tx, &pool, visit.id, staff,
+            ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+        ).await.unwrap()
+    });
+    let attest = with_rls_tx!(&pool, staff, |tx| {
+        attest_svc::initiate_attestation(
+            &mut tx, &pool, staff,
+            InitiateAttestationRequest {
+                visit_id: visit.id, user_id: target_id,
+                presence_threshold_id: threshold_id,
+                photo_hash: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned()),
+                photo_storage_uri: None,
+            },
+            &bus,
+        ).await.unwrap()
+    });
+    let staff_kp = Ed25519KeyPair::generate();
+    let payload  = attestation_payload(&attest);
+    with_rls_tx!(&pool, staff, |tx| {
+        attest_svc::staff_sign(
+            &mut tx, &pool, attest.id, staff,
+            StaffSignAttestationRequest {
+                staff_signature:        staff_kp.sign(payload.as_bytes()),
+                verifying_key_hex:      staff_kp.verifying_key_hex(),
+                photo_hash:             None,
+                location_confirmed:     true,
+                user_present_confirmed: true,
+            },
+            &bus,
+        ).await.unwrap()
+    });
+
+    // Concurrent reviewer signs.
+    let r1_uid = UserId::from(attest.assigned_reviewer_1_id);
+    let r2_uid = UserId::from(attest.assigned_reviewer_2_id);
+    let r1_kp  = Ed25519KeyPair::generate();
+    let r2_kp  = Ed25519KeyPair::generate();
+    let payload_a = payload.clone();
+    let payload_b = payload.clone();
+    let pool_a = pool.clone();
+    let pool_b = pool.clone();
+    let bus_a  = bus.clone();
+    let bus_b  = bus.clone();
+    let attest_id = attest.id;
+
+    let task1 = tokio::spawn(async move {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+            &pool_a, attest.assigned_reviewer_1_id,
+        ).await.unwrap();
+        let r = attest_svc::reviewer_sign(
+            &mut tx, &pool_a, attest_id, r1_uid,
+            ReviewerSignAttestationRequest {
+                signature:              r1_kp.sign(payload_a.as_bytes()),
+                verifying_key_hex:      r1_kp.verifying_key_hex(),
+                evidence_hash_reviewed: "r1-evidence".to_owned(),
+            },
+            &bus_a,
+        ).await;
+        if r.is_ok() { let _ = tx.commit().await; }
+        r
+    });
+    let task2 = tokio::spawn(async move {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+            &pool_b, attest.assigned_reviewer_2_id,
+        ).await.unwrap();
+        let r = attest_svc::reviewer_sign(
+            &mut tx, &pool_b, attest_id, r2_uid,
+            ReviewerSignAttestationRequest {
+                signature:              r2_kp.sign(payload_b.as_bytes()),
+                verifying_key_hex:      r2_kp.verifying_key_hex(),
+                evidence_hash_reviewed: "r2-evidence".to_owned(),
+            },
+            &bus_b,
+        ).await;
+        if r.is_ok() { let _ = tx.commit().await; }
+        r
+    });
+
+    let (r1_res, r2_res) = tokio::join!(task1, task2);
+    // Both tasks must complete without panic. Either both Ok, or one
+    // succeeded and the second got a Conflict if it tried to act after
+    // the first's commit (acceptable — depends on interleaving).
+    let r1 = r1_res.expect("task 1 join");
+    let r2 = r2_res.expect("task 2 join");
+    assert!(
+        r1.is_ok() && r2.is_ok(),
+        "both reviewer_sign tasks should succeed under independent reviewer ids — got r1={r1:?}, r2={r2:?}",
+    );
+
+    // Both signatures land.
+    let sig_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM visit_signatures WHERE visit_id = $1 AND signed_at IS NOT NULL",
+    ).bind(visit.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(sig_count, 2, "both reviewer signatures must be persisted");
+
+    // Approval fires atomically with concurrent dual-sign. The race that
+    // previously left the attestation in `co_sign_pending` is closed by
+    // the row-level FOR UPDATE lock added to `reviewer_sign` (calls
+    // `repository::get_attestation_by_id_for_update`), which serialises
+    // the two reviewer txs through the attestation row.
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM visit_attestations WHERE id = $1",
+    ).bind(attest_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "approved",
+        "concurrent dual-sign must end in 'approved' (FOR UPDATE serialises the txs)");
+
+    let user_status: String = sqlx::query_scalar(
+        "SELECT verification_status FROM users WHERE id = $1",
+    ).bind(target_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(user_status, "attested", "target user must be promoted to attested");
+}
+
+/// Two concurrent `initiate_check` calls for the same user + check_type.
+/// Spec asserts exactly 1 row + 1 Conflict — but the production code's
+/// dedup is a read-then-INSERT pattern with no DB UNIQUE backstop, so
+/// this test will reveal whether the pattern actually serializes the
+/// two transactions OR exposes the race.
+#[sqlx::test]
+async fn concurrent_initiate_check_for_same_type(pool: PgPool) {
+    use box_fraise_domain::domain::background_checks::{
+        service as bc_svc, types::InitiateCheckRequest,
+    };
+    use box_fraise_domain::error::DomainError;
+    use box_fraise_domain::types::UserId;
+
+    let bus = EventBus::new();
+
+    let (uid,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ('cc-bc@test', true, 'identity_confirmed') RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let user = UserId::from(uid);
+
+    sqlx::query(
+        "INSERT INTO identity_credentials \
+         (user_id, credential_type, external_session_id, verified_at, \
+          cooling_ends_at, cooling_app_opens_required, cooling_completed_at) \
+         VALUES ($1, 'stripe_identity', 'cc-sess', now(), now(), 3, now())",
+    ).bind(uid).execute(&pool).await.unwrap();
+
+    let pool_a = pool.clone();
+    let pool_b = pool.clone();
+    let bus_a  = bus.clone();
+    let bus_b  = bus.clone();
+
+    let task1 = tokio::spawn(async move {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool_a, uid)
+            .await.unwrap();
+        let r = bc_svc::initiate_check(
+            &mut tx, &pool_a, user,
+            InitiateCheckRequest {
+                check_type: "sanctions".to_owned(),
+                provider:   "comply_advantage".to_owned(),
+            },
+            &bus_a,
+        ).await;
+        if r.is_ok() { let _ = tx.commit().await; }
+        r
+    });
+    let task2 = tokio::spawn(async move {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool_b, uid)
+            .await.unwrap();
+        let r = bc_svc::initiate_check(
+            &mut tx, &pool_b, user,
+            InitiateCheckRequest {
+                check_type: "sanctions".to_owned(),
+                provider:   "comply_advantage".to_owned(),
+            },
+            &bus_b,
+        ).await;
+        if r.is_ok() { let _ = tx.commit().await; }
+        r
+    });
+
+    let (r1, r2) = tokio::join!(task1, task2);
+    let r1 = r1.expect("task 1 join");
+    let r2 = r2.expect("task 2 join");
+
+    let row_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM background_checks \
+         WHERE user_id = $1 AND check_type = 'sanctions'",
+    ).bind(uid).fetch_one(&pool).await.unwrap();
+
+    let mut successes = 0;
+    let mut conflicts = 0;
+    for r in [&r1, &r2] {
+        match r {
+            Ok(_) => successes += 1,
+            Err(DomainError::Conflict(_)) => conflicts += 1,
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    // Strict invariant: exactly 1 row, 1 success, 1 conflict.
+    //
+    // The previously-exposed race (`SELECT pending → INSERT` with no
+    // DB backstop) is closed by the partial UNIQUE INDEX
+    // `background_checks_one_pending_per_user_type` (migration 010).
+    // The losing tx's INSERT now fails with a unique-violation, which
+    // `initiate_check` maps to `DomainError::Conflict`.
+    assert_eq!(row_count, 1,
+        "exactly 1 sanctions row must exist after concurrent initiations \
+         (got {row_count}; successes={successes}, conflicts={conflicts})");
+    assert_eq!(successes, 1, "exactly one task must succeed");
+    assert_eq!(conflicts, 1, "the other task must Conflict");
+}

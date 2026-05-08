@@ -54,6 +54,30 @@ pub async fn get_attestation_by_id(
     .map_err(DomainError::Db)
 }
 
+/// Same as `get_attestation_by_id` but acquires a row-level
+/// `FOR UPDATE` lock so concurrent callers serialise.
+///
+/// Used by `reviewer_sign` to close the race that two reviewers
+/// signing simultaneously each saw a `co_sign_pending` snapshot and
+/// each only saw their own signature when checking "have both signed?",
+/// leaving the attestation un-approved despite both signatures landing.
+/// The lock makes the second reviewer wait for the first to commit,
+/// so its post-write `count(visit_signatures) >= 2` check correctly
+/// observes both signatures and triggers approval.
+pub async fn get_attestation_by_id_for_update(
+    conn: &mut PgConnection,
+    id:   i32,
+) -> AppResult<Option<VisitAttestationRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {ATTESTATION_COLS} FROM visit_attestations \
+         WHERE id = $1 FOR UPDATE"
+    ))
+    .bind(id)
+    .fetch_optional(conn)
+    .await
+    .map_err(DomainError::Db)
+}
+
 pub async fn get_attestations_by_user(
     conn:    &mut PgConnection,
     user_id: i32,
