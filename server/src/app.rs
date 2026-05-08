@@ -176,10 +176,13 @@ impl AppState {
 pub fn build(state: AppState) -> Router {
     let (prometheus_layer, _handle) = prometheus_pair();
 
-    Router::new()
-        // ── OpenAPI docs ──────────────────────────────────────────────────────
+    // ── Per-route timeouts (Hardening §6 — Grade A item 4) ────────────────────
+    // Three tiers: default 30s, webhooks 60s (provider callbacks), LLM 120s
+    // (Anthropic). TimeoutLayers are applied per-group BEFORE the merge so
+    // each group's timeout sticks; if the global TimeoutLayer were applied
+    // outside the merge as before, the smallest (30s) would always win.
+    let default_routes = Router::new()
         .merge(crate::openapi::router())
-        // ── Domain routes ─────────────────────────────────────────────────────
         .merge(meta::router())
         .merge(crate::domain::attestations::routes::router())
         .merge(crate::domain::orders::routes::router())
@@ -192,13 +195,26 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::identity_credentials::routes::router())
         .merge(crate::domain::staff::routes::router())
         .merge(crate::domain::users::routes::router())
-        .merge(crate::domain::dorotka::routes::router())
         .merge(crate::domain::support::routes::router())
         .merge(crate::domain::attestation_tokens::routes::router())
         .merge(crate::domain::verification_events::routes::router())
         .merge(crate::domain::platform_configuration::routes::router())
         .merge(crate::domain::analytics::routes::router())
         .merge(crate::domain::notifications::routes::router())
+        .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)));
+
+    let webhook_routes = Router::new()
+        .merge(crate::domain::background_checks::routes::webhook_router())
+        .merge(crate::domain::identity_credentials::routes::webhook_router())
+        .layer(TimeoutLayer::new(std::time::Duration::from_secs(60)));
+
+    let llm_routes = crate::domain::dorotka::routes::router()
+        .layer(TimeoutLayer::new(std::time::Duration::from_secs(120)));
+
+    Router::new()
+        .merge(default_routes)
+        .merge(webhook_routes)
+        .merge(llm_routes)
         // ── Security middleware (innermost — runs first) ───────────────────────
         //
         // TODO(rls-enforcement, Hardening 2d): wire `set_rls_user_context`
@@ -231,20 +247,11 @@ pub fn build(state: AppState) -> Router {
         ))
         // Correlation ID: wraps everything above so every log line from every
         // handler includes request_id, method, path in its span context.
+        // Per-route timeouts are applied INSIDE the merge above (not here)
+        // so each route group keeps its own deadline (30s default / 60s
+        // webhooks / 120s LLM) — applying a single global TimeoutLayer
+        // here would always shorten longer per-group timeouts.
         .layer(middleware::from_fn(correlation_id::track))
-        // Request timeout — returns 408 after 30 s. Inside correlation_id so
-        // the request_id is available in timeout logs. Configurable via
-        // TIMEOUT_SECS env var (default 30).
-        //
-        // Per-route timeout intentions (Hardening §6 — TODO):
-        //   - POST /api/identity/webhook/stripe          → 60s (Stripe slow)
-        //   - POST /api/background-checks/webhook        → 60s
-        //   - POST /api/dorotka/ask                      → 120s (LLM)
-        //   - everything else                             → 30s (current global)
-        // Implementing per-route timeouts requires wrapping the affected
-        // routes individually with a `TimeoutLayer` of a different value;
-        // deferred to a follow-up — the global 30s is the immediate win.
-        .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
         // ── Observability (Hardening §4) ──────────────────────────────────────
         // Prometheus middleware records http_requests_total,
         // http_request_duration_seconds, and http_requests_in_flight per

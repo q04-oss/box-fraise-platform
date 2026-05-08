@@ -184,10 +184,39 @@ pub async fn run() -> anyhow::Result<()> {
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(async {
-        tokio::signal::ctrl_c().await.ok();
-    })
+    .with_graceful_shutdown(shutdown_signal())
     .await?;
 
     Ok(())
+}
+
+/// Wait for either Ctrl-C (SIGINT) or SIGTERM and return — `axum::serve`
+/// then drains in-flight requests before exiting. SIGTERM is what container
+/// orchestrators (Railway, Kubernetes) send on rolling deploy, so handling
+/// only Ctrl-C would force a hard kill in production. The `cfg(unix)` guard
+/// keeps Windows dev boxes compiling — `unix::signal` doesn't exist there;
+/// we substitute a future that never resolves, so `select!` falls through
+/// to `ctrl_c` (which Windows does support).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let sigterm = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let sigterm = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c  => tracing::info!("Received SIGINT — shutting down"),
+        _ = sigterm => tracing::info!("Received SIGTERM — shutting down"),
+    }
 }

@@ -17,8 +17,15 @@ use super::{service, types::*};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/background-checks/initiate", post(initiate))
-        .route("/api/background-checks/webhook",  post(webhook))
         .route("/api/background-checks/status",   get(status))
+}
+
+/// Webhook routes that need a longer timeout (provider callbacks). Kept
+/// separate so `app.rs` can wrap this group in a 60s `TimeoutLayer`
+/// without slowing down the rest of the API.
+pub fn webhook_router() -> Router<AppState> {
+    Router::new()
+        .route("/api/background-checks/webhook", post(webhook))
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────

@@ -17,9 +17,15 @@ use super::{service, types::*};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/identity/verify",            post(initiate_verification))
-        .route("/api/identity/webhook/stripe",    post(stripe_webhook))
         .route("/api/identity/cooling/app-open",  post(app_open))
         .route("/api/identity/cooling/status",    get(cooling_status))
+}
+
+/// Webhook routes that need a longer timeout (Stripe Identity callbacks).
+/// Kept separate so `app.rs` can wrap this group in a 60s `TimeoutLayer`.
+pub fn webhook_router() -> Router<AppState> {
+    Router::new()
+        .route("/api/identity/webhook/stripe", post(stripe_webhook))
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
