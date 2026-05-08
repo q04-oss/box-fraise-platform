@@ -766,4 +766,70 @@ mod tests {
             "JSON must not contain the actual secret key value"
         );
     }
+
+    // ── Property-based tests ────────────────────────────────────────────────
+    //
+    // `derive_daily_uuid(secret_key: &str, business_id: i32, date: NaiveDate)`
+    // — note the actual signature differs from the spec template (`secret_key`
+    // is a hex string, not a byte array, and the arg order is key first).
+
+    use proptest::prelude::*;
+
+    /// Fixed 32-byte hex key shared across the daily-uuid properties.
+    fn test_secret_hex() -> String {
+        "0".repeat(64)
+    }
+
+    proptest! {
+        /// Same business_id + same date always produces the same UUID.
+        #[test]
+        fn beacon_uuid_is_deterministic(
+            business_id in 1i32..=1_000_000i32,
+            days_offset in 0i64..=3650i64,
+        ) {
+            let key  = test_secret_hex();
+            let date = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()
+                + chrono::Duration::days(days_offset);
+            let uuid1 = derive_daily_uuid(&key, business_id, date);
+            let uuid2 = derive_daily_uuid(&key, business_id, date);
+            prop_assert_eq!(uuid1, uuid2);
+        }
+
+        /// Daily-rotation property: same business, different dates →
+        /// different UUIDs. HMAC collision in the truncated 16-byte
+        /// output is ~2^-128 per case — negligible.
+        #[test]
+        fn beacon_uuid_differs_across_dates(
+            business_id in 1i32..=1_000_000i32,
+            day1 in 0i64..=1825i64,
+            day2 in 0i64..=1825i64,
+        ) {
+            prop_assume!(day1 != day2);
+            let key  = test_secret_hex();
+            let base = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+            let date1 = base + chrono::Duration::days(day1);
+            let date2 = base + chrono::Duration::days(day2);
+            let uuid1 = derive_daily_uuid(&key, business_id, date1);
+            let uuid2 = derive_daily_uuid(&key, business_id, date2);
+            prop_assert_ne!(uuid1, uuid2);
+        }
+
+        /// Domain-separation property: same date, different business →
+        /// different UUIDs. The `:` separator between business_id and
+        /// date prevents length-extension confusion across the two
+        /// input components.
+        #[test]
+        fn beacon_uuid_differs_across_businesses(
+            b1 in 1i32..=500_000i32,
+            b2 in 500_001i32..=1_000_000i32,
+            days_offset in 0i64..=365i64,
+        ) {
+            let key  = test_secret_hex();
+            let date = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()
+                + chrono::Duration::days(days_offset);
+            let uuid1 = derive_daily_uuid(&key, b1, date);
+            let uuid2 = derive_daily_uuid(&key, b2, date);
+            prop_assert_ne!(uuid1, uuid2);
+        }
+    }
 }

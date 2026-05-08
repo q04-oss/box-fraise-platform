@@ -1423,4 +1423,64 @@ mod tests {
             "new signature must verify against the renewed payload",
         );
     }
+
+    // ── Property-based tests ────────────────────────────────────────────────
+    //
+    // proptest runs each property 256 times by default with shrunk
+    // counterexamples on failure. The signature
+    // `derive_display_code(uuid, hmac_key, key_version)` takes three
+    // args (the spec template missed `key_version` — pinned to 1 here).
+
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Same UUID + same key always produces the same display code.
+        #[test]
+        fn display_code_is_deterministic(
+            bytes in proptest::array::uniform16(0u8..=255u8),
+        ) {
+            let uuid = uuid::Uuid::from_bytes(bytes);
+            let key  = [0u8; 32];
+            let code1 = derive_display_code(&uuid, &key, 1);
+            let code2 = derive_display_code(&uuid, &key, 1);
+            prop_assert_eq!(code1, code2);
+        }
+
+        /// Output always matches `XXXX-XXXX-XXXX` where each `X` is
+        /// a base-36 digit (`[0-9A-Z]`).
+        #[test]
+        fn display_code_format_is_always_correct(
+            bytes in proptest::array::uniform16(0u8..=255u8),
+        ) {
+            let uuid = uuid::Uuid::from_bytes(bytes);
+            let key  = [0u8; 32];
+            let code = derive_display_code(&uuid, &key, 1);
+            prop_assert_eq!(code.len(), 14, "expected 12 chars + 2 hyphens");
+            prop_assert_eq!(&code[4..5], "-");
+            prop_assert_eq!(&code[9..10], "-");
+            let no_dashes: String = code.chars().filter(|&c| c != '-').collect();
+            prop_assert!(
+                no_dashes.chars().all(|c| c.is_ascii_alphanumeric()
+                                       && (c.is_ascii_digit() || c.is_ascii_uppercase())),
+                "display code contains non-base36 char: {}", code,
+            );
+        }
+
+        /// Same UUID + DIFFERENT keys produce DIFFERENT codes. With
+        /// random 32-byte keys, the chance of HMAC-SHA256 collision in
+        /// the truncated 9-byte output is ~2^-72 per case — negligible
+        /// at any sane proptest case count.
+        #[test]
+        fn display_code_differs_for_different_keys(
+            bytes in proptest::array::uniform16(0u8..=255u8),
+            key1  in proptest::array::uniform32(0u8..=255u8),
+            key2  in proptest::array::uniform32(0u8..=255u8),
+        ) {
+            prop_assume!(key1 != key2);
+            let uuid = uuid::Uuid::from_bytes(bytes);
+            let code1 = derive_display_code(&uuid, &key1, 1);
+            let code2 = derive_display_code(&uuid, &key2, 1);
+            prop_assert_ne!(code1, code2);
+        }
+    }
 }

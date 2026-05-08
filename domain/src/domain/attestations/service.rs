@@ -1714,4 +1714,91 @@ mod tests {
         assert!(parse_signature_record(":only-sig").is_err());
         assert!(parse_signature_record("only-key:").is_err());
     }
+
+    // ── Property-based tests ────────────────────────────────────────────────
+
+    use proptest::prelude::*;
+
+    /// Build a `VisitAttestationRow` with all required fields filled in.
+    /// Optional fields (`photo_hash`, signatures, deadlines) default to
+    /// `None`. The constants for staff_id/reviewer ids are fixed and not
+    /// FK-validated (these properties test the pure payload formatter).
+    fn make_test_attestation_row(
+        id:         i32,
+        visit_id:   i32,
+        user_id:    i32,
+        photo_hash: Option<String>,
+    ) -> VisitAttestationRow {
+        let now = chrono::Utc::now();
+        VisitAttestationRow {
+            id,
+            visit_id,
+            user_id,
+            staff_id:                  1,
+            presence_threshold_id:     1,
+            assigned_reviewer_1_id:    2,
+            assigned_reviewer_2_id:    3,
+            user_present_confirmed:    false,
+            user_identity_verified_at: None,
+            location_confirmed:        false,
+            photo_hash,
+            photo_storage_uri:         None,
+            staff_signature:           None,
+            co_sign_deadline:          None,
+            status:                    "pending".to_owned(),
+            attempt_number:            1,
+            updated_at:                now,
+            created_at:                now,
+        }
+    }
+
+    proptest! {
+        /// Same input fields → same payload. The function is pure;
+        /// timestamps in the row don't enter the payload.
+        #[test]
+        fn attestation_payload_is_deterministic(
+            attestation_id in 1i32..=1_000_000i32,
+            visit_id       in 1i32..=1_000_000i32,
+            user_id        in 1i32..=1_000_000i32,
+        ) {
+            let row1 = make_test_attestation_row(attestation_id, visit_id, user_id, None);
+            let row2 = make_test_attestation_row(attestation_id, visit_id, user_id, None);
+            prop_assert_eq!(attestation_payload(&row1), attestation_payload(&row2));
+        }
+
+        /// Payload string contains attestation_id, visit_id, user_id,
+        /// and the version tag — proves no field is silently dropped.
+        #[test]
+        fn attestation_payload_includes_all_fields(
+            attestation_id in 1i32..=1_000_000i32,
+            visit_id       in 1i32..=1_000_000i32,
+            user_id        in 1i32..=1_000_000i32,
+        ) {
+            let row     = make_test_attestation_row(attestation_id, visit_id, user_id, None);
+            let payload = attestation_payload(&row);
+            prop_assert!(payload.contains(&attestation_id.to_string()),
+                "payload missing attestation_id: {}", payload);
+            prop_assert!(payload.contains(&visit_id.to_string()),
+                "payload missing visit_id: {}", payload);
+            prop_assert!(payload.contains(&user_id.to_string()),
+                "payload missing user_id: {}", payload);
+            prop_assert!(payload.contains("BFIP_ATTESTATION_V1"),
+                "payload missing version tag: {}", payload);
+        }
+
+        /// Adding/removing photo_hash changes the payload — guards
+        /// against signature-aware tampering with photo evidence.
+        #[test]
+        fn attestation_payload_changes_with_photo_hash(
+            attestation_id in 1i32..=1_000_000i32,
+            visit_id       in 1i32..=1_000_000i32,
+            user_id        in 1i32..=1_000_000i32,
+            hash_bytes     in proptest::array::uniform32(0u8..=255u8),
+        ) {
+            let hash_hex    = hex::encode(hash_bytes);
+            let row_with    = make_test_attestation_row(attestation_id, visit_id, user_id, Some(hash_hex));
+            let row_without = make_test_attestation_row(attestation_id, visit_id, user_id, None);
+            prop_assert_ne!(attestation_payload(&row_with), attestation_payload(&row_without));
+        }
+    }
 }
