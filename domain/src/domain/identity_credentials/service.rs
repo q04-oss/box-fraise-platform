@@ -143,15 +143,20 @@ pub async fn initiate_verification(
         tracing::error!(error = %e, "verification_events (status_changed) insert failed");
     }
 
-    // Audit write uses `pool` (separate connection) — commits independently
-    // so the audit row lands even if `tx` is rolled back.
-    audit::write(
-        pool,
-        Some(uid),
-        None,
-        "identity.verification_initiated",
-        serde_json::json!({ "credential_id": cred.id }),
-    ).await;
+    // audit inlined into tx to avoid FK-lock deadlock.
+    // Trade-off: audit rolls back if tx fails.
+    // Pattern: tx updates users, audit FK validates users.
+    let _ = sqlx::query(
+        "INSERT INTO audit_events (event_kind, user_id, actor_id, metadata) \
+         VALUES ($1, $2, $3, $4)"
+    )
+    .bind("identity.verification_initiated")
+    .bind(Some(uid))
+    .bind(None::<i32>)
+    .bind(serde_json::json!({ "credential_id": cred.id }))
+    .execute(tx.as_mut())
+    .await;
+    let _ = pool;
 
     event_bus.publish(DomainEvent::IdentityVerificationInitiated {
         user_id:       uid,

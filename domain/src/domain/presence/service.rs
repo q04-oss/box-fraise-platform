@@ -322,17 +322,27 @@ pub async fn record_beacon_dwell(
     // 8–13. Advance threshold, check completion, write verification events.
     advance_threshold(tx.as_mut(), uid, req.business_id, event.id, calendar_date, bus).await?;
 
-    // 14. Audit event. Audit writes use `pool` (separate connection) — they
-    //     commit independently so the audit row lands even if `tx` is rolled back.
-    audit::write(
-        pool, Some(uid), None, "presence.beacon_dwell",
-        serde_json::json!({
-            "beacon_id":    req.beacon_id,
-            "business_id":  req.business_id,
-            "rssi":         req.rssi,
-            "dwell_minutes": req.dwell_minutes,
-        }),
-    ).await;
+    // 14. Audit event.
+    // audit inlined into tx to avoid FK-lock deadlock.
+    // Trade-off: audit rolls back if tx fails.
+    // Pattern: when threshold is met, advance_threshold UPDATEs users
+    // (status → presence_confirmed); audit FK validates users.
+    let _ = sqlx::query(
+        "INSERT INTO audit_events (event_kind, user_id, actor_id, metadata) \
+         VALUES ($1, $2, $3, $4)"
+    )
+    .bind("presence.beacon_dwell")
+    .bind(Some(uid))
+    .bind(None::<i32>)
+    .bind(serde_json::json!({
+        "beacon_id":    req.beacon_id,
+        "business_id":  req.business_id,
+        "rssi":         req.rssi,
+        "dwell_minutes": req.dwell_minutes,
+    }))
+    .execute(tx.as_mut())
+    .await;
+    let _ = pool;
 
     bus.publish(DomainEvent::PresenceEventRecorded {
         user_id: uid, event_type: "beacon_dwell".into(), is_qualifying: true,
@@ -438,12 +448,22 @@ pub async fn record_nfc_tap(
     // 6. Advance threshold.
     advance_threshold(tx.as_mut(), uid, req.business_id, event.id, calendar_date, bus).await?;
 
-    // 7. Audit event. Audit writes use `pool` (separate connection) — they
-    //    commit independently so the audit row lands even if `tx` is rolled back.
-    audit::write(
-        pool, Some(uid), None, "presence.nfc_tap",
-        serde_json::json!({ "box_id": req.box_id, "business_id": req.business_id }),
-    ).await;
+    // 7. Audit event.
+    // audit inlined into tx to avoid FK-lock deadlock.
+    // Trade-off: audit rolls back if tx fails.
+    // Pattern: when threshold is met, advance_threshold UPDATEs users
+    // (status → presence_confirmed); audit FK validates users.
+    let _ = sqlx::query(
+        "INSERT INTO audit_events (event_kind, user_id, actor_id, metadata) \
+         VALUES ($1, $2, $3, $4)"
+    )
+    .bind("presence.nfc_tap")
+    .bind(Some(uid))
+    .bind(None::<i32>)
+    .bind(serde_json::json!({ "box_id": req.box_id, "business_id": req.business_id }))
+    .execute(tx.as_mut())
+    .await;
+    let _ = pool;
 
     bus.publish(DomainEvent::PresenceEventRecorded {
         user_id: uid, event_type: "nfc_tap".into(), is_qualifying: true,

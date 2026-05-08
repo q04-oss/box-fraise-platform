@@ -261,18 +261,24 @@ pub async fn issue_soultoken(
         tracing::error!(error = %e, "verification_events (soultoken_issued) insert failed");
     }
 
-    // Audit writes use `pool` (separate connection) — they commit
-    // independently so the audit row lands even if `tx` is rolled back.
-    audit::write(
-        pool,
-        Some(uid),
-        None,
-        "soultoken.issued",
-        serde_json::json!({
-            "soultoken_id": token.id,
-            "token_type":   &req.token_type,
-        }),
-    ).await;
+    // audit inlined into tx to avoid FK-lock deadlock.
+    // Trade-off: audit rolls back if tx fails.
+    // Pattern: tx updates users (via update_user_soultoken_id),
+    // audit FK validates users.
+    let _ = sqlx::query(
+        "INSERT INTO audit_events (event_kind, user_id, actor_id, metadata) \
+         VALUES ($1, $2, $3, $4)"
+    )
+    .bind("soultoken.issued")
+    .bind(Some(uid))
+    .bind(None::<i32>)
+    .bind(serde_json::json!({
+        "soultoken_id": token.id,
+        "token_type":   &req.token_type,
+    }))
+    .execute(tx.as_mut())
+    .await;
+    let _ = pool;
 
     // 10. Publish domain event.
     event_bus.publish(DomainEvent::SoultokenIssued {
@@ -520,19 +526,25 @@ pub async fn surrender_soultoken(
         }
     }
 
-    // Audit writes use `pool` (separate connection) — they commit
-    // independently so the audit row lands even if `tx` is rolled back.
-    audit::write(
-        pool,
-        Some(uid),
-        None,
-        "soultoken.surrendered",
-        serde_json::json!({
-            "soultoken_id":           soultoken_id,
-            "revocation_visit_id":    req.revocation_visit_id,
-            "surrender_witnessed_by": req.surrender_witnessed_by,
-        }),
-    ).await;
+    // audit inlined into tx to avoid FK-lock deadlock.
+    // Trade-off: audit rolls back if tx fails.
+    // Pattern: tx updates users (status → registered),
+    // audit FK validates users.
+    let _ = sqlx::query(
+        "INSERT INTO audit_events (event_kind, user_id, actor_id, metadata) \
+         VALUES ($1, $2, $3, $4)"
+    )
+    .bind("soultoken.surrendered")
+    .bind(Some(uid))
+    .bind(None::<i32>)
+    .bind(serde_json::json!({
+        "soultoken_id":           soultoken_id,
+        "revocation_visit_id":    req.revocation_visit_id,
+        "surrender_witnessed_by": req.surrender_witnessed_by,
+    }))
+    .execute(tx.as_mut())
+    .await;
+    let _ = pool;
 
     event_bus.publish(DomainEvent::SoultokenRevoked {
         soultoken_id,
