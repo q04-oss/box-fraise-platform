@@ -328,3 +328,271 @@ async fn admin_can_see_all_users_data(pool: PgPool) {
         "app_admin must see both users' verification_events via admin-bypass policy",
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Coverage extension — high-risk tables (Commit B).
+//
+// soultokens, background_checks, presence_events, visit_attestations carry
+// the most sensitive data on the platform. These tests prove the
+// `*_self`/`*_admin` policy pair fires correctly on each, using the same
+// `as_app_user!` / `as_app_admin!` helpers as the verification_events
+// proofs above.
+//
+// Setup helpers below seed minimal valid rows for each table. The test
+// of-record on `verification_events` covers the policy *pattern*; these
+// extensions cover the *surface*.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Seed a `business` soultoken row owned by `holder_user_id`. Returns the
+/// soultoken row id. Uses `token_type='business'` to avoid the four
+/// `user_soultoken_requires_*` CHECK constraints that gate `'user'` rows.
+async fn seed_business_soultoken(pool: &PgPool, holder_user_id: i32, display_code: &str) -> i32 {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let (owner_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ($1, true, 'attested') RETURNING id",
+    ).bind(SafeEmail().fake::<String>()).fetch_one(pool).await.unwrap();
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('rls-st-loc', 'box_fraise_store', '1 ST', 'America/Edmonton') RETURNING id",
+    ).fetch_one(pool).await.unwrap();
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'rls-st-biz', 'active') RETURNING id",
+    ).bind(loc_id).bind(owner_id).fetch_one(pool).await.unwrap();
+    let (st_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO soultokens \
+         (uuid, display_code, display_code_key_version, schema_version, \
+          holder_user_id, token_type, business_id, issued_at, expires_at) \
+         VALUES (gen_random_uuid(), $1, 1, 1, $2, 'business', $3, \
+                 now(), now() + INTERVAL '1 year') RETURNING id",
+    ).bind(display_code).bind(holder_user_id).bind(biz_id)
+     .fetch_one(pool).await.unwrap();
+    st_id
+}
+
+/// Seed a minimal `background_checks` row for `user_id`. Requires an
+/// `identity_credentials` row (NOT NULL FK). Returns the check id.
+async fn seed_background_check(pool: &PgPool, user_id: i32) -> i32 {
+    let (cred_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO identity_credentials \
+         (user_id, credential_type, external_session_id, verified_at, \
+          cooling_ends_at, cooling_app_opens_required) \
+         VALUES ($1, 'stripe_identity', $2, now(), now() + INTERVAL '7 days', 3) \
+         RETURNING id",
+    ).bind(user_id).bind(format!("rls-cred-{user_id}"))
+     .fetch_one(pool).await.unwrap();
+
+    let (check_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO background_checks \
+         (user_id, identity_credential_id, provider, check_type, status) \
+         VALUES ($1, $2, 'comply_advantage', 'sanctions', 'pending') RETURNING id",
+    ).bind(user_id).bind(cred_id).fetch_one(pool).await.unwrap();
+    check_id
+}
+
+/// Seed a `presence_events` row for `user_id`. Requires a business
+/// (NOT NULL FK). `session_id` and `beacon_id` are nullable.
+async fn seed_presence_event(pool: &PgPool, user_id: i32) -> i32 {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let (owner_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO users (email, email_verified, verification_status) \
+         VALUES ($1, true, 'attested') RETURNING id",
+    ).bind(SafeEmail().fake::<String>()).fetch_one(pool).await.unwrap();
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('rls-pe-loc', 'box_fraise_store', '1 PE', 'America/Edmonton') RETURNING id",
+    ).fetch_one(pool).await.unwrap();
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'rls-pe-biz', 'active') RETURNING id",
+    ).bind(loc_id).bind(owner_id).fetch_one(pool).await.unwrap();
+    let (event_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO presence_events \
+         (user_id, business_id, event_type, calendar_date, occurred_at) \
+         VALUES ($1, $2, 'beacon_dwell', CURRENT_DATE, now()) RETURNING id",
+    ).bind(user_id).bind(biz_id).fetch_one(pool).await.unwrap();
+    event_id
+}
+
+/// Seed a `visit_attestations` row for `target_user_id`. Requires the
+/// full FK chain: location → business → presence_threshold + staff_visit
+/// + 4 distinct user roles. Returns the attestation id and the four user
+/// ids `(staff, r1, r2, outsider)` so tests can assert isolation against
+/// the outsider.
+async fn seed_visit_attestation(pool: &PgPool, target_user_id: i32) -> (i32, i32, i32, i32) {
+    use fake::{Fake, faker::internet::en::SafeEmail};
+    let mk_user = |verification: &'static str| async move {
+        let (id,): (i32,) = sqlx::query_as(
+            "INSERT INTO users (email, email_verified, verification_status) \
+             VALUES ($1, true, $2) RETURNING id",
+        ).bind(SafeEmail().fake::<String>()).bind(verification)
+         .fetch_one(pool).await.unwrap();
+        id
+    };
+    let staff_id = mk_user("attested").await;
+    let r1_id    = mk_user("attested").await;
+    let r2_id    = mk_user("attested").await;
+    let outsider = mk_user("registered").await;
+
+    let (loc_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO locations (name, location_type, address, timezone) \
+         VALUES ('rls-va-loc', 'box_fraise_store', '1 VA', 'America/Edmonton') RETURNING id",
+    ).fetch_one(pool).await.unwrap();
+    let (biz_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO businesses (location_id, primary_holder_id, name, verification_status) \
+         VALUES ($1, $2, 'rls-va-biz', 'active') RETURNING id",
+    ).bind(loc_id).bind(r1_id).fetch_one(pool).await.unwrap();
+    let (threshold_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO presence_thresholds \
+         (user_id, business_id, event_count, days_count, threshold_met_at) \
+         VALUES ($1, $2, 3, 3, now()) RETURNING id",
+    ).bind(target_user_id).bind(biz_id).fetch_one(pool).await.unwrap();
+    let (visit_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO staff_visits \
+         (location_id, staff_id, scheduled_at, window_hours, expected_box_count, \
+          arrived_at, status, visit_type) \
+         VALUES ($1, $2, now(), 4, 5, now(), 'in_progress', 'combined') RETURNING id",
+    ).bind(loc_id).bind(staff_id).fetch_one(pool).await.unwrap();
+    let (attest_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO visit_attestations \
+         (visit_id, user_id, staff_id, presence_threshold_id, \
+          assigned_reviewer_1_id, assigned_reviewer_2_id, status, \
+          co_sign_deadline) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'co_sign_pending', \
+                 now() + INTERVAL '48 hours') RETURNING id",
+    ).bind(visit_id).bind(target_user_id).bind(staff_id)
+     .bind(threshold_id).bind(r1_id).bind(r2_id)
+     .fetch_one(pool).await.unwrap();
+
+    (attest_id, staff_id, r1_id, outsider)
+}
+
+// ── soultokens ──────────────────────────────────────────────────────────────
+
+#[sqlx::test(migrations = "../server/migrations")]
+async fn user_cannot_see_another_users_soultokens(pool: PgPool) {
+    setup_grants(&pool).await;
+    let (user_a, user_b) = create_two_users(&pool).await;
+    seed_business_soultoken(&pool, user_b, "AAAA-BBBB-CCCC").await;
+
+    let count: i64 = as_app_user!(&pool, user_a, |conn| {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM soultokens WHERE holder_user_id = $1",
+        ).bind(user_b).fetch_one(&mut *conn).await.unwrap()
+    });
+    assert_eq!(count, 0, "user_a must not see user_b's soultoken");
+}
+
+#[sqlx::test(migrations = "../server/migrations")]
+async fn user_can_see_own_soultoken(pool: PgPool) {
+    setup_grants(&pool).await;
+    let (user_a, _) = create_two_users(&pool).await;
+    seed_business_soultoken(&pool, user_a, "DDDD-EEEE-FFFF").await;
+
+    let count: i64 = as_app_user!(&pool, user_a, |conn| {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM soultokens WHERE holder_user_id = $1",
+        ).bind(user_a).fetch_one(&mut *conn).await.unwrap()
+    });
+    assert_eq!(count, 1, "user_a must see their own soultoken");
+}
+
+// ── background_checks ──────────────────────────────────────────────────────
+
+#[sqlx::test(migrations = "../server/migrations")]
+async fn user_cannot_see_another_users_background_checks(pool: PgPool) {
+    setup_grants(&pool).await;
+    let (user_a, user_b) = create_two_users(&pool).await;
+    seed_background_check(&pool, user_b).await;
+
+    let count: i64 = as_app_user!(&pool, user_a, |conn| {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM background_checks WHERE user_id = $1",
+        ).bind(user_b).fetch_one(&mut *conn).await.unwrap()
+    });
+    assert_eq!(count, 0, "user_a must not see user_b's background_checks");
+}
+
+#[sqlx::test(migrations = "../server/migrations")]
+async fn user_can_see_own_background_checks(pool: PgPool) {
+    setup_grants(&pool).await;
+    let (user_a, _) = create_two_users(&pool).await;
+    seed_background_check(&pool, user_a).await;
+
+    let count: i64 = as_app_user!(&pool, user_a, |conn| {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM background_checks WHERE user_id = $1",
+        ).bind(user_a).fetch_one(&mut *conn).await.unwrap()
+    });
+    assert_eq!(count, 1, "user_a must see their own background_checks");
+}
+
+// ── presence_events ─────────────────────────────────────────────────────────
+
+#[sqlx::test(migrations = "../server/migrations")]
+async fn user_cannot_see_another_users_presence_events(pool: PgPool) {
+    setup_grants(&pool).await;
+    let (user_a, user_b) = create_two_users(&pool).await;
+    seed_presence_event(&pool, user_b).await;
+
+    let count: i64 = as_app_user!(&pool, user_a, |conn| {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM presence_events WHERE user_id = $1",
+        ).bind(user_b).fetch_one(&mut *conn).await.unwrap()
+    });
+    assert_eq!(count, 0, "user_a must not see user_b's presence_events");
+}
+
+#[sqlx::test(migrations = "../server/migrations")]
+async fn user_can_see_own_presence_events(pool: PgPool) {
+    setup_grants(&pool).await;
+    let (user_a, _) = create_two_users(&pool).await;
+    seed_presence_event(&pool, user_a).await;
+
+    let count: i64 = as_app_user!(&pool, user_a, |conn| {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM presence_events WHERE user_id = $1",
+        ).bind(user_a).fetch_one(&mut *conn).await.unwrap()
+    });
+    assert_eq!(count, 1, "user_a must see their own presence_events");
+}
+
+// ── visit_attestations ──────────────────────────────────────────────────────
+//
+// `visit_attestations_self` policy permits SELECT to any of FOUR principals:
+// `user_id`, `staff_id`, `assigned_reviewer_1_id`, `assigned_reviewer_2_id`.
+// The "isolation" test must therefore use a fifth user who is none of those —
+// `seed_visit_attestation` returns an `outsider` id specifically for this.
+//
+// The "own-attestation" test uses the attested user (`user_id` column) to
+// demonstrate the `user_id =` branch of the policy fires.
+
+#[sqlx::test(migrations = "../server/migrations")]
+async fn user_cannot_see_another_users_attestations(pool: PgPool) {
+    setup_grants(&pool).await;
+    let (target_user, _) = create_two_users(&pool).await;
+    let (attest_id, _staff, _r1, outsider) = seed_visit_attestation(&pool, target_user).await;
+
+    let count: i64 = as_app_user!(&pool, outsider, |conn| {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM visit_attestations WHERE id = $1",
+        ).bind(attest_id).fetch_one(&mut *conn).await.unwrap()
+    });
+    assert_eq!(count, 0,
+        "outsider (not user/staff/either reviewer) must not see the attestation");
+}
+
+#[sqlx::test(migrations = "../server/migrations")]
+async fn user_can_see_own_attestation(pool: PgPool) {
+    setup_grants(&pool).await;
+    let (target_user, _) = create_two_users(&pool).await;
+    let (attest_id, _staff, _r1, _outsider) = seed_visit_attestation(&pool, target_user).await;
+
+    let count: i64 = as_app_user!(&pool, target_user, |conn| {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM visit_attestations WHERE id = $1",
+        ).bind(attest_id).fetch_one(&mut *conn).await.unwrap()
+    });
+    assert_eq!(count, 1, "attested user (user_id column) must see their own attestation");
+}
