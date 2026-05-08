@@ -87,7 +87,12 @@ pub async fn erase_me(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<ErasureResponse>> {
-    Ok(Json(service::request_erasure(&state.db, i32::from(user_id)).await?))
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::request_erasure(&mut tx, &state.db, i32::from(user_id)).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// `GET /api/users/me/export` — full export of the caller's data
@@ -104,7 +109,15 @@ pub async fn export_me(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<UserDataExport>> {
-    Ok(Json(service::export_my_data(&state.db, i32::from(user_id)).await?))
+    // Hardening cleanup #3 pilot — RLS-scoped per-request transaction.
+    // Begin → call service with `&mut tx` → on Ok, commit; on Err, the
+    // `?` operator drops `tx` and Postgres rolls back automatically.
+    let mut tx   = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::export_my_data(&mut tx, &state.db, i32::from(user_id)).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// `POST /api/admin/users/:id/ban` — Hardening §10. platform_admin only.
@@ -126,7 +139,11 @@ pub async fn ban_user(
     Path(target):         Path<i32>,
     AppJson(body):        AppJson<BanRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    service::admin_ban_user(&state.db, i32::from(user_id), target, body.reason).await?;
+    let mut tx = box_fraise_domain::transaction::AdminRlsTransaction::begin(
+        &state.db,
+    ).await?;
+    service::admin_ban_user(&mut tx, &state.db, i32::from(user_id), target, body.reason).await?;
+    tx.commit().await?;
     Ok(Json(json!({ "user_id": target, "is_banned": true })))
 }
 
@@ -147,6 +164,10 @@ pub async fn unban_user(
     RequireUser(user_id): RequireUser,
     Path(target):         Path<i32>,
 ) -> AppResult<Json<serde_json::Value>> {
-    service::admin_unban_user(&state.db, i32::from(user_id), target).await?;
+    let mut tx = box_fraise_domain::transaction::AdminRlsTransaction::begin(
+        &state.db,
+    ).await?;
+    service::admin_unban_user(&mut tx, &state.db, i32::from(user_id), target).await?;
+    tx.commit().await?;
     Ok(Json(json!({ "user_id": target, "is_banned": false })))
 }

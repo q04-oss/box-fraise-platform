@@ -42,7 +42,11 @@ pub async fn beacon_dwell(
     if body.dwell_minutes <= 0 {
         return Err(AppError::bad_request("dwell_minutes must be positive"));
     }
-    let resp = service::record_beacon_dwell(&state.db, user_id, body, &state.event_bus).await?;
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::record_beacon_dwell(&mut tx, &state.db, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
     Ok(Json(resp))
 }
 
@@ -64,7 +68,11 @@ pub async fn nfc_tap(
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<RecordNfcTapRequest>,
 ) -> AppResult<(StatusCode, Json<PresenceStatusResponse>)> {
-    let resp = service::record_nfc_tap(&state.db, user_id, body, &state.event_bus).await?;
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::record_nfc_tap(&mut tx, &state.db, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
     Ok((StatusCode::OK, Json(resp)))
 }
 
@@ -84,6 +92,7 @@ pub async fn status(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<PresenceStatusResponse>> {
+    // Read-only, no audit — service stays on &PgPool per cleanup #3 rule.
     let resp = service::get_presence_status(&state.db, user_id).await?;
     if resp.event_count == 0 && resp.days_count == 0 {
         return Err(AppError::NotFound);

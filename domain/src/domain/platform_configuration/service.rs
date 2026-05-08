@@ -3,6 +3,7 @@ use sqlx::PgPool;
 use crate::{
     audit,
     error::{AppResult, DomainError},
+    transaction::AdminRlsTransaction,
     types::UserId,
 };
 use crate::domain::auth::repository as user_repo;
@@ -64,13 +65,25 @@ fn validate_value(value: &str, value_type: &str) -> AppResult<()> {
 /// Ensure BFIP Section 15 defaults are present — called at server startup.
 ///
 /// Uses ON CONFLICT DO NOTHING so custom values set by admins are never overwritten.
+///
+/// System-bootstrap function — runs before any HTTP request, so there is no
+/// authenticated caller to scope an `AdminRlsTransaction` against. Stays on
+/// `&PgPool` per cleanup #3 rule. Acquires a pool connection internally to
+/// satisfy the repository's `&mut PgConnection` signature.
 pub async fn initialize_defaults(pool: &PgPool) -> AppResult<()> {
-    repository::seed_defaults(pool).await
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    repository::seed_defaults(&mut conn).await
 }
 
 /// Return all configuration values — platform_admin only (BFIP Section 15.1).
+///
+/// Audited (`config.viewed`) — runs the read inside an `AdminRlsTransaction`
+/// so the per-tx `app.is_admin` setting scopes row visibility through the
+/// admin-bypass policies in 002_rls.sql. Audit write goes to `pool` so it
+/// commits independently of the transaction.
 pub async fn get_all_configuration(
-    pool:               &PgPool,
+    tx:                 &mut AdminRlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     requesting_user_id: UserId,
 ) -> AppResult<Vec<PlatformConfigurationResponse>> {
     let uid = i32::from(requesting_user_id);
@@ -82,7 +95,7 @@ pub async fn get_all_configuration(
         return Err(DomainError::Forbidden);
     }
 
-    let rows = repository::get_all(pool).await?;
+    let rows = repository::get_all(tx.as_mut()).await?;
 
     audit::write(
         pool,
@@ -98,11 +111,13 @@ pub async fn get_all_configuration(
 /// Return a single configuration value by key — no auth required (BFIP Section 15.2).
 ///
 /// Used internally by the application to read protocol parameters at runtime.
+/// Read-only, no audit, no auth — kept on `&PgPool` per cleanup #3 rule.
 pub async fn get_configuration(
     pool: &PgPool,
     key:  &str,
 ) -> AppResult<PlatformConfigurationResponse> {
-    let row = repository::get_by_key(pool, key)
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    let row = repository::get_by_key(&mut conn, key)
         .await?
         .ok_or(DomainError::NotFound)?;
     Ok(to_response(row))
@@ -111,8 +126,12 @@ pub async fn get_configuration(
 /// Update a configuration value — platform_admin only (BFIP Section 15.3).
 ///
 /// Records previous value in `platform_configuration_history` before updating.
+/// Write + history + audit — runs in an `AdminRlsTransaction` so the update
+/// and the history row commit atomically. Audit lands on `pool` so it
+/// survives a tx rollback.
 pub async fn update_configuration(
-    pool:               &PgPool,
+    tx:                 &mut AdminRlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     key:                &str,
     requesting_user_id: UserId,
     req:                UpdateConfigurationRequest,
@@ -128,7 +147,7 @@ pub async fn update_configuration(
     }
 
     // 2. Key must exist.
-    let current = repository::get_by_key(pool, key)
+    let current = repository::get_by_key(tx.as_mut(), key)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -138,11 +157,11 @@ pub async fn update_configuration(
     let previous_value = current.value.clone();
 
     // 4–5. Update.
-    let updated = repository::update_value(pool, key, &req.value, uid).await?;
+    let updated = repository::update_value(tx.as_mut(), key, &req.value, uid).await?;
 
     // 6. Record history.
     repository::record_history(
-        pool,
+        tx.as_mut(),
         current.id,
         &previous_value,
         &req.value,
@@ -166,6 +185,10 @@ pub async fn update_configuration(
 }
 
 /// Return full change history for a key — platform_admin only (BFIP Section 15.4).
+///
+/// Admin read, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn get_configuration_history(
     pool:               &PgPool,
     key:                &str,
@@ -178,7 +201,8 @@ pub async fn get_configuration_history(
         return Err(DomainError::Forbidden);
     }
 
-    repository::get_history_by_key(pool, key).await
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    repository::get_history_by_key(&mut conn, key).await
 }
 
 // ── Feature flags (Hardening §10) ────────────────────────────────────────────
@@ -196,6 +220,8 @@ pub async fn get_configuration_history(
 /// Anonymous callers (`user_id = None`) bucket as 0 for the percentage
 /// rollout — so a 50% rollout would expose the flag to anonymous traffic.
 /// Pass an explicit `Some(0)` to keep anonymous off the rollout.
+///
+/// Read-only, no auth, no audit — kept on `&PgPool` per cleanup #3 rule.
 pub async fn is_feature_enabled(
     pool:      &PgPool,
     flag_name: &str,
@@ -231,6 +257,8 @@ pub async fn is_feature_enabled(
 }
 
 /// Admin-only — list every flag for the dashboard.
+///
+/// Admin read, no audit — kept on `&PgPool` per cleanup #3 rule.
 pub async fn list_feature_flags(
     pool:               &PgPool,
     requesting_user_id: UserId,
@@ -252,7 +280,11 @@ pub async fn list_feature_flags(
 }
 
 /// Admin-only — flip the global `enabled` bit on a flag.
+///
+/// Write — runs in an `AdminRlsTransaction` so the update lands on a
+/// connection tagged as admin-scope.
 pub async fn set_feature_flag_enabled(
+    tx:                 &mut AdminRlsTransaction,
     pool:               &PgPool,
     requesting_user_id: UserId,
     flag_name:          &str,
@@ -270,7 +302,7 @@ pub async fn set_feature_flag_enabled(
     )
     .bind(flag_name)
     .bind(enabled)
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
     if result.rows_affected() == 0 {
@@ -310,7 +342,9 @@ mod tests {
         initialize_defaults(&pool).await.expect("seed must succeed");
         let admin = create_admin(&pool, &SafeEmail().fake::<String>()).await;
 
-        let configs = get_all_configuration(&pool, admin).await.unwrap();
+        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
+        let configs = get_all_configuration(&mut tx, &pool, admin).await.unwrap();
+        tx.commit().await.unwrap();
         assert_eq!(configs.len(), 18, "must have all 18 default keys (14 BFIP §15 + 4 rate-limit cleanup #8)");
 
         // Spot-check values.
@@ -329,7 +363,8 @@ mod tests {
         initialize_defaults(&pool).await.unwrap();
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let err = get_all_configuration(&pool, user).await.unwrap_err();
+        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
+        let err = get_all_configuration(&mut tx, &pool, user).await.unwrap_err();
         assert!(matches!(err, DomainError::Forbidden));
     }
 
@@ -340,15 +375,18 @@ mod tests {
         let admin = create_admin(&pool, &SafeEmail().fake::<String>()).await;
         let uid   = i32::from(admin);
 
+        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
         let resp = update_configuration(
-            &pool, "cooling_period_days", admin,
+            &mut tx, &pool, "cooling_period_days", admin,
             UpdateConfigurationRequest { value: "14".to_string() },
         ).await.expect("update must succeed");
+        tx.commit().await.unwrap();
 
         assert_eq!(resp.value, "14");
 
         // History record created.
-        let hist = repository::get_history_by_key(&pool, "cooling_period_days").await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let hist = repository::get_history_by_key(&mut conn, "cooling_period_days").await.unwrap();
         assert_eq!(hist.len(), 1);
         assert_eq!(hist[0].previous_value, "7");
         assert_eq!(hist[0].new_value, "14");
@@ -368,8 +406,9 @@ mod tests {
         initialize_defaults(&pool).await.unwrap();
         let admin = create_admin(&pool, &SafeEmail().fake::<String>()).await;
 
+        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
         let err = update_configuration(
-            &pool, "cooling_period_days", admin,
+            &mut tx, &pool, "cooling_period_days", admin,
             UpdateConfigurationRequest { value: "not_a_number".to_string() },
         ).await.unwrap_err();
 
@@ -382,8 +421,9 @@ mod tests {
         initialize_defaults(&pool).await.unwrap();
         let admin = create_admin(&pool, &SafeEmail().fake::<String>()).await;
 
+        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
         let err = update_configuration(
-            &pool, "cleared_requires_all_checks", admin,
+            &mut tx, &pool, "cleared_requires_all_checks", admin,
             UpdateConfigurationRequest { value: "yes".to_string() },
         ).await.unwrap_err();
 
@@ -396,12 +436,18 @@ mod tests {
         initialize_defaults(&pool).await.unwrap();
         let admin = create_admin(&pool, &SafeEmail().fake::<String>()).await;
 
-        update_configuration(&pool, "cooling_period_days", admin,
+        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
+        update_configuration(&mut tx, &pool, "cooling_period_days", admin,
             UpdateConfigurationRequest { value: "14".to_string() }).await.unwrap();
-        update_configuration(&pool, "cooling_period_days", admin,
-            UpdateConfigurationRequest { value: "21".to_string() }).await.unwrap();
+        tx.commit().await.unwrap();
 
-        let hist = repository::get_history_by_key(&pool, "cooling_period_days").await.unwrap();
+        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
+        update_configuration(&mut tx, &pool, "cooling_period_days", admin,
+            UpdateConfigurationRequest { value: "21".to_string() }).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut conn = pool.acquire().await.unwrap();
+        let hist = repository::get_history_by_key(&mut conn, "cooling_period_days").await.unwrap();
         // Returned DESC: most recent first.
         assert_eq!(hist.len(), 2);
         assert_eq!(hist[0].previous_value, "14");
@@ -428,8 +474,10 @@ mod tests {
         let admin = create_admin(&pool, &SafeEmail().fake::<String>()).await;
 
         for v in &["10", "20", "30"] {
-            update_configuration(&pool, "cooling_period_days", admin,
+            let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
+            update_configuration(&mut tx, &pool, "cooling_period_days", admin,
                 UpdateConfigurationRequest { value: v.to_string() }).await.unwrap();
+            tx.commit().await.unwrap();
         }
 
         let hist = get_configuration_history(&pool, "cooling_period_days", admin)
@@ -450,8 +498,9 @@ mod tests {
         initialize_defaults(&pool).await.unwrap();
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
+        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
         let err = update_configuration(
-            &pool, "cooling_period_days", user,
+            &mut tx, &pool, "cooling_period_days", user,
             UpdateConfigurationRequest { value: "999".to_string() },
         ).await.unwrap_err();
 
@@ -465,8 +514,9 @@ mod tests {
         let admin = create_admin(&pool, &SafeEmail().fake::<String>()).await;
 
         // SQL injection attempt via integer field.
+        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
         let err = update_configuration(
-            &pool, "cooling_period_days", admin,
+            &mut tx, &pool, "cooling_period_days", admin,
             UpdateConfigurationRequest { value: "1; DROP TABLE platform_configuration;--".to_string() },
         ).await.unwrap_err();
 
@@ -480,7 +530,8 @@ mod tests {
         initialize_defaults(&pool).await.unwrap();
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let err = get_all_configuration(&pool, user).await.unwrap_err();
+        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
+        let err = get_all_configuration(&mut tx, &pool, user).await.unwrap_err();
         assert!(matches!(err, DomainError::Forbidden));
     }
 }

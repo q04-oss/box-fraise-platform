@@ -39,7 +39,11 @@ pub async fn create(
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<CreateOrderRequest>,
 ) -> AppResult<(StatusCode, Json<OrderResponse>)> {
-    let resp = service::create_order(&state.db, user_id, body, &state.event_bus).await?;
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::create_order(&mut tx, &state.db, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -76,9 +80,12 @@ pub async fn collect(
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<CollectOrderRequest>,
 ) -> AppResult<Json<OrderResponse>> {
-    Ok(Json(
-        service::collect_order(&state.db, user_id, body, &state.event_bus).await?,
-    ))
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::collect_order(&mut tx, &state.db, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// POST /api/orders/:id/cancel
@@ -100,9 +107,12 @@ pub async fn cancel(
     RequireUser(user_id): RequireUser,
     Path(order_id):       Path<i32>,
 ) -> AppResult<Json<OrderResponse>> {
-    Ok(Json(
-        service::cancel_order(&state.db, order_id, user_id).await?,
-    ))
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::cancel_order(&mut tx, &state.db, order_id, user_id).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// POST /api/staff/visits/:visit_id/boxes/activate
@@ -121,7 +131,11 @@ pub async fn activate_box(
     Path(visit_id):       Path<i32>,
     AppJson(body):        AppJson<ActivateBoxRequest>,
 ) -> AppResult<(StatusCode, Json<VisitBoxResponse>)> {
-    let resp = service::activate_box(&state.db, visit_id, user_id, body).await?;
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::activate_box(&mut tx, &state.db, visit_id, user_id, body).await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 

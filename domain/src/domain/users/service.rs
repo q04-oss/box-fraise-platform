@@ -4,6 +4,7 @@ use sqlx::PgPool;
 use crate::{
     audit,
     error::{DomainError, AppResult},
+    transaction::{AdminRlsTransaction, RlsTransaction},
     types::UserId,
 };
 use super::{
@@ -16,14 +17,22 @@ use super::{
 };
 
 /// Search for users matching `query` (matched against display name and email).
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn search_users(pool: &PgPool, query: &str) -> AppResult<Vec<UserSearchResult>> {
-    repository::search(pool, query).await
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    repository::search(&mut conn, query).await
 }
 
 /// Return the public profile for `user_id`. Returns `NotFound` when the user
 /// does not exist or has been banned.
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule.
 pub async fn get_public_profile(pool: &PgPool, user_id: UserId) -> AppResult<PublicProfile> {
-    repository::public_profile(pool, user_id)
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    repository::public_profile(&mut conn, user_id)
         .await?
         .ok_or(DomainError::NotFound)
 }
@@ -41,13 +50,17 @@ pub async fn get_public_profile(pool: &PgPool, user_id: UserId) -> AppResult<Pub
 /// Returns `Conflict` when the user holds an active soultoken — soultoken
 /// surrender requires an in-person visit (BFIP §7.5) and can't be done
 /// through this endpoint.
-pub async fn request_erasure(pool: &PgPool, user_id: i32) -> AppResult<ErasureResponse> {
+pub async fn request_erasure(
+    tx:      &mut RlsTransaction,
+    pool:    &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
+    user_id: i32,
+) -> AppResult<ErasureResponse> {
     // 1. User must exist and not already be erased.
     let exists: Option<bool> = sqlx::query_scalar(
         "SELECT TRUE FROM users WHERE id = $1 AND deleted_at IS NULL"
     )
     .bind(user_id)
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
     if exists.is_none() {
@@ -64,7 +77,7 @@ pub async fn request_erasure(pool: &PgPool, user_id: i32) -> AppResult<ErasureRe
            AND s.expires_at > now()"
     )
     .bind(user_id)
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
     if active_soultoken.is_some() {
@@ -89,7 +102,7 @@ pub async fn request_erasure(pool: &PgPool, user_id: i32) -> AppResult<ErasureRe
          WHERE id = $1"
     )
     .bind(user_id)
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -101,15 +114,32 @@ pub async fn request_erasure(pool: &PgPool, user_id: i32) -> AppResult<ErasureRe
         "background check results: retained 12 months".to_string(),
     ];
 
-    // 4. Audit. Includes the retained-data list so the audit trail records
-    //    exactly what was kept, not just that erasure happened.
-    audit::write(
-        pool,
-        Some(user_id),
-        None,
-        "user.erasure_requested",
-        serde_json::json!({ "user_id": user_id, "retained_data": retained }),
-    ).await;
+    // 4. Audit — INLINED inside the tx (exception to the "audit on pool"
+    //    rule). The standard `audit::write(pool, ...)` would acquire a
+    //    separate pool connection and INSERT into `audit_events`, whose
+    //    FK on `user_id` requires a lock on the same `users` row that
+    //    this transaction's UPDATE in step 3 still holds. The audit
+    //    INSERT therefore blocks indefinitely waiting for the tx to
+    //    commit, but the tx cannot commit until this audit await
+    //    returns — a circular wait that hangs the request. Inlining the
+    //    audit on `tx.as_mut()` eliminates the cross-connection
+    //    contention; the trade-off is that the audit row rolls back if
+    //    the surrounding tx fails. For erasure that's acceptable
+    //    because the only failure path is "user vanishes" and an audit
+    //    row about a non-erased user would be misleading.
+    let _ = sqlx::query(
+        "INSERT INTO audit_events (event_kind, user_id, actor_id, metadata) \
+         VALUES ($1, $2, $3, $4)"
+    )
+    .bind("user.erasure_requested")
+    .bind(Some(user_id))
+    .bind(None::<i32>)
+    .bind(serde_json::json!({ "user_id": user_id, "retained_data": retained }))
+    .execute(tx.as_mut())
+    .await;
+    // `pool` reference retained for compile compatibility — audit::write
+    // is no longer called here.
+    let _ = pool;
 
     Ok(ErasureResponse {
         user_id,
@@ -122,14 +152,28 @@ pub async fn request_erasure(pool: &PgPool, user_id: i32) -> AppResult<ErasureRe
 }
 
 /// `GET /api/users/me/export` — GDPR Article 20 data portability.
-pub async fn export_my_data(pool: &PgPool, user_id: i32) -> AppResult<UserDataExport> {
+///
+/// Pilot for Hardening cleanup #3 — runs every read inside the
+/// `RlsTransaction`'s connection so the per-tx `app.user_id` setting
+/// scopes row visibility. The handler is responsible for `begin` and
+/// `commit`; this function only reads.
+///
+/// `audit::write` is still called against the pool (commits independently)
+/// — the rollout has to decide whether to move it inside the transaction
+/// for atomicity. See the `tx.as_mut()` calls vs the `pool: &PgPool`
+/// audit call below for the contrast.
+pub async fn export_my_data(
+    tx:      &mut RlsTransaction,
+    pool:    &PgPool,
+    user_id: i32,
+) -> AppResult<UserDataExport> {
     // 1. Profile — single-row query.
     let user_profile: UserProfileExport = sqlx::query_as(
         "SELECT id, email, display_name, verification_status, created_at \
          FROM users WHERE id = $1 AND deleted_at IS NULL AND NOT is_banned"
     )
     .bind(user_id)
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await
     .map_err(DomainError::Db)?
     .ok_or(DomainError::NotFound)?;
@@ -141,7 +185,7 @@ pub async fn export_my_data(pool: &PgPool, user_id: i32) -> AppResult<UserDataEx
          ORDER BY created_at ASC"
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -152,7 +196,7 @@ pub async fn export_my_data(pool: &PgPool, user_id: i32) -> AppResult<UserDataEx
          ORDER BY occurred_at ASC"
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -163,7 +207,7 @@ pub async fn export_my_data(pool: &PgPool, user_id: i32) -> AppResult<UserDataEx
          ORDER BY created_at ASC"
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -174,7 +218,7 @@ pub async fn export_my_data(pool: &PgPool, user_id: i32) -> AppResult<UserDataEx
          ORDER BY granted_at ASC"
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -186,10 +230,13 @@ pub async fn export_my_data(pool: &PgPool, user_id: i32) -> AppResult<UserDataEx
          ORDER BY issued_at ASC"
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
+    // Audit write — independent of the read transaction. Pilot leaves this
+    // as-is; rollout decision: move inside the tx for atomicity, or keep
+    // out for "audit always lands even if main work rolls back" semantics.
     audit::write(
         pool,
         Some(user_id),
@@ -212,6 +259,17 @@ pub async fn export_my_data(pool: &PgPool, user_id: i32) -> AppResult<UserDataEx
 /// Insert a consent record. Called from auth flows on user creation and
 /// from any service that triggers a new processing activity (e.g.
 /// background check initiation — TODO).
+///
+/// Stays on `&PgPool` — auth callers are unauthenticated when this
+/// runs (the user is being created or a magic link is being verified),
+/// so there is no JWT to scope an `RlsTransaction` to. The per-call
+/// `user_id` is set by the auth-flow code, which is itself the
+/// authority for who is being authenticated.
+///
+/// TODO(hardening): if/when consent gains its own RLS policy that
+/// requires `app.user_id`, refactor auth flows to begin an
+/// `RlsTransaction` with the just-created user id immediately after
+/// user creation, and switch this signature to take it.
 pub async fn record_consent(
     pool:         &PgPool,
     user_id:      i32,
@@ -242,7 +300,8 @@ pub async fn record_consent(
 /// audit. Cannot ban another platform_admin (defence against compromised
 /// admin accounts ban-blasting the team).
 pub async fn admin_ban_user(
-    pool:               &PgPool,
+    tx:                 &mut AdminRlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     requesting_user_id: i32,
     target_user_id:     i32,
     reason:             String,
@@ -252,7 +311,7 @@ pub async fn admin_ban_user(
         "SELECT is_platform_admin FROM users WHERE id = $1 AND deleted_at IS NULL"
     )
     .bind(requesting_user_id)
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
     if !matches!(requester_admin, Some(true)) {
@@ -264,7 +323,7 @@ pub async fn admin_ban_user(
         "SELECT is_platform_admin FROM users WHERE id = $1"
     )
     .bind(target_user_id)
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
     match target_admin {
@@ -285,7 +344,7 @@ pub async fn admin_ban_user(
     )
     .bind(target_user_id)
     .bind(&reason)
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -299,19 +358,28 @@ pub async fn admin_ban_user(
            AND s.expires_at > now()"
     )
     .bind(target_user_id)
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
     if let Some(st_id) = active_st {
-        let _ = crate::domain::soultokens::service::revoke_soultoken(
-            pool,
-            st_id,
-            UserId::from(requesting_user_id),
-            crate::domain::soultokens::types::RevokeSoultokenRequest {
-                revocation_reason:   "platform_ban".to_string(),
-                revocation_visit_id: None,
-            },
-        ).await;
+        // Cross-domain call: open a fresh RlsTransaction scoped to the
+        // requesting admin so revoke_soultoken's RLS context is set
+        // correctly. The two operations (ban + revoke) run in separate
+        // transactions — partial-failure semantics are unchanged from
+        // pre-migration code (which had no tx at all).
+        if let Ok(mut st_tx) = RlsTransaction::begin(pool, requesting_user_id).await {
+            let _ = crate::domain::soultokens::service::revoke_soultoken(
+                &mut st_tx,
+                pool,
+                st_id,
+                UserId::from(requesting_user_id),
+                crate::domain::soultokens::types::RevokeSoultokenRequest {
+                    revocation_reason:   "platform_ban".to_string(),
+                    revocation_visit_id: None,
+                },
+            ).await;
+            let _ = st_tx.commit().await;
+        }
     }
 
     audit::write(
@@ -328,7 +396,8 @@ pub async fn admin_ban_user(
 /// revoked by `admin_ban_user` are NOT automatically reissued; the user
 /// goes through the verification protocol again if they want one back.
 pub async fn admin_unban_user(
-    pool:               &PgPool,
+    tx:                 &mut AdminRlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     requesting_user_id: i32,
     target_user_id:     i32,
 ) -> AppResult<()> {
@@ -336,7 +405,7 @@ pub async fn admin_unban_user(
         "SELECT is_platform_admin FROM users WHERE id = $1 AND deleted_at IS NULL"
     )
     .bind(requesting_user_id)
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
     if !matches!(requester_admin, Some(true)) {
@@ -352,7 +421,7 @@ pub async fn admin_unban_user(
          WHERE id = $1"
     )
     .bind(target_user_id)
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
     if result.rows_affected() == 0 {

@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use crate::error::{AppResult, DomainError};
 use super::types::{
@@ -11,7 +11,7 @@ use super::types::{
 // ── Staff roles ───────────────────────────────────────────────────────────────
 
 pub async fn grant_role(
-    pool:         &PgPool,
+    conn:         &mut PgConnection,
     user_id:      i32,
     location_id:  Option<i32>,
     role:         &str,
@@ -32,13 +32,13 @@ pub async fn grant_role(
     .bind(granted_by)
     .bind(confirmed_by)
     .bind(expires_at)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_active_roles_by_user(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
 ) -> AppResult<Vec<StaffRoleRow>> {
     sqlx::query_as(&format!(
@@ -49,13 +49,13 @@ pub async fn get_active_roles_by_user(
          ORDER BY granted_at DESC"
     ))
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_active_role(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
     role:    &str,
 ) -> AppResult<Option<StaffRoleRow>> {
@@ -69,13 +69,13 @@ pub async fn get_active_role(
     ))
     .bind(user_id)
     .bind(role)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn revoke_role(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     role_id: i32,
 ) -> AppResult<StaffRoleRow> {
     sqlx::query_as(&format!(
@@ -83,7 +83,7 @@ pub async fn revoke_role(
          RETURNING {STAFF_ROLE_COLS}"
     ))
     .bind(role_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -91,7 +91,7 @@ pub async fn revoke_role(
 // ── Staff visits ──────────────────────────────────────────────────────────────
 
 pub async fn create_visit(
-    pool:                     &PgPool,
+    conn:                     &mut PgConnection,
     location_id:              i32,
     staff_id:                 i32,
     visit_type:               &str,
@@ -114,26 +114,26 @@ pub async fn create_visit(
     .bind(window_hours)
     .bind(support_booking_capacity)
     .bind(expected_box_count)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_visit_by_id(
-    pool:     &PgPool,
+    conn:     &mut PgConnection,
     visit_id: i32,
 ) -> AppResult<Option<StaffVisitRow>> {
     sqlx::query_as(&format!(
         "SELECT {STAFF_VISIT_COLS} FROM staff_visits WHERE id = $1"
     ))
     .bind(visit_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_visits_by_location(
-    pool:        &PgPool,
+    conn:        &mut PgConnection,
     location_id: i32,
 ) -> AppResult<Vec<StaffVisitRow>> {
     sqlx::query_as(&format!(
@@ -142,13 +142,13 @@ pub async fn get_visits_by_location(
          ORDER BY scheduled_at DESC"
     ))
     .bind(location_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_visits_by_staff(
-    pool:     &PgPool,
+    conn:     &mut PgConnection,
     staff_id: i32,
 ) -> AppResult<Vec<StaffVisitRow>> {
     sqlx::query_as(&format!(
@@ -157,24 +157,24 @@ pub async fn get_visits_by_staff(
          ORDER BY scheduled_at DESC"
     ))
     .bind(staff_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
-pub async fn get_all_visits(pool: &PgPool) -> AppResult<Vec<StaffVisitRow>> {
+pub async fn get_all_visits(conn: &mut PgConnection) -> AppResult<Vec<StaffVisitRow>> {
     sqlx::query_as(&format!(
         "SELECT {STAFF_VISIT_COLS} FROM staff_visits \
          WHERE status != 'cancelled' \
          ORDER BY scheduled_at DESC"
     ))
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn update_visit_arrived(
-    pool:              &PgPool,
+    conn:              &mut PgConnection,
     visit_id:          i32,
     arrived_at:        DateTime<Utc>,
     arrived_latitude:  Option<f64>,
@@ -195,13 +195,13 @@ pub async fn update_visit_arrived(
     .bind(arrived_at)
     .bind(arrived_latitude)
     .bind(arrived_longitude)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn update_visit_completed(
-    pool:                &PgPool,
+    conn:                &mut PgConnection,
     visit_id:            i32,
     actual_box_count:    i32,
     delivery_signature:  Option<&str>,
@@ -225,13 +225,13 @@ pub async fn update_visit_completed(
     .bind(delivery_signature)
     .bind(evidence_hash)
     .bind(evidence_storage_uri)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn cancel_visit(
-    pool:                &PgPool,
+    conn:                &mut PgConnection,
     visit_id:            i32,
     cancellation_reason: Option<&str>,
 ) -> AppResult<StaffVisitRow> {
@@ -246,7 +246,7 @@ pub async fn cancel_visit(
     ))
     .bind(visit_id)
     .bind(cancellation_reason)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -254,7 +254,7 @@ pub async fn cancel_visit(
 // ── Quality assessments ───────────────────────────────────────────────────────
 
 pub async fn create_quality_assessment(
-    pool:                      &PgPool,
+    conn:                      &mut PgConnection,
     visit_id:                  i32,
     business_id:               i32,
     assessor_id:               i32,
@@ -279,7 +279,7 @@ pub async fn create_quality_assessment(
     .bind(standards_maintained)
     .bind(overall_pass)
     .bind(notes)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -290,7 +290,7 @@ pub async fn create_quality_assessment(
 /// (including the one just inserted). Updates businesses.beacon_suspended
 /// if the count reaches 3.
 pub async fn record_assessment_history(
-    pool:          &PgPool,
+    conn:          &mut PgConnection,
     business_id:   i32,
     assessment_id: i32,
     passed:        bool,
@@ -303,7 +303,7 @@ pub async fn record_assessment_history(
            AND assessed_at > now() - interval '12 months'"
     )
     .bind(business_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await
     .map_err(DomainError::Db)?;
 
@@ -319,7 +319,7 @@ pub async fn record_assessment_history(
     .bind(passed)
     .bind(new_fail_count)
     .bind(beacon_id)
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     .map_err(DomainError::Db)?;
 
@@ -333,11 +333,10 @@ pub async fn record_assessment_history(
              WHERE id = $1"
         )
         .bind(business_id)
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         .map_err(DomainError::Db)?;
     }
 
     Ok(new_fail_count)
 }
-

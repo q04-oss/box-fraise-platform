@@ -1,5 +1,5 @@
 #![allow(missing_docs)]
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use crate::error::{AppResult, DomainError};
 use super::types::{AuditRequestLogRow, VerificationEventRow, VERIFICATION_EVENT_COLS};
@@ -7,7 +7,7 @@ use super::types::{AuditRequestLogRow, VerificationEventRow, VERIFICATION_EVENT_
 // ── Verification events ───────────────────────────────────────────────────────
 
 pub async fn get_events_by_user(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
 ) -> AppResult<Vec<VerificationEventRow>> {
     sqlx::query_as(&format!(
@@ -15,13 +15,13 @@ pub async fn get_events_by_user(
          WHERE user_id = $1 ORDER BY created_at ASC"
     ))
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_events_by_user_and_type(
-    pool:       &PgPool,
+    conn:       &mut PgConnection,
     user_id:    i32,
     event_type: &str,
 ) -> AppResult<Vec<VerificationEventRow>> {
@@ -31,7 +31,7 @@ pub async fn get_events_by_user_and_type(
     ))
     .bind(user_id)
     .bind(event_type)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -39,7 +39,7 @@ pub async fn get_events_by_user_and_type(
 // ── Audit request log ─────────────────────────────────────────────────────────
 
 pub async fn record_audit_request(
-    pool:            &PgPool,
+    conn:            &mut PgConnection,
     user_id:         i32,
     requested_by:    i32,
     delivery_method: &str,
@@ -52,13 +52,13 @@ pub async fn record_audit_request(
     .bind(user_id)
     .bind(requested_by)
     .bind(delivery_method)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_audit_requests_by_user(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
 ) -> AppResult<Vec<AuditRequestLogRow>> {
     sqlx::query_as(
@@ -66,7 +66,7 @@ pub async fn get_audit_requests_by_user(
          FROM audit_request_log WHERE user_id = $1 ORDER BY requested_at DESC"
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }

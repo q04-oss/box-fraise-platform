@@ -48,7 +48,10 @@ pub async fn list_all(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<Vec<PlatformConfigurationResponse>>> {
-    Ok(Json(service::get_all_configuration(&state.db, user_id).await?))
+    let mut tx = box_fraise_domain::transaction::AdminRlsTransaction::begin(&state.db).await?;
+    let result = service::get_all_configuration(&mut tx, &state.db, user_id).await?;
+    tx.commit().await?;
+    Ok(Json(result))
 }
 
 /// GET /api/admin/configuration/:key
@@ -101,7 +104,10 @@ pub async fn update_one(
     Path(key):            Path<String>,
     AppJson(body):        AppJson<UpdateConfigurationRequest>,
 ) -> AppResult<Json<PlatformConfigurationResponse>> {
-    Ok(Json(service::update_configuration(&state.db, &key, user_id, body).await?))
+    let mut tx = box_fraise_domain::transaction::AdminRlsTransaction::begin(&state.db).await?;
+    let result = service::update_configuration(&mut tx, &state.db, &key, user_id, body).await?;
+    tx.commit().await?;
+    Ok(Json(result))
 }
 
 /// GET /api/admin/configuration/:key/history
@@ -196,6 +202,8 @@ pub async fn update_flag(
     Path(flag_name):      Path<String>,
     AppJson(body):        AppJson<UpdateFeatureFlagRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    service::set_feature_flag_enabled(&state.db, user_id, &flag_name, body.enabled).await?;
+    let mut tx = box_fraise_domain::transaction::AdminRlsTransaction::begin(&state.db).await?;
+    service::set_feature_flag_enabled(&mut tx, &state.db, user_id, &flag_name, body.enabled).await?;
+    tx.commit().await?;
     Ok(Json(serde_json::json!({ "flag_name": flag_name, "enabled": body.enabled })))
 }

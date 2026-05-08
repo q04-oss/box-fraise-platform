@@ -46,6 +46,7 @@ use crate::{
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
+    transaction::RlsTransaction,
     types::UserId,
 };
 
@@ -56,12 +57,20 @@ use crate::{
 /// (`server/src/domain/dorotka/routes.rs`) BEFORE any cross-service work
 /// (LLM key resolution, prompt building, etc.) so a denied request can't be
 /// short-circuited by an upstream config error.
-pub async fn require_active_soultoken(pool: &PgPool, user_id: UserId) -> AppResult<()> {
+///
+/// Hardening cleanup #3 — runs reads through the per-request
+/// `RlsTransaction` so the `app.user_id` setting scopes `users` and
+/// `soultokens` row visibility. Read-only with no audit, hence no `pool`
+/// parameter.
+pub async fn require_active_soultoken(
+    tx:      &mut RlsTransaction,
+    user_id: UserId,
+) -> AppResult<()> {
     let row: Option<(Option<i32>,)> = sqlx::query_as(
         "SELECT soultoken_id FROM users WHERE id = $1 AND deleted_at IS NULL"
     )
     .bind(i32::from(user_id))
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
     let soultoken_id = row.and_then(|(opt,)| opt).ok_or(DomainError::Forbidden)?;
@@ -72,7 +81,7 @@ pub async fn require_active_soultoken(pool: &PgPool, user_id: UserId) -> AppResu
          )"
     )
     .bind(soultoken_id)
-    .fetch_one(pool)
+    .fetch_one(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
     if !still_valid {
@@ -90,7 +99,14 @@ pub async fn require_active_soultoken(pool: &PgPool, user_id: UserId) -> AppResu
 /// 1. Writes an audit event before the API call (records even if Anthropic fails).
 /// 2. Calls the Anthropic API.
 /// 3. Publishes [`DomainEvent::DorotkaQueried`] so consumers can react.
+///
+/// Hardening cleanup #3 — accepts the per-request `RlsTransaction` so the
+/// handler can keep a single tx open across the soultoken gate and this
+/// call. Audit writes still go through `pool` (separate connection) so the
+/// audit row lands even if `tx` rolls back. The Anthropic call and event
+/// publish are not DB I/O.
 pub async fn ask_dorotka(
+    _tx:       &mut RlsTransaction,
     pool:      &PgPool,
     http:      &reqwest::Client,
     api_key:   &str,

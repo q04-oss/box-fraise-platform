@@ -1,9 +1,10 @@
 use chrono::Utc;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use crate::{
     audit,
     error::{AppResult, DomainError},
+    transaction::{AdminRlsTransaction, RlsTransaction},
     types::UserId,
 };
 use crate::domain::auth::repository as user_repo;
@@ -33,7 +34,7 @@ fn to_event_response(row: VerificationEventRow) -> VerificationEventResponse {
 
 // ── Data assembly helpers ─────────────────────────────────────────────────────
 
-async fn fetch_soultoken_history(pool: &PgPool, user_id: i32) -> AppResult<Vec<SoultokenSummary>> {
+async fn fetch_soultoken_history(conn: &mut PgConnection, user_id: i32) -> AppResult<Vec<SoultokenSummary>> {
     // Exclude uuid — never returned in user-facing responses.
     let rows: Vec<(String, String, chrono::DateTime<Utc>, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<String>)> = sqlx::query_as(
         "SELECT display_code, token_type, issued_at, expires_at, revoked_at, revocation_reason \
@@ -42,7 +43,7 @@ async fn fetch_soultoken_history(pool: &PgPool, user_id: i32) -> AppResult<Vec<S
          ORDER BY issued_at ASC"
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)?;
 
@@ -51,7 +52,7 @@ async fn fetch_soultoken_history(pool: &PgPool, user_id: i32) -> AppResult<Vec<S
     }).collect())
 }
 
-async fn fetch_presence_history(pool: &PgPool, user_id: i32) -> AppResult<Vec<PresenceEventSummary>> {
+async fn fetch_presence_history(conn: &mut PgConnection, user_id: i32) -> AppResult<Vec<PresenceEventSummary>> {
     let rows: Vec<(String, i32, String, bool, Option<String>, chrono::DateTime<Utc>)> = sqlx::query_as(
         "SELECT event_type, business_id, \
                 calendar_date::text AS calendar_date, \
@@ -61,7 +62,7 @@ async fn fetch_presence_history(pool: &PgPool, user_id: i32) -> AppResult<Vec<Pr
          ORDER BY occurred_at ASC"
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)?;
 
@@ -70,7 +71,7 @@ async fn fetch_presence_history(pool: &PgPool, user_id: i32) -> AppResult<Vec<Pr
     }).collect())
 }
 
-async fn fetch_attestation_history(pool: &PgPool, user_id: i32) -> AppResult<Vec<AttestationSummary>> {
+async fn fetch_attestation_history(conn: &mut PgConnection, user_id: i32) -> AppResult<Vec<AttestationSummary>> {
     let rows: Vec<(String, i32, i32, chrono::DateTime<Utc>)> = sqlx::query_as(
         "SELECT status, attempt_number, visit_id, created_at \
          FROM visit_attestations \
@@ -78,7 +79,7 @@ async fn fetch_attestation_history(pool: &PgPool, user_id: i32) -> AppResult<Vec
          ORDER BY created_at ASC"
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)?;
 
@@ -87,7 +88,7 @@ async fn fetch_attestation_history(pool: &PgPool, user_id: i32) -> AppResult<Vec
     }).collect())
 }
 
-async fn fetch_token_history(pool: &PgPool, user_id: i32) -> AppResult<Vec<AttestationTokenSummary>> {
+async fn fetch_token_history(conn: &mut PgConnection, user_id: i32) -> AppResult<Vec<AttestationTokenSummary>> {
     // Exclude token_hash — never returned in user-facing responses.
     let rows: Vec<(String, chrono::DateTime<Utc>, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>)> = sqlx::query_as(
         "SELECT scope, issued_at, expires_at, verified_at, revoked_at \
@@ -96,7 +97,7 @@ async fn fetch_token_history(pool: &PgPool, user_id: i32) -> AppResult<Vec<Attes
          ORDER BY issued_at ASC"
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)?;
 
@@ -111,27 +112,35 @@ async fn fetch_token_history(pool: &PgPool, user_id: i32) -> AppResult<Vec<Attes
 ///
 /// Records the access request in `audit_request_log` for compliance.
 /// Never exposes uuid, token_hash, actor_id, or reference_id.
+///
+/// Hardening cleanup #3 — runs every read and the `audit_request_log` insert
+/// inside the per-request `RlsTransaction` so the per-tx `app.user_id`
+/// setting scopes row visibility. The handler is responsible for `begin`
+/// and `commit`; `audit::write` continues to use `pool` so the audit row
+/// lands even if the transaction rolls back.
 pub async fn get_my_audit_trail(
-    pool:    &PgPool,
+    tx:      &mut RlsTransaction,
+    pool:    &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     user_id: UserId,
 ) -> AppResult<UserAuditTrailResponse> {
     let uid = i32::from(user_id);
 
     // 1. User must exist and not be banned.
+    //    Cross-domain repository (auth) still takes `&PgPool` — call with pool.
     let user = user_repo::find_by_id(pool, user_id)
         .await?
         .ok_or(DomainError::Unauthorized)?;
     if user.is_banned { return Err(DomainError::Forbidden); }
 
     // 2. Record audit request.
-    repository::record_audit_request(pool, uid, uid, "in_app").await?;
+    repository::record_audit_request(tx.as_mut(), uid, uid, "in_app").await?;
 
     // 3–7. Assemble all history sections.
-    let events        = repository::get_events_by_user(pool, uid).await?;
-    let soultokens    = fetch_soultoken_history(pool, uid).await?;
-    let presence      = fetch_presence_history(pool, uid).await?;
-    let attestations  = fetch_attestation_history(pool, uid).await?;
-    let tokens        = fetch_token_history(pool, uid).await?;
+    let events        = repository::get_events_by_user(tx.as_mut(), uid).await?;
+    let soultokens    = fetch_soultoken_history(tx.as_mut(), uid).await?;
+    let presence      = fetch_presence_history(tx.as_mut(), uid).await?;
+    let attestations  = fetch_attestation_history(tx.as_mut(), uid).await?;
+    let tokens        = fetch_token_history(tx.as_mut(), uid).await?;
 
     // 8. Audit event.
     audit::write(
@@ -154,14 +163,21 @@ pub async fn get_my_audit_trail(
 }
 
 /// Return any user's audit trail — platform_admin only (BFIP Section 17.2).
+///
+/// Hardening cleanup #3 — admin-scope variant runs the
+/// `audit_request_log` insert and all reads inside an `AdminRlsTransaction`
+/// (`app.is_admin = 'true'`). Caller-side platform_admin enforcement still
+/// runs first against the pool via `user_repo::find_by_id`.
 pub async fn get_admin_audit_trail(
-    pool:               &PgPool,
+    tx:                 &mut AdminRlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     requesting_user_id: UserId,
     target_user_id:     i32,
 ) -> AppResult<UserAuditTrailResponse> {
     let rid = i32::from(requesting_user_id);
 
     // 1. Requesting user must be platform_admin.
+    //    Cross-domain repository (auth) still takes `&PgPool` — call with pool.
     let requester = user_repo::find_by_id(pool, requesting_user_id)
         .await?
         .ok_or(DomainError::Unauthorized)?;
@@ -170,16 +186,16 @@ pub async fn get_admin_audit_trail(
     }
 
     // 2. Record audit request (requested_by = admin).
-    repository::record_audit_request(pool, target_user_id, rid, "in_app").await?;
+    repository::record_audit_request(tx.as_mut(), target_user_id, rid, "in_app").await?;
 
     // 3–7. Assemble history for target user.
-    let events       = repository::get_events_by_user(pool, target_user_id).await?;
-    let soultokens   = fetch_soultoken_history(pool, target_user_id).await?;
-    let presence     = fetch_presence_history(pool, target_user_id).await?;
-    let attestations = fetch_attestation_history(pool, target_user_id).await?;
-    let tokens       = fetch_token_history(pool, target_user_id).await?;
+    let events       = repository::get_events_by_user(tx.as_mut(), target_user_id).await?;
+    let soultokens   = fetch_soultoken_history(tx.as_mut(), target_user_id).await?;
+    let presence     = fetch_presence_history(tx.as_mut(), target_user_id).await?;
+    let attestations = fetch_attestation_history(tx.as_mut(), target_user_id).await?;
+    let tokens       = fetch_token_history(tx.as_mut(), target_user_id).await?;
 
-    // 4. Audit event.
+    // 8. Audit event.
     audit::write(
         pool,
         Some(rid),
@@ -205,6 +221,9 @@ pub async fn get_admin_audit_trail(
 /// Return the authenticated user's verification journey events only.
 ///
 /// Lighter than `get_my_audit_trail` — for in-app status display.
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's
+/// `&mut PgConnection` signature.
 pub async fn get_verification_journey(
     pool:    &PgPool,
     user_id: UserId,
@@ -213,7 +232,8 @@ pub async fn get_verification_journey(
     let _ = user_repo::find_by_id(pool, user_id)
         .await?
         .ok_or(DomainError::Unauthorized)?;
-    let events = repository::get_events_by_user(pool, uid).await?;
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    let events = repository::get_events_by_user(&mut conn, uid).await?;
     Ok(events.into_iter().map(to_event_response).collect())
 }
 
@@ -341,11 +361,13 @@ mod tests {
 
         let user = UserId::from(uid);
         let kp = test_key_pair();
+        let mut tx = RlsTransaction::begin(pool, uid).await.unwrap();
         let st = soultoken_svc::issue_soultoken(
-            pool, user,
+            &mut tx, pool, user,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, &kp, &bus,
         ).await.expect("issue_soultoken must succeed");
+        tx.commit().await.unwrap();
 
         (user, st.display_code)
     }
@@ -359,8 +381,10 @@ mod tests {
         let (user, _) = setup_full_user(&pool, &email).await;
         let uid = i32::from(user);
 
-        let trail = get_my_audit_trail(&pool, user)
+        let mut tx = RlsTransaction::begin(&pool, uid).await.unwrap();
+        let trail = get_my_audit_trail(&mut tx, &pool, user)
             .await.expect("get_my_audit_trail must succeed");
+        tx.commit().await.unwrap();
 
         assert_eq!(trail.user_id, uid);
         assert!(!trail.verification_journey.is_empty(), "journey must have events");
@@ -389,7 +413,8 @@ mod tests {
 
         // Issue an attestation token to ensure token_history is populated.
         let bus = EventBus::new();
-        let at_resp = at_svc::issue_token(&pool, user,
+        let mut at_tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let at_resp = at_svc::issue_token(&mut at_tx, &pool, user,
             IssueAttestationTokenRequest {
                 scope: "presence.verified".to_owned(),
                 requesting_business_soultoken_id: None,
@@ -398,8 +423,11 @@ mod tests {
                 presentation_longitude: None,
             }, &bus,
         ).await.expect("issue_token must succeed");
+        at_tx.commit().await.unwrap();
 
-        let trail = get_my_audit_trail(&pool, user).await.unwrap();
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let trail = get_my_audit_trail(&mut tx, &pool, user).await.unwrap();
+        tx.commit().await.unwrap();
         let json  = serde_json::to_string(&trail).unwrap();
 
         // uuid must not appear in response.
@@ -436,7 +464,9 @@ mod tests {
         let email: String = SafeEmail().fake();
         let (user, _) = setup_full_user(&pool, &email).await;
 
-        let trail = get_my_audit_trail(&pool, user).await.unwrap();
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let trail = get_my_audit_trail(&mut tx, &pool, user).await.unwrap();
+        tx.commit().await.unwrap();
 
         let journey = &trail.verification_journey;
         if journey.len() > 1 {
@@ -455,8 +485,10 @@ mod tests {
         let non_admin = create_user(&pool, &email1).await;
         let target    = create_user(&pool, &email2).await;
 
-        let err = get_admin_audit_trail(&pool, non_admin, i32::from(target))
+        let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
+        let err = get_admin_audit_trail(&mut tx, &pool, non_admin, i32::from(target))
             .await.unwrap_err();
+        // tx dropped without commit → rollback on error path.
         assert!(matches!(err, DomainError::Forbidden));
     }
 
@@ -482,7 +514,9 @@ mod tests {
         let user = create_user(&pool, &email).await;
         let uid  = i32::from(user);
 
-        let _ = get_my_audit_trail(&pool, user).await.unwrap();
+        let mut tx = RlsTransaction::begin(&pool, uid).await.unwrap();
+        let _ = get_my_audit_trail(&mut tx, &pool, user).await.unwrap();
+        tx.commit().await.unwrap();
 
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM audit_request_log WHERE user_id = $1"
@@ -501,7 +535,9 @@ mod tests {
         let (user_b, _) = setup_full_user(&pool, &email_b).await;
 
         // user_a calls get_my_audit_trail — must only see their own data.
-        let trail = get_my_audit_trail(&pool, user_a).await.unwrap();
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user_a)).await.unwrap();
+        let trail = get_my_audit_trail(&mut tx, &pool, user_a).await.unwrap();
+        tx.commit().await.unwrap();
 
         assert_eq!(trail.user_id, i32::from(user_a),
             "audit trail must only contain the requesting user's data");
@@ -524,7 +560,9 @@ mod tests {
             "SELECT uuid::text FROM soultokens WHERE holder_user_id = $1 LIMIT 1"
         ).bind(i32::from(user)).fetch_one(&pool).await.unwrap();
 
-        let trail = get_my_audit_trail(&pool, user).await.unwrap();
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let trail = get_my_audit_trail(&mut tx, &pool, user).await.unwrap();
+        tx.commit().await.unwrap();
         let json  = serde_json::to_string(&trail).unwrap();
 
         assert!(!json.contains(&uuid_val),
@@ -538,7 +576,8 @@ mod tests {
         let (user, _) = setup_full_user(&pool, &email).await;
 
         let bus = EventBus::new();
-        let _ = at_svc::issue_token(&pool, user,
+        let mut at_tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let _ = at_svc::issue_token(&mut at_tx, &pool, user,
             IssueAttestationTokenRequest {
                 scope: "presence.verified".to_owned(),
                 requesting_business_soultoken_id: None,
@@ -547,13 +586,16 @@ mod tests {
                 presentation_longitude: None,
             }, &bus,
         ).await.unwrap();
+        at_tx.commit().await.unwrap();
 
         // Fetch actual hash from DB.
         let stored_hash: String = sqlx::query_scalar(
             "SELECT token_hash FROM attestation_tokens WHERE user_id = $1 LIMIT 1"
         ).bind(i32::from(user)).fetch_one(&pool).await.unwrap();
 
-        let trail = get_my_audit_trail(&pool, user).await.unwrap();
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let trail = get_my_audit_trail(&mut tx, &pool, user).await.unwrap();
+        tx.commit().await.unwrap();
         let json  = serde_json::to_string(&trail).unwrap();
 
         assert!(!json.contains(&stored_hash),

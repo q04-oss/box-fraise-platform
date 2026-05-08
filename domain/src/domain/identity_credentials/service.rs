@@ -6,6 +6,7 @@ use crate::{
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
+    transaction::RlsTransaction,
     types::UserId,
 };
 use crate::domain::auth::repository as user_repo;
@@ -61,7 +62,13 @@ fn to_cooling_response(cred: &IdentityCredentialRow, days_completed: i64) -> Coo
 /// Called by the iOS app after Stripe confirms identity on the client side.
 /// Creates an `identity_credentials` row, transitions the user to
 /// `identity_confirmed`, and starts the 7-day cooling period.
+///
+/// Hardening cleanup #3: write + audit — runs RLS-protected queries inside
+/// the per-request `RlsTransaction`. `pool` is retained for the audit write
+/// (which commits independently outside the transaction so it lands even on
+/// rollback) and for the `auth` domain repository call (not migrated).
 pub async fn initiate_verification(
+    tx:        &mut RlsTransaction,
     pool:      &PgPool,
     user_id:   UserId,
     req:       InitiateVerificationRequest,
@@ -69,6 +76,7 @@ pub async fn initiate_verification(
 ) -> AppResult<IdentityCredentialResponse> {
     let uid = i32::from(user_id);
 
+    // `auth` domain repo still on `&PgPool`; not part of this migration.
     let user = user_repo::find_by_id(pool, user_id).await?.ok_or(DomainError::Unauthorized)?;
     if user.is_banned { return Err(DomainError::Forbidden); }
 
@@ -78,7 +86,7 @@ pub async fn initiate_verification(
     }
 
     // Idempotency: reject duplicate Stripe sessions.
-    if repository::get_identity_credential_by_session(pool, &req.stripe_session_id).await?.is_some() {
+    if repository::get_identity_credential_by_session(tx.as_mut(), &req.stripe_session_id).await?.is_some() {
         return Err(DomainError::conflict("stripe session already recorded"));
     }
 
@@ -86,7 +94,7 @@ pub async fn initiate_verification(
     let cooling_ends_at = now + chrono::Duration::days(7);
 
     let cred = repository::create_identity_credential(
-        pool,
+        tx.as_mut(),
         uid,
         "stripe_identity",
         Some(&req.stripe_session_id),
@@ -100,7 +108,7 @@ pub async fn initiate_verification(
          WHERE id = $1 AND verification_status = 'registered'"
     )
     .bind(uid)
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -110,7 +118,7 @@ pub async fn initiate_verification(
          (user_id, event_type, reference_type, reference_id, actor_id) \
          VALUES ($1, 'identity_confirmed', 'identity_credential', $2, $1)"
     )
-    .bind(uid).bind(cred.id).execute(pool).await
+    .bind(uid).bind(cred.id).execute(tx.as_mut()).await
     {
         tracing::error!(error = %e, "verification_events (identity_confirmed) insert failed");
     }
@@ -120,7 +128,7 @@ pub async fn initiate_verification(
          (user_id, event_type, reference_type, reference_id, actor_id) \
          VALUES ($1, 'cooling_period_started', 'identity_credential', $2, $1)"
     )
-    .bind(uid).bind(cred.id).execute(pool).await
+    .bind(uid).bind(cred.id).execute(tx.as_mut()).await
     {
         tracing::error!(error = %e, "verification_events (cooling_period_started) insert failed");
     }
@@ -130,11 +138,13 @@ pub async fn initiate_verification(
          (user_id, event_type, from_status, to_status, actor_id) \
          VALUES ($1, 'status_changed', 'registered', 'identity_confirmed', $1)"
     )
-    .bind(uid).execute(pool).await
+    .bind(uid).execute(tx.as_mut()).await
     {
         tracing::error!(error = %e, "verification_events (status_changed) insert failed");
     }
 
+    // Audit write uses `pool` (separate connection) — commits independently
+    // so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(uid),
@@ -156,6 +166,14 @@ pub async fn initiate_verification(
 /// Validates the Stripe-Signature HMAC, then updates the credential row
 /// with the raw verification status and response hash. Silently ignores
 /// payloads for sessions that are not in the database (multi-env safety).
+///
+/// Hardening cleanup #3: kept on `&PgPool`. Stripe webhooks carry no user
+/// JWT — there is no authenticated user_id to scope an `RlsTransaction` to,
+/// and the request runs as a service-account caller. The application
+/// connects with the `fraise` superuser today (BYPASSRLS); when we move to
+/// the `app_user` role for end-user requests, the webhook will need its
+/// own service-account role or an `AdminRlsTransaction`. Until then the
+/// pool-driven path is correct.
 pub async fn handle_stripe_webhook(
     pool:             &PgPool,
     payload:          &[u8],
@@ -195,13 +213,17 @@ pub async fn handle_stripe_webhook(
     let raw_status = event["data"]["object"]["status"].as_str().unwrap_or("unknown");
     let report_id  = event["data"]["object"]["last_verification_report"].as_str();
 
-    let Some(cred) = repository::get_identity_credential_by_session(pool, session_id).await? else {
+    // Webhook path: acquire a pool connection for each repository call to
+    // satisfy the `&mut PgConnection` signature without an `RlsTransaction`.
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+
+    let Some(cred) = repository::get_identity_credential_by_session(&mut conn, session_id).await? else {
         tracing::warn!(session_id, "stripe webhook for unknown session — ignoring");
         return Ok(());
     };
 
     repository::update_stripe_webhook(
-        pool,
+        &mut conn,
         cred.id,
         report_id,
         Some(raw_status),
@@ -217,7 +239,12 @@ pub async fn handle_stripe_webhook(
 /// Idempotent within the same day. When both conditions are met
 /// (`now() >= cooling_ends_at` AND `distinct_days >= required`), marks
 /// `cooling_completed_at` and publishes [`DomainEvent::CoolingPeriodCompleted`].
+///
+/// Hardening cleanup #3: write + audit — runs RLS-protected queries inside
+/// the per-request `RlsTransaction`. `pool` is retained for the audit write
+/// and the `auth` domain repository call.
 pub async fn record_app_open(
+    tx:        &mut RlsTransaction,
     pool:      &PgPool,
     user_id:   UserId,
     req:       RecordAppOpenRequest,
@@ -225,10 +252,11 @@ pub async fn record_app_open(
 ) -> AppResult<CoolingStatusResponse> {
     let uid = i32::from(user_id);
 
+    // `auth` domain repo still on `&PgPool`; not part of this migration.
     let user = user_repo::find_by_id(pool, user_id).await?.ok_or(DomainError::Unauthorized)?;
     if user.is_banned { return Err(DomainError::Forbidden); }
 
-    let cred = repository::get_identity_credential_by_id(pool, req.credential_id)
+    let cred = repository::get_identity_credential_by_id(tx.as_mut(), req.credential_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -238,13 +266,13 @@ pub async fn record_app_open(
 
     // Already complete — return current state without writing anything.
     if cred.cooling_completed_at.is_some() {
-        let days = repository::count_cooling_days(pool, uid, cred.id).await?;
+        let days = repository::count_cooling_days(tx.as_mut(), uid, cred.id).await?;
         return Ok(to_cooling_response(&cred, days));
     }
 
     let today    = Utc::now().date_naive();
     let inserted = repository::insert_cooling_event(
-        pool,
+        tx.as_mut(),
         uid,
         cred.id,
         req.device_identifier.as_deref(),
@@ -252,7 +280,7 @@ pub async fn record_app_open(
         today,
     ).await?;
 
-    let days = repository::count_cooling_days(pool, uid, cred.id).await?;
+    let days = repository::count_cooling_days(tx.as_mut(), uid, cred.id).await?;
 
     if inserted {
         if let Err(e) = sqlx::query(
@@ -263,7 +291,7 @@ pub async fn record_app_open(
         .bind(uid)
         .bind(cred.id)
         .bind(serde_json::json!({ "days_completed": days }))
-        .execute(pool)
+        .execute(tx.as_mut())
         .await
         {
             tracing::error!(error = %e, "verification_events (cooling_app_open_recorded) insert failed");
@@ -281,7 +309,7 @@ pub async fn record_app_open(
     let enough_days            = days >= i64::from(cred.cooling_app_opens_required);
 
     if cooling_window_elapsed && enough_days {
-        let updated = repository::complete_cooling(pool, cred.id).await?;
+        let updated = repository::complete_cooling(tx.as_mut(), cred.id).await?;
 
         if let Err(e) = sqlx::query(
             "INSERT INTO verification_events \
@@ -291,12 +319,14 @@ pub async fn record_app_open(
         .bind(uid)
         .bind(cred.id)
         .bind(serde_json::json!({ "days_completed": days }))
-        .execute(pool)
+        .execute(tx.as_mut())
         .await
         {
             tracing::error!(error = %e, "verification_events (cooling_period_completed) insert failed");
         }
 
+        // Audit write uses `pool` (separate connection) — commits
+        // independently so the audit row lands even if `tx` is rolled back.
         audit::write(
             pool,
             Some(uid),
@@ -321,15 +351,20 @@ pub async fn record_app_open(
 /// Return the current cooling status for the most-recent credential of a user.
 ///
 /// Returns `NotFound` if the user has not initiated identity verification.
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn get_cooling_status(
     pool:    &PgPool,
     user_id: UserId,
 ) -> AppResult<CoolingStatusResponse> {
-    let uid  = i32::from(user_id);
-    let cred = repository::get_latest_credential_by_user(pool, uid)
+    let uid      = i32::from(user_id);
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    let cred     = repository::get_latest_credential_by_user(&mut conn, uid)
         .await?
         .ok_or(DomainError::NotFound)?;
-    let days = repository::count_cooling_days(pool, uid, cred.id).await?;
+    let days     = repository::count_cooling_days(&mut conn, uid, cred.id).await?;
     Ok(to_cooling_response(&cred, days))
 }
 
@@ -338,7 +373,7 @@ pub async fn get_cooling_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{event_bus::EventBus, types::UserId};
+    use crate::{event_bus::EventBus, transaction::RlsTransaction, types::UserId};
     use chrono::Duration;
     use sqlx::PgPool;
 
@@ -415,11 +450,13 @@ mod tests {
         let uid = create_registered_user(&pool, &SafeEmail().fake::<String>()).await;
         let bus = EventBus::new();
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         let resp = initiate_verification(
-            &pool, uid,
+            &mut tx, &pool, uid,
             InitiateVerificationRequest { stripe_session_id: "vs_test_abc123".into() },
             &bus,
         ).await.expect("initiate_verification must succeed");
+        tx.commit().await.unwrap();
 
         assert_eq!(resp.credential_type, "stripe_identity");
         assert_eq!(resp.external_session_id.as_deref(), Some("vs_test_abc123"));
@@ -440,16 +477,19 @@ mod tests {
         let bus  = EventBus::new();
         let sess = "vs_test_dup999";
 
+        let mut tx1 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         initiate_verification(
-            &pool, uid,
+            &mut tx1, &pool, uid,
             InitiateVerificationRequest { stripe_session_id: sess.into() },
             &bus,
         ).await.unwrap();
+        tx1.commit().await.unwrap();
 
         // Registering the same session again must be rejected.
         let uid2 = create_registered_user(&pool, &SafeEmail().fake::<String>()).await;
+        let mut tx2 = RlsTransaction::begin(&pool, i32::from(uid2)).await.unwrap();
         let err  = initiate_verification(
-            &pool, uid2,
+            &mut tx2, &pool, uid2,
             InitiateVerificationRequest { stripe_session_id: sess.into() },
             &bus,
         ).await.unwrap_err();
@@ -462,8 +502,9 @@ mod tests {
         let uid = create_identity_confirmed_user(&pool, &SafeEmail().fake::<String>()).await;
         let bus = EventBus::new();
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         let err = initiate_verification(
-            &pool, uid,
+            &mut tx, &pool, uid,
             InitiateVerificationRequest { stripe_session_id: "vs_test_late".into() },
             &bus,
         ).await.unwrap_err();
@@ -473,8 +514,9 @@ mod tests {
     #[sqlx::test(migrations = "../server/migrations")]
     async fn initiate_verification_rejects_unknown_user(pool: PgPool) {
         let bus = EventBus::new();
+        let mut tx = RlsTransaction::begin(&pool, 999_999_i32).await.unwrap();
         let err = initiate_verification(
-            &pool,
+            &mut tx, &pool,
             UserId::from(999_999_i32),
             InitiateVerificationRequest { stripe_session_id: "vs_ghost".into() },
             &bus,
@@ -490,11 +532,13 @@ mod tests {
         let uid = create_registered_user(&pool, &SafeEmail().fake::<String>()).await;
         let bus = EventBus::new();
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         let resp = initiate_verification(
-            &pool, uid,
+            &mut tx, &pool, uid,
             InitiateVerificationRequest { stripe_session_id: "vs_webhook_test".into() },
             &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         let payload = serde_json::to_vec(&serde_json::json!({
             "type": "identity.verification_session.verified",
@@ -510,6 +554,7 @@ mod tests {
         let secret = "whsec_test_secret";
         let sig    = make_webhook_signature(secret, &payload);
 
+        // Webhook stays on `&PgPool` — no RlsTransaction (no user JWT).
         handle_stripe_webhook(&pool, &payload, &sig, secret).await
             .expect("valid webhook must succeed");
 
@@ -544,11 +589,13 @@ mod tests {
         let cred_id = create_past_cooling_credential(&pool, i32::from(uid)).await;
         let bus    = EventBus::new();
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         let resp = record_app_open(
-            &pool, uid,
+            &mut tx, &pool, uid,
             RecordAppOpenRequest { credential_id: cred_id, device_identifier: None, app_attest_assertion: None },
             &bus,
         ).await.expect("record_app_open must succeed");
+        tx.commit().await.unwrap();
 
         assert_eq!(resp.days_completed, 1);
     }
@@ -566,8 +613,13 @@ mod tests {
             app_attest_assertion: None,
         };
 
-        let r1 = record_app_open(&pool, uid, req(), &bus).await.unwrap();
-        let r2 = record_app_open(&pool, uid, req(), &bus).await.unwrap();
+        let mut tx1 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
+        let r1 = record_app_open(&mut tx1, &pool, uid, req(), &bus).await.unwrap();
+        tx1.commit().await.unwrap();
+
+        let mut tx2 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
+        let r2 = record_app_open(&mut tx2, &pool, uid, req(), &bus).await.unwrap();
+        tx2.commit().await.unwrap();
 
         assert_eq!(r1.days_completed, 1, "first open counts as day 1");
         assert_eq!(r2.days_completed, 1, "same-day repeat must not advance count");
@@ -584,11 +636,13 @@ mod tests {
         insert_cooling_event_on_day(&pool, i32::from(uid), cred_id, -2).await;
         insert_cooling_event_on_day(&pool, i32::from(uid), cred_id, -1).await;
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         let resp = record_app_open(
-            &pool, uid,
+            &mut tx, &pool, uid,
             RecordAppOpenRequest { credential_id: cred_id, device_identifier: None, app_attest_assertion: None },
             &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         assert_eq!(resp.days_completed, 3);
         assert!(resp.is_complete);
@@ -602,6 +656,7 @@ mod tests {
         use fake::{Fake, faker::internet::en::SafeEmail};
         let uid = create_registered_user(&pool, &SafeEmail().fake::<String>()).await;
 
+        // Read-only, no audit — kept on `&PgPool`.
         let err = get_cooling_status(&pool, uid).await.unwrap_err();
         assert!(matches!(err, DomainError::NotFound));
     }
@@ -616,8 +671,9 @@ mod tests {
         let cred_id  = create_past_cooling_credential(&pool, i32::from(owner)).await;
         let bus      = EventBus::new();
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(attacker)).await.unwrap();
         let err = record_app_open(
-            &pool, attacker,
+            &mut tx, &pool, attacker,
             RecordAppOpenRequest { credential_id: cred_id, device_identifier: None, app_attest_assertion: None },
             &bus,
         ).await.unwrap_err();
@@ -634,11 +690,13 @@ mod tests {
         // Complete the cooling.
         insert_cooling_event_on_day(&pool, i32::from(uid), cred_id, -2).await;
         insert_cooling_event_on_day(&pool, i32::from(uid), cred_id, -1).await;
+        let mut tx0 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         record_app_open(
-            &pool, uid,
+            &mut tx0, &pool, uid,
             RecordAppOpenRequest { credential_id: cred_id, device_identifier: None, app_attest_assertion: None },
             &bus,
         ).await.unwrap();
+        tx0.commit().await.unwrap();
 
         // Get count before calling again.
         let count_before: i64 = sqlx::query_scalar(
@@ -647,11 +705,13 @@ mod tests {
         .bind(cred_id).fetch_one(&pool).await.unwrap();
 
         // Second call after completion must succeed and not insert a new event.
+        let mut tx1 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         let resp = record_app_open(
-            &pool, uid,
+            &mut tx1, &pool, uid,
             RecordAppOpenRequest { credential_id: cred_id, device_identifier: None, app_attest_assertion: None },
             &bus,
         ).await.unwrap();
+        tx1.commit().await.unwrap();
         assert!(resp.is_complete);
 
         let count_after: i64 = sqlx::query_scalar(

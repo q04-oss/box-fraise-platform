@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use crate::error::{AppResult, DomainError};
 use super::types::{OrderRow, VisitBoxRow, ORDER_COLS, VISIT_BOX_COLS};
@@ -8,7 +8,7 @@ use super::types::{OrderRow, VisitBoxRow, ORDER_COLS, VISIT_BOX_COLS};
 // ── Orders ────────────────────────────────────────────────────────────────────
 
 pub async fn create_order(
-    pool:                &PgPool,
+    conn:                &mut PgConnection,
     user_id:             i32,
     business_id:         i32,
     variety_description: Option<&str>,
@@ -27,39 +27,39 @@ pub async fn create_order(
     .bind(variety_description)
     .bind(box_count)
     .bind(amount_cents)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_order_by_id(
-    pool:     &PgPool,
+    conn:     &mut PgConnection,
     order_id: i32,
 ) -> AppResult<Option<OrderRow>> {
     sqlx::query_as(&format!(
         "SELECT {ORDER_COLS} FROM orders WHERE id = $1"
     ))
     .bind(order_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_orders_by_user(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
 ) -> AppResult<Vec<OrderRow>> {
     sqlx::query_as(&format!(
         "SELECT {ORDER_COLS} FROM orders WHERE user_id = $1 ORDER BY created_at DESC"
     ))
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_orders_by_business(
-    pool:        &PgPool,
+    conn:        &mut PgConnection,
     business_id: i32,
 ) -> AppResult<Vec<OrderRow>> {
     sqlx::query_as(&format!(
@@ -68,13 +68,13 @@ pub async fn get_orders_by_business(
          ORDER BY created_at DESC"
     ))
     .bind(business_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn update_order_status(
-    pool:     &PgPool,
+    conn:     &mut PgConnection,
     order_id: i32,
     status:   &str,
 ) -> AppResult<OrderRow> {
@@ -84,13 +84,13 @@ pub async fn update_order_status(
     ))
     .bind(order_id)
     .bind(status)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn collect_order_db(
-    pool:     &PgPool,
+    conn:     &mut PgConnection,
     order_id: i32,
     box_id:   i32,
 ) -> AppResult<OrderRow> {
@@ -103,13 +103,13 @@ pub async fn collect_order_db(
     ))
     .bind(order_id)
     .bind(box_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn cancel_order_db(
-    pool:     &PgPool,
+    conn:     &mut PgConnection,
     order_id: i32,
 ) -> AppResult<OrderRow> {
     sqlx::query_as(&format!(
@@ -117,7 +117,7 @@ pub async fn cancel_order_db(
          WHERE id = $1 RETURNING {ORDER_COLS}"
     ))
     .bind(order_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -125,7 +125,7 @@ pub async fn cancel_order_db(
 /// Find a pending order for `user_id` at the business whose location matches
 /// the visit's location. Used when the tapped box has no `assigned_order_id`.
 pub async fn find_pending_order_for_visit(
-    pool:     &PgPool,
+    conn:     &mut PgConnection,
     user_id:  i32,
     visit_id: i32,
 ) -> AppResult<Option<OrderRow>> {
@@ -144,7 +144,7 @@ pub async fn find_pending_order_for_visit(
     ))
     .bind(user_id)
     .bind(visit_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -152,7 +152,7 @@ pub async fn find_pending_order_for_visit(
 // ── Visit boxes ───────────────────────────────────────────────────────────────
 
 pub async fn create_visit_box(
-    pool:         &PgPool,
+    conn:         &mut PgConnection,
     visit_id:     i32,
     nfc_chip_uid: &str,
     quantity:     i32,
@@ -165,39 +165,39 @@ pub async fn create_visit_box(
     .bind(visit_id)
     .bind(nfc_chip_uid)
     .bind(quantity)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_box_by_uid(
-    pool:         &PgPool,
+    conn:         &mut PgConnection,
     nfc_chip_uid: &str,
 ) -> AppResult<Option<VisitBoxRow>> {
     sqlx::query_as(&format!(
         "SELECT {VISIT_BOX_COLS} FROM visit_boxes WHERE nfc_chip_uid = $1"
     ))
     .bind(nfc_chip_uid)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_boxes_by_visit(
-    pool:     &PgPool,
+    conn:     &mut PgConnection,
     visit_id: i32,
 ) -> AppResult<Vec<VisitBoxRow>> {
     sqlx::query_as(&format!(
         "SELECT {VISIT_BOX_COLS} FROM visit_boxes WHERE visit_id = $1 ORDER BY created_at ASC"
     ))
     .bind(visit_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn activate_box_db(
-    pool:               &PgPool,
+    conn:               &mut PgConnection,
     box_id:             i32,
     delivery_signature: &str,
     expires_at:         DateTime<Utc>,
@@ -212,7 +212,7 @@ pub async fn activate_box_db(
     .bind(box_id)
     .bind(delivery_signature)
     .bind(expires_at)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -223,7 +223,7 @@ pub async fn activate_box_db(
 /// Returns `None` if the box was already tapped — the caller should treat
 /// this as a clone detection event.
 pub async fn tap_box(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     box_id:  i32,
     user_id: i32,
 ) -> AppResult<Option<VisitBoxRow>> {
@@ -237,13 +237,13 @@ pub async fn tap_box(
     ))
     .bind(box_id)
     .bind(user_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn record_clone_detected(
-    pool:   &PgPool,
+    conn:   &mut PgConnection,
     box_id: i32,
 ) -> AppResult<()> {
     sqlx::query(
@@ -253,14 +253,14 @@ pub async fn record_clone_detected(
          WHERE id = $1"
     )
     .bind(box_id)
-    .execute(pool)
+    .execute(conn)
     .await
     .map_err(DomainError::Db)?;
     Ok(())
 }
 
 pub async fn assign_box_to_order(
-    pool:     &PgPool,
+    conn:     &mut PgConnection,
     box_id:   i32,
     order_id: i32,
 ) -> AppResult<VisitBoxRow> {
@@ -270,7 +270,7 @@ pub async fn assign_box_to_order(
     ))
     .bind(box_id)
     .bind(order_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }

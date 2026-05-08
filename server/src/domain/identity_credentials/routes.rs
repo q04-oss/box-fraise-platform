@@ -44,7 +44,12 @@ pub async fn initiate_verification(
     if body.stripe_session_id.trim().is_empty() {
         return Err(AppError::bad_request("stripe_session_id is required"));
     }
-    let resp = service::initiate_verification(&state.db, user_id, body, &state.event_bus).await?;
+    // Hardening cleanup #3 — RLS-scoped per-request transaction.
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::initiate_verification(&mut tx, &state.db, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -77,6 +82,10 @@ pub async fn stripe_webhook(
 
     let secret = state.cfg.stripe_webhook_secret.expose_secret();
 
+    // Hardening cleanup #3 — webhook stays on `&PgPool`. There is no user
+    // JWT on this endpoint (the request is authenticated by HMAC, not by a
+    // JWT identifying a user), so there is no `user_id` to scope an
+    // `RlsTransaction` to. The service runs as a service-account caller.
     service::handle_stripe_webhook(&state.db, &body, sig, secret).await?;
     Ok(StatusCode::OK)
 }
@@ -95,7 +104,12 @@ pub async fn app_open(
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<RecordAppOpenRequest>,
 ) -> AppResult<Json<CoolingStatusResponse>> {
-    let resp = service::record_app_open(&state.db, user_id, body, &state.event_bus).await?;
+    // Hardening cleanup #3 — RLS-scoped per-request transaction.
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::record_app_open(&mut tx, &state.db, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
     Ok(Json(resp))
 }
 

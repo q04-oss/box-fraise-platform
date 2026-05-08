@@ -5,6 +5,7 @@ use crate::{
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
+    transaction::RlsTransaction,
     types::UserId,
 };
 use crate::domain::auth::repository as user_repo;
@@ -48,12 +49,14 @@ fn to_response(
 /// 5. Writes a `verification_events` row and an `audit_events` row.
 /// 6. Publishes [`DomainEvent::BusinessCreated`].
 pub async fn create_business(
-    pool:      &PgPool,
+    tx:        &mut RlsTransaction,
+    pool:      &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     user_id:   UserId,
     req:       CreateBusinessRequest,
     event_bus: &EventBus,
 ) -> AppResult<BusinessResponse> {
     // 1. Load and validate the requesting user.
+    //    Cross-domain repository (auth) still takes `&PgPool` — call with pool.
     let user = user_repo::find_by_id(pool, user_id)
         .await?
         .ok_or(DomainError::Unauthorized)?;
@@ -70,8 +73,9 @@ pub async fn create_business(
     // 2b. BFIP Section 4: if a credential exists, cooling must be complete.
     //     Guard is skipped when no credential exists for backward compatibility
     //     with test fixtures that create attested users without credentials.
+    //     Cross-domain read on the RLS-scoped tx connection.
     if let Some(cred) = crate::domain::identity_credentials::repository::get_latest_credential_by_user(
-        pool, i32::from(user_id),
+        tx.as_mut(), i32::from(user_id),
     ).await? {
         if cred.cooling_completed_at.is_none() {
             return Err(DomainError::Forbidden);
@@ -79,7 +83,7 @@ pub async fn create_business(
     }
 
     // 3. Abuse cap: at most 5 active businesses per user.
-    let active_count = repository::count_active_businesses(pool, i32::from(user_id)).await?;
+    let active_count = repository::count_active_businesses(tx.as_mut(), i32::from(user_id)).await?;
     if active_count >= 5 {
         return Err(DomainError::conflict(
             "maximum of 5 active businesses per user"
@@ -98,7 +102,7 @@ pub async fn create_business(
 
     // 4b. Create location record.
     let location = repository::create_location(
-        pool,
+        tx.as_mut(),
         name,
         "partner_business",
         req.address.trim(),
@@ -111,7 +115,7 @@ pub async fn create_business(
 
     // 4c. Create business record.
     let business = repository::create_business(
-        pool,
+        tx.as_mut(),
         location.id,
         i32::from(user_id),
         name,
@@ -130,13 +134,14 @@ pub async fn create_business(
         "action": "business_created",
         "name":   &business.name,
     }))
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     {
         tracing::error!(error = %e, "verification_events insert failed");
     }
 
-    // 5b. Audit event.
+    // 5b. Audit event. Outside the transaction (uses `pool`) so it lands
+    //     even if the caller's commit later fails.
     audit::write(
         pool,
         Some(i32::from(user_id)),
@@ -161,16 +166,22 @@ pub async fn create_business(
 
 /// Fetch a single business by ID. Returns `NotFound` if the business does not
 /// exist or has been soft-deleted.
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn get_business(
     pool:        &PgPool,
     business_id: i32,
     _requesting_user_id: UserId,
 ) -> AppResult<BusinessResponse> {
-    let business = repository::get_business_by_id(pool, business_id)
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+
+    let business = repository::get_business_by_id(&mut conn, business_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
-    let location = repository::get_location_by_id(pool, business.location_id)
+    let location = repository::get_location_by_id(&mut conn, business.location_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -178,15 +189,21 @@ pub async fn get_business(
 }
 
 /// List all businesses where the caller is the primary holder.
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn list_my_businesses(
     pool:    &PgPool,
     user_id: UserId,
 ) -> AppResult<Vec<BusinessResponse>> {
-    let businesses = repository::get_businesses_by_holder(pool, i32::from(user_id)).await?;
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+
+    let businesses = repository::get_businesses_by_holder(&mut conn, i32::from(user_id)).await?;
 
     let mut responses = Vec::with_capacity(businesses.len());
     for b in businesses {
-        if let Some(location) = repository::get_location_by_id(pool, b.location_id).await? {
+        if let Some(location) = repository::get_location_by_id(&mut conn, b.location_id).await? {
             responses.push(to_response(b, location));
         }
     }
@@ -244,9 +261,11 @@ mod tests {
         let user_id = create_attested_user(&pool, "attested@biz.test").await;
         let bus     = EventBus::new();
 
-        let resp = create_business(&pool, user_id, test_req("Test Café"), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
+        let resp = create_business(&mut tx, &pool, user_id, test_req("Test Café"), &bus)
             .await
             .expect("attested user must be able to create a business");
+        tx.commit().await.unwrap();
 
         assert_eq!(resp.name, "Test Café");
         assert_eq!(resp.verification_status, "pending");
@@ -259,9 +278,11 @@ mod tests {
         let user_id = create_registered_user(&pool, "registered@biz.test").await;
         let bus     = EventBus::new();
 
-        let err = create_business(&pool, user_id, test_req("Should Fail"), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
+        let err = create_business(&mut tx, &pool, user_id, test_req("Should Fail"), &bus)
             .await
             .expect_err("unattested user must not create a business");
+        // tx dropped without commit → rollback on error path.
 
         assert!(matches!(err, DomainError::Forbidden),
             "expected Forbidden, got: {err:?}");
@@ -277,7 +298,8 @@ mod tests {
             .unwrap();
 
         let bus = EventBus::new();
-        let err = create_business(&pool, user_id, test_req("Should Fail"), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
+        let err = create_business(&mut tx, &pool, user_id, test_req("Should Fail"), &bus)
             .await
             .expect_err("banned user must not create a business");
 
@@ -326,7 +348,8 @@ mod tests {
         let user_id       = create_user_with_status(&pool, &email, "registered").await;
         let bus           = EventBus::new();
 
-        let err = create_business(&pool, user_id, test_req("Should Fail"), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
+        let err = create_business(&mut tx, &pool, user_id, test_req("Should Fail"), &bus)
             .await.expect_err("registered user must not create a business");
         assert!(matches!(err, DomainError::Forbidden));
     }
@@ -338,7 +361,8 @@ mod tests {
         let user_id       = create_user_with_status(&pool, &email, "identity_confirmed").await;
         let bus           = EventBus::new();
 
-        let err = create_business(&pool, user_id, test_req("Should Fail"), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
+        let err = create_business(&mut tx, &pool, user_id, test_req("Should Fail"), &bus)
             .await.expect_err("identity_confirmed user must not create a business");
         assert!(matches!(err, DomainError::Forbidden));
     }
@@ -350,7 +374,8 @@ mod tests {
         let user_id       = create_user_with_status(&pool, &email, "presence_confirmed").await;
         let bus           = EventBus::new();
 
-        let err = create_business(&pool, user_id, test_req("Should Fail"), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
+        let err = create_business(&mut tx, &pool, user_id, test_req("Should Fail"), &bus)
             .await.expect_err("presence_confirmed user must not create a business");
         assert!(matches!(err, DomainError::Forbidden));
     }
@@ -370,17 +395,20 @@ mod tests {
             let address = format!("{} {}, Edmonton, AB",
                 (i + 1) * 100,
                 StreetName().fake::<String>());
-            create_business(&pool, user_id, CreateBusinessRequest {
+            let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
+            create_business(&mut tx, &pool, user_id, CreateBusinessRequest {
                 name, address,
                 latitude: None, longitude: None, timezone: None,
                 contact_email: None, contact_phone: None,
             }, &bus)
             .await
             .unwrap_or_else(|e| panic!("business {i} creation failed: {e:?}"));
+            tx.commit().await.unwrap();
         }
 
         // 6th attempt must fail.
-        let err = create_business(&pool, user_id, test_req("Sixth Business"), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
+        let err = create_business(&mut tx, &pool, user_id, test_req("Sixth Business"), &bus)
             .await.expect_err("6th business must be rejected");
         // The limit error is a Conflict with a capacity message.
         assert!(

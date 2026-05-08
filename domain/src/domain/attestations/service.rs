@@ -1,5 +1,5 @@
 use chrono::Utc;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use crate::{
     audit,
@@ -7,6 +7,7 @@ use crate::{
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
+    transaction::RlsTransaction,
     types::UserId,
 };
 use crate::domain::auth::repository as user_repo;
@@ -103,7 +104,7 @@ fn is_sha256_hex(s: &str) -> bool {
 ///
 /// Returns `(reviewer_1_id, reviewer_2_id, cosign_count)`.
 async fn assign_reviewers_for_visit(
-    pool:        &PgPool,
+    conn:        &mut PgConnection,
     staff_id:    i32,
     location_id: i32,
 ) -> AppResult<(i32, i32, i64)> {
@@ -125,7 +126,7 @@ async fn assign_reviewers_for_visit(
     )
     .bind(staff_id)
     .bind(location_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .map_err(DomainError::Db)?;
 
@@ -155,7 +156,7 @@ async fn assign_reviewers_for_visit(
             )
             .bind(r1)
             .bind(r2)
-            .fetch_one(pool)
+            .fetch_one(&mut *conn)
             .await
             .map_err(DomainError::Db)?;
 
@@ -177,7 +178,8 @@ async fn assign_reviewers_for_visit(
 /// Requesting user must be the delivery staff for the visit.
 /// Target user must have `verification_status = 'presence_confirmed'`.
 pub async fn initiate_attestation(
-    pool:               &PgPool,
+    tx:                 &mut RlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     requesting_user_id: UserId,
     req:                InitiateAttestationRequest,
     event_bus:          &EventBus,
@@ -189,7 +191,7 @@ pub async fn initiate_attestation(
         "SELECT staff_id, location_id, status FROM staff_visits WHERE id = $1"
     )
     .bind(req.visit_id)
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await
     .map_err(DomainError::Db)?
     .ok_or(DomainError::NotFound)?;
@@ -206,6 +208,7 @@ pub async fn initiate_attestation(
     }
 
     // 3. Target user must be presence_confirmed.
+    //    Cross-domain repository (auth) still takes `&PgPool` — call with pool.
     let target = user_repo::find_by_id(pool, UserId::from(req.user_id))
         .await?
         .ok_or(DomainError::NotFound)?;
@@ -222,7 +225,7 @@ pub async fn initiate_attestation(
             "SELECT user_id, threshold_met_at FROM presence_thresholds WHERE id = $1"
         )
         .bind(req.presence_threshold_id)
-        .fetch_optional(pool)
+        .fetch_optional(tx.as_mut())
         .await
         .map_err(DomainError::Db)?
         .ok_or_else(|| DomainError::InvalidInput("presence_threshold not found".to_string()))?;
@@ -245,7 +248,7 @@ pub async fn initiate_attestation(
     )
     .bind(req.visit_id)
     .bind(req.user_id)
-    .fetch_one(pool)
+    .fetch_one(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -281,11 +284,11 @@ pub async fn initiate_attestation(
 
     // 7. Assign two eligible reviewers (BFIP Section 6.5).
     let (r1_id, r2_id, cosign_count) =
-        assign_reviewers_for_visit(pool, uid, location_id).await?;
+        assign_reviewers_for_visit(tx.as_mut(), uid, location_id).await?;
 
     // 8. Create attestation record.
     let attestation = repository::create_attestation(
-        pool,
+        tx.as_mut(),
         req.visit_id,
         req.user_id,
         uid,
@@ -302,13 +305,15 @@ pub async fn initiate_attestation(
         "cosign_7d":          cosign_count,
     });
     let _ = repository::log_reviewer_assignment(
-        pool, req.visit_id, r1_id, cosign_count as i32, true, details.clone(),
+        tx.as_mut(), req.visit_id, r1_id, cosign_count as i32, true, details.clone(),
     ).await;
     let _ = repository::log_reviewer_assignment(
-        pool, req.visit_id, r2_id, cosign_count as i32, true, details,
+        tx.as_mut(), req.visit_id, r2_id, cosign_count as i32, true, details,
     ).await;
 
     // 10. Audit + event.
+    // Audit writes use `pool` (separate connection) — they commit
+    // independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(uid),
@@ -335,7 +340,8 @@ pub async fn initiate_attestation(
 /// Sets `status = 'co_sign_pending'` and opens the 48-hour co-sign window.
 /// Inserts `visit_signatures` rows for both assigned reviewers.
 pub async fn staff_sign(
-    pool:               &PgPool,
+    tx:                 &mut RlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     attestation_id:     i32,
     requesting_user_id: UserId,
     req:                StaffSignAttestationRequest,
@@ -344,7 +350,7 @@ pub async fn staff_sign(
     let uid = i32::from(requesting_user_id);
 
     // 1. Load attestation — must be 'pending'.
-    let attest = repository::get_attestation_by_id(pool, attestation_id)
+    let attest = repository::get_attestation_by_id(tx.as_mut(), attestation_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -384,7 +390,7 @@ pub async fn staff_sign(
 
     // 5. Update attestation with signature and set status to co_sign_pending.
     let updated = repository::update_attestation_staff_signed(
-        pool,
+        tx.as_mut(),
         attestation_id,
         &staff_sig_record,
         req.photo_hash.as_deref(),
@@ -410,7 +416,8 @@ pub async fn staff_sign(
 /// When both assigned reviewers have signed, the attestation is approved
 /// and the user is promoted to `verification_status = 'attested'`.
 pub async fn reviewer_sign(
-    pool:               &PgPool,
+    tx:                 &mut RlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     attestation_id:     i32,
     requesting_user_id: UserId,
     req:                ReviewerSignAttestationRequest,
@@ -419,7 +426,7 @@ pub async fn reviewer_sign(
     let uid = i32::from(requesting_user_id);
 
     // 1. Load attestation — must be 'co_sign_pending'.
-    let attest = repository::get_attestation_by_id(pool, attestation_id)
+    let attest = repository::get_attestation_by_id(tx.as_mut(), attestation_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -459,7 +466,7 @@ pub async fn reviewer_sign(
         .co_sign_deadline
         .unwrap_or_else(|| Utc::now() + chrono::Duration::hours(48));
     repository::record_reviewer_signature(
-        pool,
+        tx.as_mut(),
         attest.visit_id,
         uid,
         sign_deadline,
@@ -469,7 +476,7 @@ pub async fn reviewer_sign(
 
     // 6. Check if both reviewers have now signed.
     let both_signed = repository::check_both_reviewers_signed(
-        pool,
+        tx.as_mut(),
         attest.visit_id,
         attest.assigned_reviewer_1_id,
         attest.assigned_reviewer_2_id,
@@ -497,7 +504,7 @@ pub async fn reviewer_sign(
         }
 
         // 6b. Approve attestation.
-        let approved = repository::approve_attestation(pool, attestation_id).await?;
+        let approved = repository::approve_attestation(tx.as_mut(), attestation_id).await?;
 
         // 6b. Promote user to 'attested'.
         sqlx::query(
@@ -505,13 +512,13 @@ pub async fn reviewer_sign(
              attested_at = now(), updated_at = now() WHERE id = $1"
         )
         .bind(attest.user_id)
-        .execute(pool)
+        .execute(tx.as_mut())
         .await
         .map_err(DomainError::Db)?;
 
         // 6c. Record attempt.
         let _ = repository::record_attempt(
-            pool,
+            tx.as_mut(),
             attest.user_id,
             attestation_id,
             attest.visit_id,
@@ -550,7 +557,7 @@ pub async fn reviewer_sign(
             serde_json::json!({ "attestation_id": attestation_id, "reviewer_id": uid }),
         ).await;
 
-        repository::get_attestation_by_id(pool, attestation_id)
+        repository::get_attestation_by_id(tx.as_mut(), attestation_id)
             .await?
             .ok_or(DomainError::NotFound)
     }
@@ -561,7 +568,8 @@ pub async fn reviewer_sign(
 /// Only an assigned reviewer may reject. The user's status is reset to
 /// `'presence_confirmed'` and the attempt is recorded in `attestation_attempts`.
 pub async fn reject_attestation(
-    pool:               &PgPool,
+    tx:                 &mut RlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     attestation_id:     i32,
     requesting_user_id: UserId,
     req:                RejectAttestationRequest,
@@ -570,7 +578,7 @@ pub async fn reject_attestation(
     let uid = i32::from(requesting_user_id);
 
     // 1. Load attestation.
-    let attest = repository::get_attestation_by_id(pool, attestation_id)
+    let attest = repository::get_attestation_by_id(tx.as_mut(), attestation_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -587,7 +595,7 @@ pub async fn reject_attestation(
     }
 
     // 4. Set status = 'rejected'.
-    let rejected = repository::set_rejected(pool, attestation_id).await?;
+    let rejected = repository::set_rejected(tx.as_mut(), attestation_id).await?;
 
     // 5. Reset user to 'presence_confirmed'.
     sqlx::query(
@@ -595,13 +603,13 @@ pub async fn reject_attestation(
          WHERE id = $1"
     )
     .bind(attest.user_id)
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
     // 6. Record attempt.
     let _ = repository::record_attempt(
-        pool,
+        tx.as_mut(),
         attest.user_id,
         attestation_id,
         attest.visit_id,
@@ -637,19 +645,29 @@ pub async fn reject_attestation(
 }
 
 /// List attestations in `'co_sign_pending'` status assigned to this reviewer.
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn list_pending_for_reviewer(
     pool:    &PgPool,
     user_id: UserId,
 ) -> AppResult<Vec<VisitAttestationRow>> {
-    repository::get_pending_attestations_for_reviewer(pool, i32::from(user_id)).await
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    repository::get_pending_attestations_for_reviewer(&mut conn, i32::from(user_id)).await
 }
 
 /// List all attestations for the authenticated user (as the attested person).
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn list_my_attestations(
     pool:    &PgPool,
     user_id: UserId,
 ) -> AppResult<Vec<VisitAttestationRow>> {
-    repository::get_attestations_by_user(pool, i32::from(user_id)).await
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    repository::get_attestations_by_user(&mut conn, i32::from(user_id)).await
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -664,6 +682,7 @@ mod tests {
             types::{ArriveAtVisitRequest, GrantRoleRequest, ScheduleVisitRequest},
         },
         event_bus::EventBus,
+        transaction::AdminRlsTransaction,
         types::UserId,
     };
     use sqlx::PgPool;
@@ -684,6 +703,21 @@ mod tests {
         visit_id:     i32,
         target:       UserId,
         threshold_id: i32,
+    }
+
+    /// Run `initiate_attestation` with a fresh `RlsTransaction` scoped to the
+    /// requesting staff user — every test that previously passed `&pool`
+    /// directly to the service now goes through this helper.
+    async fn run_initiate(
+        pool: &PgPool,
+        staff: UserId,
+        req: InitiateAttestationRequest,
+        bus: &EventBus,
+    ) -> AppResult<VisitAttestationRow> {
+        let mut tx = RlsTransaction::begin(pool, i32::from(staff)).await?;
+        let resp = initiate_attestation(&mut tx, pool, staff, req, bus).await?;
+        tx.commit().await?;
+        Ok(resp)
     }
 
     /// Full attestation context: admin, delivery staff, 2 reviewers, in-progress
@@ -739,53 +773,71 @@ mod tests {
         .unwrap();
 
         // Grant delivery_staff role.
-        staff_svc::grant_staff_role(
-            pool,
-            admin,
-            GrantRoleRequest {
-                user_id:      i32::from(staff),
-                role:         "delivery_staff".to_owned(),
-                location_id:  Some(loc_id),
-                expires_at:   None,
-                confirmed_by: None,
-            },
-            &bus,
-        )
-        .await
-        .unwrap();
+        {
+            let mut tx = AdminRlsTransaction::begin(pool).await.unwrap();
+            staff_svc::grant_staff_role(
+                &mut tx,
+                pool,
+                admin,
+                GrantRoleRequest {
+                    user_id:      i32::from(staff),
+                    role:         "delivery_staff".to_owned(),
+                    location_id:  Some(loc_id),
+                    expires_at:   None,
+                    confirmed_by: None,
+                },
+                &bus,
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
 
         // Schedule + arrive at visit.
-        let visit = staff_svc::schedule_visit(
-            pool,
-            staff,
-            ScheduleVisitRequest {
-                location_id:              loc_id,
-                visit_type:               "combined".to_owned(),
-                scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
-                window_hours:             Some(4),
-                support_booking_capacity: Some(0),
-                expected_box_count:       Some(0),
-            },
-            &bus,
-        )
-        .await
-        .unwrap();
+        let visit = {
+            let mut tx = RlsTransaction::begin(pool, i32::from(staff)).await.unwrap();
+            let v = staff_svc::schedule_visit(
+                &mut tx,
+                pool,
+                staff,
+                ScheduleVisitRequest {
+                    location_id:              loc_id,
+                    visit_type:               "combined".to_owned(),
+                    scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
+                    window_hours:             Some(4),
+                    support_booking_capacity: Some(0),
+                    expected_box_count:       Some(0),
+                },
+                &bus,
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            v
+        };
 
-        staff_svc::arrive_at_visit(
-            pool,
-            visit.id,
-            staff,
-            ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
-        )
-        .await
-        .unwrap();
+        {
+            let mut tx = RlsTransaction::begin(pool, i32::from(staff)).await.unwrap();
+            staff_svc::arrive_at_visit(
+                &mut tx,
+                pool,
+                visit.id,
+                staff,
+                ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
 
         // Create 2 attestation reviewers (no location — eligible everywhere).
         let r1 = mk_user(SafeEmail().fake::<String>()).await;
         let r2 = mk_user(SafeEmail().fake::<String>()).await;
 
         for rid in [r1, r2] {
+            let mut tx = AdminRlsTransaction::begin(pool).await.unwrap();
             staff_svc::grant_staff_role(
+                &mut tx,
                 pool,
                 admin,
                 GrantRoleRequest {
@@ -799,6 +851,7 @@ mod tests {
             )
             .await
             .unwrap();
+            tx.commit().await.unwrap();
         }
 
         // Target user: presence_confirmed status.
@@ -850,12 +903,16 @@ mod tests {
 
     async fn run_staff_sign(pool: &PgPool, ctx: &Ctx, attestation_id: i32) -> VisitAttestationRow {
         let bus = EventBus::new();
-        let attest = repository::get_attestation_by_id(pool, attestation_id)
+        let mut conn = pool.acquire().await.unwrap();
+        let attest = repository::get_attestation_by_id(&mut conn, attestation_id)
             .await.unwrap().unwrap();
+        drop(conn);
         let payload = attestation_payload(&attest);
         let kp = Ed25519KeyPair::generate();
         let (vk, sig) = signed_pair(&payload, &kp);
-        staff_sign(
+        let mut tx = RlsTransaction::begin(pool, i32::from(ctx.staff)).await.unwrap();
+        let signed = staff_sign(
+            &mut tx,
             pool,
             attestation_id,
             ctx.staff,
@@ -869,7 +926,9 @@ mod tests {
             &bus,
         )
         .await
-        .expect("staff_sign must succeed")
+        .expect("staff_sign must succeed");
+        tx.commit().await.unwrap();
+        signed
     }
 
     async fn run_reviewer_sign(
@@ -878,12 +937,16 @@ mod tests {
         reviewer:      UserId,
     ) -> VisitAttestationRow {
         let bus = EventBus::new();
-        let attest = repository::get_attestation_by_id(pool, attestation_id)
+        let mut conn = pool.acquire().await.unwrap();
+        let attest = repository::get_attestation_by_id(&mut conn, attestation_id)
             .await.unwrap().unwrap();
+        drop(conn);
         let payload = attestation_payload(&attest);
         let kp = Ed25519KeyPair::generate();
         let (vk, sig) = signed_pair(&payload, &kp);
-        reviewer_sign(
+        let mut tx = RlsTransaction::begin(pool, i32::from(reviewer)).await.unwrap();
+        let signed = reviewer_sign(
+            &mut tx,
             pool,
             attestation_id,
             reviewer,
@@ -895,7 +958,9 @@ mod tests {
             &bus,
         )
         .await
-        .expect("reviewer_sign must succeed")
+        .expect("reviewer_sign must succeed");
+        tx.commit().await.unwrap();
+        signed
     }
 
     // ── Tests 1–3: initiate_attestation ──────────────────────────────────────
@@ -905,7 +970,7 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus)
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus)
             .await
             .expect("initiate_attestation must succeed");
 
@@ -923,7 +988,7 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let err = initiate_attestation(
+        let err = run_initiate(
             &pool,
             ctx.staff,
             InitiateAttestationRequest {
@@ -956,7 +1021,7 @@ mod tests {
         .await
         .unwrap();
 
-        let err = initiate_attestation(
+        let err = run_initiate(
             &pool,
             ctx.staff,
             InitiateAttestationRequest {
@@ -1018,37 +1083,53 @@ mod tests {
         .await
         .unwrap();
 
-        staff_svc::grant_staff_role(
-            &pool,
-            admin,
-            GrantRoleRequest {
-                user_id: staff_id, role: "delivery_staff".to_owned(),
-                location_id: Some(loc_id), expires_at: None, confirmed_by: None,
-            },
-            &bus,
-        )
-        .await
-        .unwrap();
+        {
+            let mut tx = AdminRlsTransaction::begin(&pool).await.unwrap();
+            staff_svc::grant_staff_role(
+                &mut tx,
+                &pool,
+                admin,
+                GrantRoleRequest {
+                    user_id: staff_id, role: "delivery_staff".to_owned(),
+                    location_id: Some(loc_id), expires_at: None, confirmed_by: None,
+                },
+                &bus,
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
 
-        let visit = staff_svc::schedule_visit(
-            &pool,
-            staff,
-            ScheduleVisitRequest {
-                location_id: loc_id, visit_type: "delivery".to_owned(),
-                scheduled_at: chrono::Utc::now() + chrono::Duration::hours(1),
-                window_hours: Some(4), support_booking_capacity: Some(0), expected_box_count: Some(0),
-            },
-            &bus,
-        )
-        .await
-        .unwrap();
+        let visit = {
+            let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
+            let v = staff_svc::schedule_visit(
+                &mut tx,
+                &pool,
+                staff,
+                ScheduleVisitRequest {
+                    location_id: loc_id, visit_type: "delivery".to_owned(),
+                    scheduled_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                    window_hours: Some(4), support_booking_capacity: Some(0), expected_box_count: Some(0),
+                },
+                &bus,
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            v
+        };
 
-        staff_svc::arrive_at_visit(
-            &pool, visit.id, staff,
-            ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
-        )
-        .await
-        .unwrap();
+        {
+            let mut tx = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
+            staff_svc::arrive_at_visit(
+                &mut tx,
+                &pool, visit.id, staff,
+                ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
 
         let (target_id,): (i32,) = sqlx::query_as(
             "INSERT INTO users (email, email_verified, verification_status) \
@@ -1070,7 +1151,7 @@ mod tests {
         .await
         .unwrap();
 
-        let err = initiate_attestation(
+        let err = run_initiate(
             &pool,
             staff,
             InitiateAttestationRequest {
@@ -1095,7 +1176,7 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus)
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus)
             .await
             .unwrap();
 
@@ -1111,12 +1192,14 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus)
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus)
             .await
             .unwrap();
 
         // Forbidden short-circuits before signature verification.
+        let mut tx = RlsTransaction::begin(&pool, i32::from(ctx.reviewer_1)).await.unwrap();
         let err = staff_sign(
+            &mut tx,
             &pool,
             attest.id,
             ctx.reviewer_1,
@@ -1142,7 +1225,7 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
         run_staff_sign(&pool, &ctx, attest.id).await;
 
         let after = run_reviewer_sign(&pool, attest.id, ctx.reviewer_1).await;
@@ -1154,7 +1237,7 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
         run_staff_sign(&pool, &ctx, attest.id).await;
         run_reviewer_sign(&pool, attest.id, ctx.reviewer_1).await;
 
@@ -1167,7 +1250,7 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
         run_staff_sign(&pool, &ctx, attest.id).await;
         run_reviewer_sign(&pool, attest.id, ctx.reviewer_1).await;
         run_reviewer_sign(&pool, attest.id, ctx.reviewer_2).await;
@@ -1188,7 +1271,7 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
         run_staff_sign(&pool, &ctx, attest.id).await;
         run_reviewer_sign(&pool, attest.id, ctx.reviewer_1).await;
         run_reviewer_sign(&pool, attest.id, ctx.reviewer_2).await;
@@ -1212,10 +1295,12 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
         run_staff_sign(&pool, &ctx, attest.id).await;
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(ctx.reviewer_1)).await.unwrap();
         reject_attestation(
+            &mut tx,
             &pool,
             attest.id,
             ctx.reviewer_1,
@@ -1224,6 +1309,7 @@ mod tests {
         )
         .await
         .expect("reject must succeed");
+        tx.commit().await.unwrap();
 
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM attestation_attempts \
@@ -1242,10 +1328,12 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
         run_staff_sign(&pool, &ctx, attest.id).await;
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(ctx.reviewer_1)).await.unwrap();
         reject_attestation(
+            &mut tx,
             &pool,
             attest.id,
             ctx.reviewer_1,
@@ -1254,6 +1342,7 @@ mod tests {
         )
         .await
         .unwrap();
+        tx.commit().await.unwrap();
 
         let status: String = sqlx::query_scalar(
             "SELECT verification_status FROM users WHERE id = $1",
@@ -1273,7 +1362,7 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
         run_staff_sign(&pool, &ctx, attest.id).await;
 
         let pending = list_pending_for_reviewer(&pool, ctx.reviewer_1).await.unwrap();
@@ -1286,7 +1375,7 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
+        run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
 
         let mine = list_my_attestations(&pool, ctx.target).await.unwrap();
         assert_eq!(mine.len(), 1);
@@ -1300,11 +1389,13 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
 
         // Forbidden is checked before signature verification, so the bytes
         // here never need to verify — but the struct still needs the field.
+        let mut tx = RlsTransaction::begin(&pool, i32::from(ctx.admin)).await.unwrap();
         let err = staff_sign(
+            &mut tx,
             &pool,
             attest.id,
             ctx.admin,
@@ -1328,11 +1419,13 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
         run_staff_sign(&pool, &ctx, attest.id).await;
 
         // staff user is not a reviewer — Forbidden short-circuits before sig verify.
+        let mut tx = RlsTransaction::begin(&pool, i32::from(ctx.staff)).await.unwrap();
         let err = reviewer_sign(
+            &mut tx,
             &pool,
             attest.id,
             ctx.staff,
@@ -1354,11 +1447,13 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
         run_staff_sign(&pool, &ctx, attest.id).await;
 
         // admin is not an assigned reviewer.
+        let mut tx = RlsTransaction::begin(&pool, i32::from(ctx.admin)).await.unwrap();
         let err = reject_attestation(
+            &mut tx,
             &pool,
             attest.id,
             ctx.admin,
@@ -1377,7 +1472,7 @@ mod tests {
         let bus = EventBus::new();
 
         // Try to attest the admin (whose status is 'registered').
-        let err = initiate_attestation(
+        let err = run_initiate(
             &pool,
             ctx.staff,
             InitiateAttestationRequest {
@@ -1403,7 +1498,7 @@ mod tests {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
 
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus).await.unwrap();
         run_staff_sign(&pool, &ctx, attest.id).await;
 
         // First sign succeeds.
@@ -1411,12 +1506,16 @@ mod tests {
 
         // Second sign by the same reviewer must hit the DB ON CONFLICT path.
         // Signature must verify so we get past Ed25519 check and reach the insert.
-        let attest_now = repository::get_attestation_by_id(&pool, attest.id)
+        let mut conn = pool.acquire().await.unwrap();
+        let attest_now = repository::get_attestation_by_id(&mut conn, attest.id)
             .await.unwrap().unwrap();
+        drop(conn);
         let payload = attestation_payload(&attest_now);
         let kp = Ed25519KeyPair::generate();
         let (vk, sig) = signed_pair(&payload, &kp);
+        let mut tx = RlsTransaction::begin(&pool, i32::from(ctx.reviewer_1)).await.unwrap();
         let err = reviewer_sign(
+            &mut tx,
             &pool,
             attest.id,
             ctx.reviewer_1,
@@ -1444,10 +1543,11 @@ mod tests {
         -> (VisitAttestationRow, String)
     {
         let bus = EventBus::new();
-        let attest = initiate_attestation(pool, ctx.staff, initiate_req(ctx), &bus)
+        let attest = run_initiate(pool, ctx.staff, initiate_req(ctx), &bus)
             .await.unwrap();
         run_staff_sign(pool, ctx, attest.id).await;
-        let attest_now = repository::get_attestation_by_id(pool, attest.id)
+        let mut conn = pool.acquire().await.unwrap();
+        let attest_now = repository::get_attestation_by_id(&mut conn, attest.id)
             .await.unwrap().unwrap();
         let payload = attestation_payload(&attest_now);
         (attest_now, payload)
@@ -1462,8 +1562,9 @@ mod tests {
         let kp = Ed25519KeyPair::generate();
         let (vk, sig) = signed_pair(&payload, &kp);
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(ctx.reviewer_1)).await.unwrap();
         reviewer_sign(
-            &pool, attest_now.id, ctx.reviewer_1,
+            &mut tx, &pool, attest_now.id, ctx.reviewer_1,
             ReviewerSignAttestationRequest {
                 signature:              sig.clone(),
                 verifying_key_hex:      vk.clone(),
@@ -1471,6 +1572,7 @@ mod tests {
             },
             &bus,
         ).await.expect("valid Ed25519 sign must succeed");
+        tx.commit().await.unwrap();
 
         // Stored as verifying_key_hex:signature_hex in visit_signatures.
         let stored: String = sqlx::query_scalar(
@@ -1497,8 +1599,9 @@ mod tests {
         let flipped = if last == '0' { '1' } else { '0' };
         sig.push(flipped);
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(ctx.reviewer_1)).await.unwrap();
         let err = reviewer_sign(
-            &pool, attest_now.id, ctx.reviewer_1,
+            &mut tx, &pool, attest_now.id, ctx.reviewer_1,
             ReviewerSignAttestationRequest {
                 signature:              sig,
                 verifying_key_hex:      vk,
@@ -1531,8 +1634,9 @@ mod tests {
         let kp_b = Ed25519KeyPair::generate();
         let sig_a = kp_a.sign(payload.as_bytes());
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(ctx.reviewer_1)).await.unwrap();
         let err = reviewer_sign(
-            &pool, attest_now.id, ctx.reviewer_1,
+            &mut tx, &pool, attest_now.id, ctx.reviewer_1,
             ReviewerSignAttestationRequest {
                 signature:              sig_a,
                 verifying_key_hex:      kp_b.verifying_key_hex(),
@@ -1557,23 +1661,27 @@ mod tests {
         let (vk1, sig1) = signed_pair(&payload, &kp1);
         let (vk2, sig2) = signed_pair(&payload, &kp2);
 
+        let mut tx1 = RlsTransaction::begin(&pool, i32::from(ctx.reviewer_1)).await.unwrap();
         reviewer_sign(
-            &pool, attest_now.id, ctx.reviewer_1,
+            &mut tx1, &pool, attest_now.id, ctx.reviewer_1,
             ReviewerSignAttestationRequest {
                 signature: sig1, verifying_key_hex: vk1,
                 evidence_hash_reviewed: "evidence-1".to_owned(),
             },
             &bus,
         ).await.unwrap();
+        tx1.commit().await.unwrap();
 
+        let mut tx2 = RlsTransaction::begin(&pool, i32::from(ctx.reviewer_2)).await.unwrap();
         let approved = reviewer_sign(
-            &pool, attest_now.id, ctx.reviewer_2,
+            &mut tx2, &pool, attest_now.id, ctx.reviewer_2,
             ReviewerSignAttestationRequest {
                 signature: sig2, verifying_key_hex: vk2,
                 evidence_hash_reviewed: "evidence-2".to_owned(),
             },
             &bus,
         ).await.expect("aggregated verify must pass with two valid sigs");
+        tx2.commit().await.unwrap();
 
         assert_eq!(approved.status, "approved");
 
@@ -1589,7 +1697,7 @@ mod tests {
     async fn payload_is_deterministic(pool: PgPool) {
         let ctx = setup(&pool).await;
         let bus = EventBus::new();
-        let attest = initiate_attestation(&pool, ctx.staff, initiate_req(&ctx), &bus)
+        let attest = run_initiate(&pool, ctx.staff, initiate_req(&ctx), &bus)
             .await.unwrap();
 
         let p1 = attestation_payload(&attest);

@@ -1,11 +1,12 @@
 use chrono::{NaiveDate, Utc};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use crate::{
     audit,
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
+    transaction::RlsTransaction,
     types::UserId,
 };
 use crate::domain::auth::repository as user_repo;
@@ -35,23 +36,23 @@ fn hmac_eq(a: &str, b: &str) -> bool {
 
 /// Build a PresenceStatusResponse from a threshold row + its qualifying events.
 async fn build_status_response(
-    pool:        &PgPool,
+    conn:        &mut PgConnection,
     user_id:     i32,
     business_id: i32,
 ) -> AppResult<PresenceStatusResponse> {
-    let threshold = repository::get_threshold_by_user(pool, user_id).await?;
-    status_from_threshold(pool, user_id, business_id, threshold.as_ref()).await
+    let threshold = repository::get_threshold_by_user(conn, user_id).await?;
+    status_from_threshold(conn, user_id, business_id, threshold.as_ref()).await
 }
 
 async fn status_from_threshold(
-    pool:        &PgPool,
+    conn:        &mut PgConnection,
     user_id:     i32,
     business_id: i32,
     threshold:   Option<&PresenceThresholdRow>,
 ) -> AppResult<PresenceStatusResponse> {
     let (event_count, days_count, threshold_met, threshold_met_at, biz_id, qe) =
         if let Some(t) = threshold {
-            let raw = repository::get_qualifying_events(pool, t.id).await?;
+            let raw = repository::get_qualifying_events(conn, t.id).await?;
             let summaries = raw.into_iter().map(|e| PresenceEventSummary {
                 id:               e.id,
                 event_type:       e.event_type,
@@ -79,7 +80,7 @@ async fn status_from_threshold(
 /// Count qualifying events for a user at a business on a specific calendar date.
 /// Used to enforce the separate-day rule (days_count only increments for new dates).
 async fn qualifying_events_on_date(
-    pool:        &PgPool,
+    conn:        &mut PgConnection,
     user_id:     i32,
     business_id: i32,
     date:        NaiveDate,
@@ -92,7 +93,7 @@ async fn qualifying_events_on_date(
     .bind(user_id)
     .bind(business_id)
     .bind(date)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -102,7 +103,7 @@ async fn qualifying_events_on_date(
 /// increments days_count only for new calendar dates, and triggers the
 /// presence_confirmed status change when threshold is first met.
 async fn advance_threshold(
-    pool:          &PgPool,
+    conn:          &mut PgConnection,
     user_id:       i32,
     business_id:   i32,
     event_id:      i32,
@@ -111,9 +112,9 @@ async fn advance_threshold(
 ) -> AppResult<PresenceThresholdRow> {
     // Check BEFORE creating threshold so we don't count the event we haven't written yet.
     let already_qualifying_today =
-        qualifying_events_on_date(pool, user_id, business_id, calendar_date).await?;
+        qualifying_events_on_date(conn, user_id, business_id, calendar_date).await?;
 
-    let threshold = repository::get_or_create_threshold(pool, user_id, business_id).await?;
+    let threshold = repository::get_or_create_threshold(conn, user_id, business_id).await?;
     let was_already_met = threshold.threshold_met_at.is_some();
 
     let new_event_count = threshold.event_count + 1;
@@ -135,11 +136,11 @@ async fn advance_threshold(
     };
 
     let updated = repository::update_threshold(
-        pool, threshold.id, new_event_count, new_days_count,
+        conn, threshold.id, new_event_count, new_days_count,
         Some(Utc::now()), threshold_met_at,
     ).await?;
 
-    repository::record_qualifying_event(pool, updated.id, event_id).await?;
+    repository::record_qualifying_event(conn, updated.id, event_id).await?;
 
     // Newly met — upgrade user status and write verification events.
     if threshold_met_at.is_some() && !was_already_met {
@@ -147,7 +148,7 @@ async fn advance_threshold(
             "UPDATE users SET verification_status = 'presence_confirmed' WHERE id = $1"
         )
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *conn)
         .await;
 
         // verification_event: presence threshold met
@@ -163,7 +164,7 @@ async fn advance_threshold(
             "days_count":  new_days_count,
             "business_id": business_id,
         }))
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         {
             tracing::error!(error = %e, "verification_events (presence_threshold_met) insert failed");
@@ -177,7 +178,7 @@ async fn advance_threshold(
         )
         .bind(user_id)
         .bind(serde_json::json!({ "business_id": business_id }))
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         {
             tracing::error!(error = %e, "verification_events (status_changed) insert failed");
@@ -202,7 +203,7 @@ async fn advance_threshold(
         "calendar_date": calendar_date.format("%Y-%m-%d").to_string(),
         "business_id":   business_id,
     }))
-    .execute(pool)
+    .execute(&mut *conn)
     .await
     {
         tracing::error!(error = %e, "verification_events (presence_event_recorded) insert failed");
@@ -218,14 +219,15 @@ async fn advance_threshold(
 /// Validates HMAC, RSSI, and minimum dwell time per BFIP Section 5 before
 /// advancing the user's presence threshold. Returns the current threshold state.
 pub async fn record_beacon_dwell(
-    pool:    &PgPool,
+    tx:      &mut RlsTransaction,
+    pool:    &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     user_id: UserId,
     req:     RecordBeaconDwellRequest,
     bus:     &EventBus,
 ) -> AppResult<PresenceStatusResponse> {
     let uid = i32::from(user_id);
 
-    // 1. Validate user.
+    // 1. Validate user. Cross-domain repo call — kept on &PgPool for now.
     let user = user_repo::find_by_id(pool, user_id).await?.ok_or(DomainError::Unauthorized)?;
     if user.is_banned { return Err(DomainError::Forbidden); }
     if matches!(user.verification_status.as_str(), "attested" | "cleared") {
@@ -233,7 +235,9 @@ pub async fn record_beacon_dwell(
     }
 
     // 2. Load beacon — must be active and belong to the stated business.
-    let beacon = beacon_repo::get_beacon_by_id(pool, req.beacon_id).await?
+    //    Cross-domain repo (already migrated to &mut PgConnection) — run on
+    //    the request's tx connection.
+    let beacon = beacon_repo::get_beacon_by_id(tx.as_mut(), req.beacon_id).await?
         .ok_or(DomainError::NotFound)?;
     if beacon.business_id != Some(req.business_id) {
         return Err(DomainError::invalid_input("beacon does not belong to this business"));
@@ -241,58 +245,71 @@ pub async fn record_beacon_dwell(
 
     let calendar_date = req.started_at.date_naive();
 
-    // Shared non-qualifying event helper.
-    let record_rejected = |reason: &'static str| {
-        repository::create_presence_event(
-            pool, uid, req.business_id, Some(req.beacon_id), None, None,
+    // 3. Validate beacon_witness_hmac.
+    let expected = derive_witness_hmac(&beacon.secret_key, req.business_id, calendar_date, uid);
+    if !hmac_eq(&expected, &req.beacon_witness_hmac) {
+        let _ = repository::create_presence_event(
+            tx.as_mut(), uid, req.business_id, Some(req.beacon_id), None, None,
             "beacon_dwell", Some(req.rssi), Some(beacon.minimum_rssi_threshold),
             Some(req.started_at), Some(req.ended_at), Some(req.dwell_minutes),
-            false, Some(reason),
+            false, Some("invalid_beacon_witness_hmac"),
             req.app_attest_assertion.as_deref(),
             Some(req.beacon_witness_hmac.as_str()),
             req.device_identifier.as_deref(),
             calendar_date,
-        )
-    };
-
-    // 3. Validate beacon_witness_hmac.
-    let expected = derive_witness_hmac(&beacon.secret_key, req.business_id, calendar_date, uid);
-    if !hmac_eq(&expected, &req.beacon_witness_hmac) {
-        let _ = record_rejected("invalid_beacon_witness_hmac").await;
+        ).await;
         bus.publish(DomainEvent::PresenceEventRecorded {
             user_id: uid, event_type: "beacon_dwell".into(), is_qualifying: false,
         });
-        return build_status_response(pool, uid, req.business_id).await;
+        return build_status_response(tx.as_mut(), uid, req.business_id).await;
     }
 
     // 4. Check RSSI.
     if req.rssi < beacon.minimum_rssi_threshold {
-        let _ = record_rejected("rssi_below_threshold").await;
+        let _ = repository::create_presence_event(
+            tx.as_mut(), uid, req.business_id, Some(req.beacon_id), None, None,
+            "beacon_dwell", Some(req.rssi), Some(beacon.minimum_rssi_threshold),
+            Some(req.started_at), Some(req.ended_at), Some(req.dwell_minutes),
+            false, Some("rssi_below_threshold"),
+            req.app_attest_assertion.as_deref(),
+            Some(req.beacon_witness_hmac.as_str()),
+            req.device_identifier.as_deref(),
+            calendar_date,
+        ).await;
         bus.publish(DomainEvent::PresenceEventRecorded {
             user_id: uid, event_type: "beacon_dwell".into(), is_qualifying: false,
         });
-        return build_status_response(pool, uid, req.business_id).await;
+        return build_status_response(tx.as_mut(), uid, req.business_id).await;
     }
 
     // 5. Check minimum dwell time (BFIP Section 5 requires >= 15 minutes).
     if req.dwell_minutes < 15 {
-        let _ = record_rejected("insufficient_dwell_time").await;
+        let _ = repository::create_presence_event(
+            tx.as_mut(), uid, req.business_id, Some(req.beacon_id), None, None,
+            "beacon_dwell", Some(req.rssi), Some(beacon.minimum_rssi_threshold),
+            Some(req.started_at), Some(req.ended_at), Some(req.dwell_minutes),
+            false, Some("insufficient_dwell_time"),
+            req.app_attest_assertion.as_deref(),
+            Some(req.beacon_witness_hmac.as_str()),
+            req.device_identifier.as_deref(),
+            calendar_date,
+        ).await;
         bus.publish(DomainEvent::PresenceEventRecorded {
             user_id: uid, event_type: "beacon_dwell".into(), is_qualifying: false,
         });
-        return build_status_response(pool, uid, req.business_id).await;
+        return build_status_response(tx.as_mut(), uid, req.business_id).await;
     }
 
     // 6. Create presence session.
     let session = repository::create_presence_session(
-        pool, uid, req.business_id, Some(req.beacon_id),
+        tx.as_mut(), uid, req.business_id, Some(req.beacon_id),
         req.device_identifier.as_deref(),
         req.started_at, req.ended_at, Some(req.dwell_minutes),
     ).await?;
 
     // 7. Create qualifying presence event.
     let event = repository::create_presence_event(
-        pool, uid, req.business_id, Some(req.beacon_id), Some(session.id), None,
+        tx.as_mut(), uid, req.business_id, Some(req.beacon_id), Some(session.id), None,
         "beacon_dwell", Some(req.rssi), Some(beacon.minimum_rssi_threshold),
         Some(req.started_at), Some(req.ended_at), Some(req.dwell_minutes),
         true, None,
@@ -303,9 +320,10 @@ pub async fn record_beacon_dwell(
     ).await?;
 
     // 8–13. Advance threshold, check completion, write verification events.
-    advance_threshold(pool, uid, req.business_id, event.id, calendar_date, bus).await?;
+    advance_threshold(tx.as_mut(), uid, req.business_id, event.id, calendar_date, bus).await?;
 
-    // 14. Audit event.
+    // 14. Audit event. Audit writes use `pool` (separate connection) — they
+    //     commit independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool, Some(uid), None, "presence.beacon_dwell",
         serde_json::json!({
@@ -321,21 +339,22 @@ pub async fn record_beacon_dwell(
     });
 
     // 15. Return current status.
-    build_status_response(pool, uid, req.business_id).await
+    build_status_response(tx.as_mut(), uid, req.business_id).await
 }
 
 /// Record an NFC tap of a visit box.
 ///
 /// Validates HMAC and single-use box constraints per BFIP Section 5.
 pub async fn record_nfc_tap(
-    pool:    &PgPool,
+    tx:      &mut RlsTransaction,
+    pool:    &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     user_id: UserId,
     req:     RecordNfcTapRequest,
     bus:     &EventBus,
 ) -> AppResult<PresenceStatusResponse> {
     let uid = i32::from(user_id);
 
-    // 1. Validate user.
+    // 1. Validate user. Cross-domain repo call — kept on &PgPool for now.
     let user = user_repo::find_by_id(pool, user_id).await?.ok_or(DomainError::Unauthorized)?;
     if user.is_banned { return Err(DomainError::Forbidden); }
     if matches!(user.verification_status.as_str(), "attested" | "cleared") {
@@ -349,7 +368,7 @@ pub async fn record_nfc_tap(
              FROM visit_boxes WHERE id = $1"
         )
         .bind(req.box_id)
-        .fetch_optional(pool)
+        .fetch_optional(tx.as_mut())
         .await
         .map_err(DomainError::Db)?;
 
@@ -368,16 +387,18 @@ pub async fn record_nfc_tap(
     let calendar_date = Utc::now().date_naive();
 
     // 3. Validate beacon_witness_hmac using the first active beacon for this business.
-    let beacon_opt = beacon_repo::get_beacons_by_business(pool, req.business_id).await?
+    //    Cross-domain repo (already migrated to &mut PgConnection) — run on
+    //    the request's tx connection.
+    let beacon_opt = beacon_repo::get_beacons_by_business(tx.as_mut(), req.business_id).await?
         .into_iter().next();
 
     if let Some(beacon_summary) = beacon_opt {
         // Fetch full row with secret_key for HMAC validation.
-        if let Some(beacon) = beacon_repo::get_beacon_by_id(pool, beacon_summary.id).await? {
+        if let Some(beacon) = beacon_repo::get_beacon_by_id(tx.as_mut(), beacon_summary.id).await? {
             let expected = derive_witness_hmac(&beacon.secret_key, req.business_id, calendar_date, uid);
             if !hmac_eq(&expected, &req.beacon_witness_hmac) {
                 let _ = repository::create_presence_event(
-                    pool, uid, req.business_id, Some(beacon_summary.id), None, Some(req.box_id),
+                    tx.as_mut(), uid, req.business_id, Some(beacon_summary.id), None, Some(req.box_id),
                     "nfc_tap", None, None, None, None, None,
                     false, Some("invalid_beacon_witness_hmac"),
                     req.app_attest_assertion.as_deref(),
@@ -388,7 +409,7 @@ pub async fn record_nfc_tap(
                 bus.publish(DomainEvent::PresenceEventRecorded {
                     user_id: uid, event_type: "nfc_tap".into(), is_qualifying: false,
                 });
-                return build_status_response(pool, uid, req.business_id).await;
+                return build_status_response(tx.as_mut(), uid, req.business_id).await;
             }
         }
     }
@@ -399,13 +420,13 @@ pub async fn record_nfc_tap(
     )
     .bind(uid)
     .bind(req.box_id)
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
     // 5. Create qualifying presence event.
     let event = repository::create_presence_event(
-        pool, uid, req.business_id, None, None, Some(req.box_id),
+        tx.as_mut(), uid, req.business_id, None, None, Some(req.box_id),
         "nfc_tap", None, None, None, None, None,
         true, None,
         req.app_attest_assertion.as_deref(),
@@ -415,9 +436,10 @@ pub async fn record_nfc_tap(
     ).await?;
 
     // 6. Advance threshold.
-    advance_threshold(pool, uid, req.business_id, event.id, calendar_date, bus).await?;
+    advance_threshold(tx.as_mut(), uid, req.business_id, event.id, calendar_date, bus).await?;
 
-    // 7. Audit event.
+    // 7. Audit event. Audit writes use `pool` (separate connection) — they
+    //    commit independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool, Some(uid), None, "presence.nfc_tap",
         serde_json::json!({ "box_id": req.box_id, "business_id": req.business_id }),
@@ -427,21 +449,26 @@ pub async fn record_nfc_tap(
         user_id: uid, event_type: "nfc_tap".into(), is_qualifying: true,
     });
 
-    build_status_response(pool, uid, req.business_id).await
+    build_status_response(tx.as_mut(), uid, req.business_id).await
 }
 
 // ── Queries ───────────────────────────────────────────────────────────────────
 
 /// Return the current presence threshold state for a user.
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn get_presence_status(
     pool:    &PgPool,
     user_id: UserId,
 ) -> AppResult<PresenceStatusResponse> {
     let uid       = i32::from(user_id);
-    let threshold = repository::get_threshold_by_user(pool, uid).await?;
+    let mut conn  = pool.acquire().await.map_err(DomainError::Db)?;
+    let threshold = repository::get_threshold_by_user(&mut conn, uid).await?;
 
     let business_id = threshold.as_ref().map(|t| t.business_id).unwrap_or(0);
-    status_from_threshold(pool, uid, business_id, threshold.as_ref()).await
+    status_from_threshold(&mut conn, uid, business_id, threshold.as_ref()).await
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -450,8 +477,9 @@ pub async fn get_presence_status(
 mod tests {
     use super::*;
     use crate::{
-        domain::beacons::{repository as beacon_repo, service::derive_witness_hmac},
+        domain::beacons::service::derive_witness_hmac,
         event_bus::EventBus,
+        transaction::RlsTransaction,
         types::UserId,
     };
     use chrono::{DateTime, Duration, Utc};
@@ -544,11 +572,13 @@ mod tests {
         let hmac = derive_witness_hmac(&secret, biz_id, now.date_naive(), i32::from(uid));
         let bus  = EventBus::new();
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         let resp = record_beacon_dwell(
-            &pool, uid,
+            &mut tx, &pool, uid,
             dwell_req(beacon_id, biz_id, -65, 20, hmac, now),
             &bus,
         ).await.expect("qualifying dwell must succeed");
+        tx.commit().await.unwrap();
 
         assert_eq!(resp.event_count, 1);
         assert_eq!(resp.days_count,  1);
@@ -568,11 +598,13 @@ mod tests {
         let bus  = EventBus::new();
 
         // minimum_rssi_threshold is -70 — send -80 (below threshold)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         let resp = record_beacon_dwell(
-            &pool, uid,
+            &mut tx, &pool, uid,
             dwell_req(beacon_id, biz_id, -80, 20, hmac, now),
             &bus,
         ).await.expect("call must succeed");
+        tx.commit().await.unwrap();
 
         assert_eq!(resp.event_count, 0, "threshold must not advance for rejected event");
 
@@ -599,11 +631,13 @@ mod tests {
         let hmac = derive_witness_hmac(&secret, biz_id, now.date_naive(), i32::from(uid));
         let bus  = EventBus::new();
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         let resp = record_beacon_dwell(
-            &pool, uid,
+            &mut tx, &pool, uid,
             dwell_req(beacon_id, biz_id, -65, 10, hmac, now),  // 10 mins < 15 min minimum
             &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         assert_eq!(resp.event_count, 0);
 
@@ -628,11 +662,13 @@ mod tests {
         let bad_hmac = "deadbeef".repeat(8); // wrong HMAC — 64 chars, all wrong
         let bus  = EventBus::new();
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         let resp = record_beacon_dwell(
-            &pool, uid,
+            &mut tx, &pool, uid,
             dwell_req(beacon_id, biz_id, -65, 20, bad_hmac, now),
             &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         assert_eq!(resp.event_count, 0);
 
@@ -648,26 +684,35 @@ mod tests {
     #[sqlx::test(migrations = "../server/migrations")]
     async fn same_calendar_date_does_not_advance_days_count(pool: PgPool) {
         use fake::{Fake, faker::internet::en::SafeEmail};
+        use chrono::DateTime;
         let uid   = create_identity_confirmed_user(&pool, &SafeEmail().fake::<String>()).await;
         let owner = create_attested_user(&pool, &SafeEmail().fake::<String>()).await;
         let (biz_id, _, beacon_id, secret) =
             create_business_and_beacon(&pool, i32::from(owner)).await;
 
-        let day = Utc::now();
+        // Fixed mid-day UTC timestamp so `day + 2h` cannot roll over midnight.
+        // Time-sensitive `Utc::now()` previously made this test flaky when run
+        // late in the UTC day.
+        let day = DateTime::parse_from_rfc3339("2026-01-15T10:00:00Z")
+            .unwrap().with_timezone(&Utc);
         let bus = EventBus::new();
 
         // First dwell on day.
         let hmac1 = derive_witness_hmac(&secret, biz_id, day.date_naive(), i32::from(uid));
-        record_beacon_dwell(&pool, uid, dwell_req(beacon_id, biz_id, -65, 20, hmac1, day), &bus)
+        let mut tx1 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
+        record_beacon_dwell(&mut tx1, &pool, uid, dwell_req(beacon_id, biz_id, -65, 20, hmac1, day), &bus)
             .await.unwrap();
+        tx1.commit().await.unwrap();
 
         // Second dwell — same calendar date.
         let hmac2 = derive_witness_hmac(&secret, biz_id, day.date_naive(), i32::from(uid));
+        let mut tx2 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         let resp = record_beacon_dwell(
-            &pool, uid,
+            &mut tx2, &pool, uid,
             dwell_req(beacon_id, biz_id, -65, 20, hmac2, day + Duration::hours(2)),
             &bus,
         ).await.unwrap();
+        tx2.commit().await.unwrap();
 
         assert_eq!(resp.event_count, 2, "two events recorded");
         assert_eq!(resp.days_count,  1, "only one distinct day — days_count must not double-count");
@@ -688,11 +733,13 @@ mod tests {
             let hmac = derive_witness_hmac(
                 &secret, biz_id, started_at.date_naive(), i32::from(uid),
             );
+            let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
             record_beacon_dwell(
-                &pool, uid,
+                &mut tx, &pool, uid,
                 dwell_req(beacon_id, biz_id, -65, 20, hmac, started_at),
                 &bus,
             ).await.unwrap();
+            tx.commit().await.unwrap();
         }
 
         let resp = get_presence_status(&pool, uid).await.unwrap();
@@ -758,13 +805,15 @@ mod tests {
         let hmac   = derive_witness_hmac(&secret, biz_id, Utc::now().date_naive(), i32::from(uid));
         let bus    = EventBus::new();
 
-        let resp = record_nfc_tap(&pool, uid, RecordNfcTapRequest {
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
+        let resp = record_nfc_tap(&mut tx, &pool, uid, RecordNfcTapRequest {
             box_id,
             business_id:          biz_id,
             beacon_witness_hmac:  hmac,
             app_attest_assertion: None,
             device_identifier:    None,
         }, &bus).await.expect("NFC tap must succeed");
+        tx.commit().await.unwrap();
 
         assert_eq!(resp.event_count, 1, "threshold must advance after NFC tap");
 
@@ -797,12 +846,16 @@ mod tests {
 
         // First tap succeeds.
         let bus1 = EventBus::new();
-        record_nfc_tap(&pool, uid, make_req(), &bus1).await.expect("first tap must succeed");
+        let mut tx1 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
+        record_nfc_tap(&mut tx1, &pool, uid, make_req(), &bus1).await.expect("first tap must succeed");
+        tx1.commit().await.unwrap();
 
         // Second tap on same box must fail.
         let bus2 = EventBus::new();
-        let err = record_nfc_tap(&pool, uid, make_req(), &bus2)
+        let mut tx2 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
+        let err = record_nfc_tap(&mut tx2, &pool, uid, make_req(), &bus2)
             .await.expect_err("second tap must be rejected");
+        // tx2 is dropped on error path → automatic rollback.
         assert!(matches!(err, DomainError::Conflict(_)),
             "expected Conflict for already-tapped box, got: {err:?}");
     }
@@ -821,9 +874,11 @@ mod tests {
         let hmac = derive_witness_hmac(&secret, biz_id, now.date_naive(), i32::from(uid));
         let bus  = EventBus::new();
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         record_beacon_dwell(
-            &pool, uid, dwell_req(beacon_id, biz_id, -65, 20, hmac, now), &bus,
+            &mut tx, &pool, uid, dwell_req(beacon_id, biz_id, -65, 20, hmac, now), &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         let status = get_presence_status(&pool, uid).await.unwrap();
         assert_eq!(status.event_count, 1);
@@ -847,11 +902,13 @@ mod tests {
         let fake_hmac = derive_witness_hmac(fake_key, biz_id, now.date_naive(), i32::from(uid));
         let bus = EventBus::new();
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         let resp = record_beacon_dwell(
-            &pool, uid,
+            &mut tx, &pool, uid,
             dwell_req(beacon_id, biz_id, -65, 20, fake_hmac, now),
             &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         assert_eq!(resp.event_count, 0, "fake HMAC must not advance threshold");
 
@@ -883,9 +940,12 @@ mod tests {
             device_identifier:    None,
         };
 
-        record_nfc_tap(&pool, uid, make_req(), &bus).await.expect("first tap must succeed");
+        let mut tx1 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
+        record_nfc_tap(&mut tx1, &pool, uid, make_req(), &bus).await.expect("first tap must succeed");
+        tx1.commit().await.unwrap();
 
-        let err = record_nfc_tap(&pool, uid, make_req(), &bus)
+        let mut tx2 = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
+        let err = record_nfc_tap(&mut tx2, &pool, uid, make_req(), &bus)
             .await.expect_err("replay tap must be rejected");
         assert!(matches!(err, DomainError::Conflict(_)));
     }
@@ -907,11 +967,13 @@ mod tests {
         let hmac = derive_witness_hmac(&secret, biz_id, now.date_naive(), i32::from(uid));
         let bus  = EventBus::new();
 
+        let mut tx = RlsTransaction::begin(&pool, i32::from(uid)).await.unwrap();
         let err = record_beacon_dwell(
-            &pool, uid,
+            &mut tx, &pool, uid,
             dwell_req(beacon_id, biz_id, -65, 20, hmac, now),
             &bus,
         ).await.expect_err("inactive beacon must be rejected");
+        // tx is dropped on error path → automatic rollback.
 
         assert!(matches!(err, DomainError::NotFound),
             "inactive beacon must return NotFound, got: {err:?}");

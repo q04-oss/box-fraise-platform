@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 use chrono::{DateTime, NaiveDate, Utc};
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use crate::error::{AppResult, DomainError};
 use super::types::{IdentityCredentialRow, IDENTITY_CREDENTIAL_COLS};
@@ -8,7 +8,7 @@ use super::types::{IdentityCredentialRow, IDENTITY_CREDENTIAL_COLS};
 // ── Credentials ───────────────────────────────────────────────────────────────
 
 pub async fn create_identity_credential(
-    pool:                &PgPool,
+    conn:                &mut PgConnection,
     user_id:             i32,
     credential_type:     &str,
     external_session_id: Option<&str>,
@@ -26,26 +26,26 @@ pub async fn create_identity_credential(
     .bind(external_session_id)
     .bind(verified_at)
     .bind(cooling_ends_at)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_identity_credential_by_id(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     id:   i32,
 ) -> AppResult<Option<IdentityCredentialRow>> {
     sqlx::query_as(&format!(
         "SELECT {IDENTITY_CREDENTIAL_COLS} FROM identity_credentials WHERE id = $1"
     ))
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_identity_credential_by_session(
-    pool:       &PgPool,
+    conn:       &mut PgConnection,
     session_id: &str,
 ) -> AppResult<Option<IdentityCredentialRow>> {
     sqlx::query_as(&format!(
@@ -53,13 +53,13 @@ pub async fn get_identity_credential_by_session(
          WHERE external_session_id = $1"
     ))
     .bind(session_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_latest_credential_by_user(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
 ) -> AppResult<Option<IdentityCredentialRow>> {
     sqlx::query_as(&format!(
@@ -67,13 +67,13 @@ pub async fn get_latest_credential_by_user(
          WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1"
     ))
     .bind(user_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn update_stripe_webhook(
-    pool:          &PgPool,
+    conn:          &mut PgConnection,
     id:            i32,
     report_id:     Option<&str>,
     raw_status:    Option<&str>,
@@ -91,13 +91,13 @@ pub async fn update_stripe_webhook(
     .bind(report_id)
     .bind(raw_status)
     .bind(response_hash)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn complete_cooling(
-    pool:          &PgPool,
+    conn:          &mut PgConnection,
     credential_id: i32,
 ) -> AppResult<IdentityCredentialRow> {
     sqlx::query_as(&format!(
@@ -107,7 +107,7 @@ pub async fn complete_cooling(
          RETURNING {IDENTITY_CREDENTIAL_COLS}"
     ))
     .bind(credential_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -117,7 +117,7 @@ pub async fn complete_cooling(
 /// Insert a cooling-period app-open event.
 /// Returns `true` if a new row was created, `false` on same-day duplicate.
 pub async fn insert_cooling_event(
-    pool:                 &PgPool,
+    conn:                 &mut PgConnection,
     user_id:              i32,
     credential_id:        i32,
     device_identifier:    Option<&str>,
@@ -135,7 +135,7 @@ pub async fn insert_cooling_event(
     .bind(device_identifier)
     .bind(app_attest_assertion)
     .bind(calendar_date)
-    .execute(pool)
+    .execute(conn)
     .await
     .map_err(DomainError::Db)?
     .rows_affected();
@@ -144,7 +144,7 @@ pub async fn insert_cooling_event(
 
 /// Count distinct calendar days with a qualifying app open for this credential.
 pub async fn count_cooling_days(
-    pool:          &PgPool,
+    conn:          &mut PgConnection,
     user_id:       i32,
     credential_id: i32,
 ) -> AppResult<i64> {
@@ -154,7 +154,7 @@ pub async fn count_cooling_days(
     )
     .bind(user_id)
     .bind(credential_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }

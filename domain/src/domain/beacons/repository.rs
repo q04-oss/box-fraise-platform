@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 use chrono::NaiveDate;
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use crate::error::{AppResult, DomainError};
 use super::types::{
@@ -12,7 +12,7 @@ use super::types::{
 
 /// Insert a new beacon and return the full row including secret_key.
 pub async fn create_beacon(
-    pool:                  &PgPool,
+    conn:                  &mut PgConnection,
     location_id:           i32,
     business_id:           i32,
     secret_key:            &str,
@@ -27,26 +27,26 @@ pub async fn create_beacon(
     .bind(business_id)
     .bind(secret_key)
     .bind(minimum_rssi_threshold)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 /// Fetch a beacon by ID including secret_key — for HMAC derivation only.
-pub async fn get_beacon_by_id(pool: &PgPool, beacon_id: i32) -> AppResult<Option<BeaconRow>> {
+pub async fn get_beacon_by_id(conn: &mut PgConnection, beacon_id: i32) -> AppResult<Option<BeaconRow>> {
     sqlx::query_as(&format!(
         "SELECT {BEACON_COLS_WITH_SECRET} FROM beacons \
          WHERE id = $1 AND is_active = true"
     ))
     .bind(beacon_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 /// Fetch all active beacons for a business. Does NOT include secret_key.
 pub async fn get_beacons_by_business(
-    pool:        &PgPool,
+    conn:        &mut PgConnection,
     business_id: i32,
 ) -> AppResult<Vec<BeaconSummaryRow>> {
     sqlx::query_as(&format!(
@@ -55,7 +55,7 @@ pub async fn get_beacons_by_business(
          ORDER BY created_at DESC"
     ))
     .bind(business_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -63,7 +63,7 @@ pub async fn get_beacons_by_business(
 /// Rotate the secret key: old key preserved as previous_secret_key for the 24-hour
 /// grace period. Returns the updated full row.
 pub async fn rotate_secret_key(
-    pool:           &PgPool,
+    conn:           &mut PgConnection,
     beacon_id:      i32,
     new_secret_key: &str,
 ) -> AppResult<BeaconRow> {
@@ -78,7 +78,7 @@ pub async fn rotate_secret_key(
     ))
     .bind(beacon_id)
     .bind(new_secret_key)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -89,7 +89,7 @@ pub async fn rotate_secret_key(
 /// ON CONFLICT DO NOTHING — idempotent for repeated calls on the same day.
 /// Returns None if a row already existed (conflict path).
 pub async fn record_rotation(
-    pool:               &PgPool,
+    conn:               &mut PgConnection,
     beacon_id:          i32,
     calendar_date:      NaiveDate,
     expected_uuid_hash: &str,
@@ -104,7 +104,7 @@ pub async fn record_rotation(
     .bind(beacon_id)
     .bind(calendar_date)
     .bind(expected_uuid_hash)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -113,7 +113,7 @@ pub async fn record_rotation(
 
 /// Record a health check result for a beacon.
 pub async fn record_health(
-    pool:            &PgPool,
+    conn:            &mut PgConnection,
     beacon_id:       i32,
     is_responding:   bool,
     signal_strength: Option<i32>,
@@ -126,7 +126,7 @@ pub async fn record_health(
     .bind(beacon_id)
     .bind(is_responding)
     .bind(signal_strength)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }

@@ -7,6 +7,7 @@ use crate::{
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
+    transaction::RlsTransaction,
     types::UserId,
 };
 use crate::domain::auth::repository as user_repo;
@@ -156,7 +157,8 @@ fn sha256_hex(input: &str) -> String {
 /// 6. Writes verification_event and audit_event.
 /// 7. Publishes [`DomainEvent::BeaconCreated`].
 pub async fn create_beacon(
-    pool:      &PgPool,
+    tx:        &mut RlsTransaction,
+    pool:      &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     user_id:   UserId,
     req:       CreateBeaconRequest,
     event_bus: &EventBus,
@@ -173,8 +175,9 @@ pub async fn create_beacon(
         return Err(DomainError::Forbidden);
     }
 
-    // 2. Validate business ownership.
-    let business = business_repo::get_business_by_id(pool, req.business_id)
+    // 2. Validate business ownership. Cross-domain reads on the RLS-scoped
+    //    tx connection.
+    let business = business_repo::get_business_by_id(tx.as_mut(), req.business_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -186,7 +189,7 @@ pub async fn create_beacon(
     }
 
     // 3. Validate location.
-    let location = business_repo::get_location_by_id(pool, req.location_id)
+    let location = business_repo::get_location_by_id(tx.as_mut(), req.location_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -200,7 +203,7 @@ pub async fn create_beacon(
 
     // 5. Create beacon.
     let beacon = repository::create_beacon(
-        pool,
+        tx.as_mut(),
         location.id,
         business.id,
         &secret_key,
@@ -211,7 +214,7 @@ pub async fn create_beacon(
     let today      = Utc::now().date_naive();
     let daily_uuid = derive_daily_uuid(&secret_key, business.id, today);
     let uuid_hash  = sha256_hex(&daily_uuid);
-    repository::record_rotation(pool, beacon.id, today, &uuid_hash).await.ok();
+    repository::record_rotation(tx.as_mut(), beacon.id, today, &uuid_hash).await.ok();
 
     // 7. Write verification_event.
     if let Err(e) = sqlx::query(
@@ -227,13 +230,14 @@ pub async fn create_beacon(
         "business_id": business.id,
         "location_id": location.id,
     }))
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     {
         tracing::error!(error = %e, "verification_events insert failed for beacon");
     }
 
-    // 8. Audit event.
+    // 8. Audit event. Audit writes use `pool` (separate connection) — they
+    //    commit independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(i32::from(user_id)),
@@ -264,15 +268,16 @@ pub async fn create_beacon(
 /// 4. Records today's new UUID in the rotation log.
 /// 5. Writes audit_event "beacon.key_rotated".
 pub async fn rotate_key(
-    pool:      &PgPool,
+    tx:        &mut RlsTransaction,
+    pool:      &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     beacon_id: i32,
     user_id:   UserId,
     event_bus: &EventBus,
 ) -> AppResult<BeaconResponse> {
-    let (beacon, _) = get_beacon_authorized(pool, beacon_id, user_id).await?;
+    let (beacon, _) = get_beacon_authorized(tx, pool, beacon_id, user_id).await?;
 
     let new_secret = generate_secret_key();
-    let updated    = repository::rotate_secret_key(pool, beacon_id, &new_secret).await?;
+    let updated    = repository::rotate_secret_key(tx.as_mut(), beacon_id, &new_secret).await?;
 
     // Record new daily UUID for today.
     if let Some(bid) = updated.business_id {
@@ -280,7 +285,7 @@ pub async fn rotate_key(
         let new_uuid  = derive_daily_uuid(&new_secret, bid, today);
         let uuid_hash = sha256_hex(&new_uuid);
         // ON CONFLICT DO NOTHING — if already recorded today, this is fine.
-        repository::record_rotation(pool, beacon_id, today, &uuid_hash).await.ok();
+        repository::record_rotation(tx.as_mut(), beacon_id, today, &uuid_hash).await.ok();
     }
 
     audit::write(
@@ -305,12 +310,16 @@ pub async fn rotate_key(
 ///
 /// Privileged: only the business owner or a platform admin can call this.
 /// The UUID is never stored — it is derived at request time from the secret key.
+///
+/// Performs a `beacon_rotation_log` INSERT (idempotent), so this runs inside
+/// an `RlsTransaction`.
 pub async fn get_daily_uuid(
-    pool:      &PgPool,
+    tx:        &mut RlsTransaction,
+    pool:      &PgPool, // pool: for cross-domain authorization reads (left as-is per cleanup #3 rollout)
     beacon_id: i32,
     user_id:   UserId,
 ) -> AppResult<DailyUuidResponse> {
-    let (beacon, _) = get_beacon_authorized(pool, beacon_id, user_id).await?;
+    let (beacon, _) = get_beacon_authorized(tx, pool, beacon_id, user_id).await?;
 
     let business_id = beacon.business_id.ok_or(DomainError::NotFound)?;
     let today       = Utc::now().date_naive();
@@ -318,7 +327,7 @@ pub async fn get_daily_uuid(
 
     // Record rotation log entry (idempotent — ON CONFLICT DO NOTHING).
     let uuid_hash = sha256_hex(&uuid);
-    repository::record_rotation(pool, beacon_id, today, &uuid_hash).await.ok();
+    repository::record_rotation(tx.as_mut(), beacon_id, today, &uuid_hash).await.ok();
 
     // valid_until = end of today in UTC (midnight starting tomorrow)
     let valid_until = today
@@ -340,6 +349,10 @@ pub async fn get_daily_uuid(
 /// List all active beacons for a business.
 ///
 /// Privileged: only the business owner or a platform admin can call this.
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn list_beacons(
     pool:        &PgPool,
     business_id: i32,
@@ -350,8 +363,10 @@ pub async fn list_beacons(
         .await?
         .ok_or(DomainError::Unauthorized)?;
 
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+
     if !user.is_platform_admin {
-        let business = business_repo::get_business_by_id(pool, business_id)
+        let business = business_repo::get_business_by_id(&mut conn, business_id)
             .await?
             .ok_or(DomainError::NotFound)?;
         if business.primary_holder_id != i32::from(user_id) {
@@ -359,7 +374,7 @@ pub async fn list_beacons(
         }
     }
 
-    let rows = repository::get_beacons_by_business(pool, business_id).await?;
+    let rows = repository::get_beacons_by_business(&mut conn, business_id).await?;
     Ok(rows.into_iter().map(to_response_summary).collect())
 }
 
@@ -367,12 +382,17 @@ pub async fn list_beacons(
 
 /// Fetch a beacon and verify the requesting user is authorized.
 /// Returns `(BeaconRow, business_id)` on success.
+///
+/// Runs the beacon lookup inside `tx` (same connection as the caller's
+/// subsequent writes); cross-domain user/business reads still go through the
+/// pool — those are kept as-is per the cleanup #3 rollout plan.
 async fn get_beacon_authorized(
+    tx:        &mut RlsTransaction,
     pool:      &PgPool,
     beacon_id: i32,
     user_id:   UserId,
 ) -> AppResult<(BeaconRow, i32)> {
-    let beacon = repository::get_beacon_by_id(pool, beacon_id)
+    let beacon = repository::get_beacon_by_id(tx.as_mut(), beacon_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -384,7 +404,7 @@ async fn get_beacon_authorized(
         .ok_or(DomainError::Unauthorized)?;
 
     if !user.is_platform_admin {
-        let business = business_repo::get_business_by_id(pool, business_id)
+        let business = business_repo::get_business_by_id(tx.as_mut(), business_id)
             .await?
             .ok_or(DomainError::NotFound)?;
         if business.primary_holder_id != i32::from(user_id) {
@@ -401,6 +421,7 @@ async fn get_beacon_authorized(
 mod tests {
     use super::*;
     use crate::event_bus::EventBus;
+    use crate::transaction::RlsTransaction;
     use sqlx::PgPool;
 
     // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -468,9 +489,11 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, user_id).await;
         let bus                   = EventBus::new();
 
-        let resp = create_beacon(&pool, user_id, beacon_req(biz_id, loc_id), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
+        let resp = create_beacon(&mut tx, &pool, user_id, beacon_req(biz_id, loc_id), &bus)
             .await
             .expect("owner must be able to create a beacon");
+        tx.commit().await.unwrap();
 
         assert_eq!(resp.business_id, Some(biz_id));
         assert_eq!(resp.location_id, loc_id);
@@ -485,7 +508,8 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, owner_id).await;
         let bus                  = EventBus::new();
 
-        let err = create_beacon(&pool, other_id, beacon_req(biz_id, loc_id), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(other_id)).await.unwrap();
+        let err = create_beacon(&mut tx, &pool, other_id, beacon_req(biz_id, loc_id), &bus)
             .await
             .expect_err("non-owner must not create a beacon");
 
@@ -499,7 +523,8 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, owner_id).await;
         let bus                  = EventBus::new();
 
-        let err = create_beacon(&pool, unattested_id, beacon_req(biz_id, loc_id), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(unattested_id)).await.unwrap();
+        let err = create_beacon(&mut tx, &pool, unattested_id, beacon_req(biz_id, loc_id), &bus)
             .await
             .expect_err("unattested user must not create a beacon");
 
@@ -514,12 +539,16 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, user_id).await;
         let bus                  = EventBus::new();
 
-        let beacon = create_beacon(&pool, user_id, beacon_req(biz_id, loc_id), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
+        let beacon = create_beacon(&mut tx, &pool, user_id, beacon_req(biz_id, loc_id), &bus)
             .await.unwrap();
+        tx.commit().await.unwrap();
 
-        let resp = get_daily_uuid(&pool, beacon.id, user_id)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
+        let resp = get_daily_uuid(&mut tx, &pool, beacon.id, user_id)
             .await
             .expect("owner must get daily UUID");
+        tx.commit().await.unwrap();
 
         assert_eq!(resp.beacon_id, beacon.id);
         // UUID format: 8-4-4-4-12 (36 chars with hyphens)
@@ -534,10 +563,13 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, owner_id).await;
         let bus                  = EventBus::new();
 
-        let beacon = create_beacon(&pool, owner_id, beacon_req(biz_id, loc_id), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(owner_id)).await.unwrap();
+        let beacon = create_beacon(&mut tx, &pool, owner_id, beacon_req(biz_id, loc_id), &bus)
             .await.unwrap();
+        tx.commit().await.unwrap();
 
-        let err = get_daily_uuid(&pool, beacon.id, other_id)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(other_id)).await.unwrap();
+        let err = get_daily_uuid(&mut tx, &pool, beacon.id, other_id)
             .await
             .expect_err("non-owner must not get daily UUID");
 
@@ -552,8 +584,10 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, user_id).await;
         let bus                  = EventBus::new();
 
-        create_beacon(&pool, user_id, beacon_req(biz_id, loc_id), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
+        create_beacon(&mut tx, &pool, user_id, beacon_req(biz_id, loc_id), &bus)
             .await.unwrap();
+        tx.commit().await.unwrap();
 
         // Fetch the beacon to get original secret_key.
         let (beacon_id,): (i32,) = sqlx::query_as(
@@ -573,7 +607,9 @@ mod tests {
         .unwrap();
 
         // Rotate the key.
-        rotate_key(&pool, beacon_id, user_id, &bus).await.unwrap();
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user_id)).await.unwrap();
+        rotate_key(&mut tx, &pool, beacon_id, user_id, &bus).await.unwrap();
+        tx.commit().await.unwrap();
 
         let (new_key, prev_key): (String, Option<String>) = sqlx::query_as(
             "SELECT secret_key, previous_secret_key FROM beacons WHERE id = $1"
@@ -647,7 +683,8 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, owner_id).await;
         let bus                  = EventBus::new();
 
-        let err = create_beacon(&pool, attacker_id, beacon_req(biz_id, loc_id), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(attacker_id)).await.unwrap();
+        let err = create_beacon(&mut tx, &pool, attacker_id, beacon_req(biz_id, loc_id), &bus)
             .await.expect_err("attacker must not create beacon on another user's business");
         assert!(matches!(err, DomainError::Forbidden));
     }
@@ -661,10 +698,13 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, owner_id).await;
         let bus                  = EventBus::new();
 
-        let beacon = create_beacon(&pool, owner_id, beacon_req(biz_id, loc_id), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(owner_id)).await.unwrap();
+        let beacon = create_beacon(&mut tx, &pool, owner_id, beacon_req(biz_id, loc_id), &bus)
             .await.unwrap();
+        tx.commit().await.unwrap();
 
-        let err = get_daily_uuid(&pool, beacon.id, attacker_id)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(attacker_id)).await.unwrap();
+        let err = get_daily_uuid(&mut tx, &pool, beacon.id, attacker_id)
             .await.expect_err("attacker must not get daily UUID for another user's beacon");
         assert!(matches!(err, DomainError::Forbidden));
     }
@@ -678,10 +718,13 @@ mod tests {
         let (biz_id, loc_id) = create_business_with_location(&pool, owner_id).await;
         let bus                  = EventBus::new();
 
-        let beacon = create_beacon(&pool, owner_id, beacon_req(biz_id, loc_id), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(owner_id)).await.unwrap();
+        let beacon = create_beacon(&mut tx, &pool, owner_id, beacon_req(biz_id, loc_id), &bus)
             .await.unwrap();
+        tx.commit().await.unwrap();
 
-        let err = rotate_key(&pool, beacon.id, attacker_id, &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(attacker_id)).await.unwrap();
+        let err = rotate_key(&mut tx, &pool, beacon.id, attacker_id, &bus)
             .await.expect_err("attacker must not rotate another user's beacon key");
         assert!(matches!(err, DomainError::Forbidden));
     }
@@ -697,8 +740,10 @@ mod tests {
         let bus                  = EventBus::new();
 
         // Create beacon — get back BeaconResponse (no secret field).
-        let beacon = create_beacon(&pool, owner_id, beacon_req(biz_id, loc_id), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(owner_id)).await.unwrap();
+        let beacon = create_beacon(&mut tx, &pool, owner_id, beacon_req(biz_id, loc_id), &bus)
             .await.unwrap();
+        tx.commit().await.unwrap();
 
         // Fetch the actual secret_key from the DB for the "does the value appear?" check.
         let actual_secret: String = sqlx::query_scalar(

@@ -50,7 +50,14 @@ pub async fn initiate(
     if body.provider.trim().is_empty() {
         return Err(AppError::bad_request("provider is required"));
     }
-    let resp = service::initiate_check(&state.db, user_id, body, &state.event_bus).await?;
+    // Hardening cleanup #3 — RLS-scoped per-request transaction.
+    // Begin → call service with `&mut tx` → on Ok, commit; on Err, the
+    // `?` operator drops `tx` and Postgres rolls back automatically.
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::initiate_check(&mut tx, &state.db, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -79,6 +86,11 @@ pub async fn webhook(
         .map(|k| k.expose_secret().to_owned())
         .unwrap_or_default();
 
+    // Webhook bypass — stays on `&PgPool` (no `RlsTransaction`). The provider is
+    // unauthenticated, so there is no JWT user id to scope RLS to. Authenticity
+    // is established by the HMAC of the raw payload (`response_hash`) and the
+    // route is constrained to looking up a row by its `external_check_id`.
+    // RLS bypass here is by design — see service::handle_webhook docs.
     service::handle_webhook(&state.db, payload, &body, &hmac_key, &state.event_bus).await?;
     Ok(StatusCode::OK)
 }

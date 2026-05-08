@@ -6,6 +6,7 @@ use crate::{
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
+    transaction::RlsTransaction,
     types::UserId,
 };
 use crate::domain::auth::repository as user_repo;
@@ -58,7 +59,8 @@ fn is_valid_pass(row: &BackgroundCheckRow) -> bool {
 ///   - For criminal checks: sanctions AND identity_fraud must already be passed
 ///   - No pending check of the same type already exists
 pub async fn initiate_check(
-    pool:      &PgPool,
+    tx:        &mut RlsTransaction,
+    pool:      &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     user_id:   UserId,
     req:       InitiateCheckRequest,
     event_bus: &EventBus,
@@ -66,6 +68,7 @@ pub async fn initiate_check(
     let uid = i32::from(user_id);
 
     // 1. User must exist and not be banned.
+    //    user_repo::find_by_id still takes &PgPool (different domain — not migrated yet).
     let user = user_repo::find_by_id(pool, user_id)
         .await?
         .ok_or(DomainError::Unauthorized)?;
@@ -77,7 +80,10 @@ pub async fn initiate_check(
     }
 
     // 3. Latest identity credential must have cooling complete.
-    let cred = ic_repo::get_latest_credential_by_user(pool, uid)
+    //    Cross-domain read — runs on the same RLS-scoped connection as the
+    //    rest of this transaction so identity_credentials RLS sees the
+    //    requesting user.
+    let cred = ic_repo::get_latest_credential_by_user(tx.as_mut(), uid)
         .await?
         .ok_or(DomainError::Forbidden)?;
     if cred.cooling_completed_at.is_none() {
@@ -99,8 +105,8 @@ pub async fn initiate_check(
     }
 
     if req.check_type == "criminal" {
-        let sanctions = repository::get_latest_check_by_type(pool, uid, "sanctions").await?;
-        let fraud     = repository::get_latest_check_by_type(pool, uid, "identity_fraud").await?;
+        let sanctions = repository::get_latest_check_by_type(tx.as_mut(), uid, "sanctions").await?;
+        let fraud     = repository::get_latest_check_by_type(tx.as_mut(), uid, "identity_fraud").await?;
         let sanctions_ok = sanctions.as_ref().map(is_valid_pass).unwrap_or(false);
         let fraud_ok     = fraud.as_ref().map(is_valid_pass).unwrap_or(false);
         if !sanctions_ok || !fraud_ok {
@@ -116,7 +122,7 @@ pub async fn initiate_check(
     )
     .bind(uid)
     .bind(&req.check_type)
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -126,7 +132,7 @@ pub async fn initiate_check(
 
     // 6. Create the check record.
     let check = repository::create_check(
-        pool,
+        tx.as_mut(),
         uid,
         cred.id,
         &req.provider,
@@ -134,6 +140,8 @@ pub async fn initiate_check(
     ).await?;
 
     // 7. Audit event.
+    //    Audit writes use `pool` (separate connection) — they commit
+    //    independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(uid),
@@ -142,7 +150,7 @@ pub async fn initiate_check(
         serde_json::json!({ "check_type": &check.check_type, "provider": &check.provider }),
     ).await;
 
-    // 7b. Verification event.
+    // 7b. Verification event — written inside the tx so it rolls back with the check on failure.
     if let Err(e) = sqlx::query(
         "INSERT INTO verification_events \
          (user_id, event_type, actor_id, metadata) \
@@ -150,7 +158,7 @@ pub async fn initiate_check(
     )
     .bind(uid)
     .bind(serde_json::json!({ "check_id": check.id, "check_type": &check.check_type }))
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     {
         tracing::error!(error = %e, "verification_events (background_check_initiated) insert failed");
@@ -171,6 +179,12 @@ pub async fn initiate_check(
 /// Looks up the check by external_check_id, stamps result + response_hash,
 /// writes verification and audit events, and advances status. Returns Ok(())
 /// for unknown external_check_ids (multi-env safety).
+///
+/// **Webhook bypass — kept on `&PgPool` (no `RlsTransaction`).** The provider
+/// is unauthenticated; there is no JWT user id to scope RLS to. Authenticity
+/// is established by the HMAC of the raw payload (`response_hash`), and the
+/// route is constrained to looking up a row by its `external_check_id`. RLS
+/// is therefore bypassed by design — do not migrate this to `RlsTransaction`.
 pub async fn handle_webhook(
     pool:               &PgPool,
     payload:            CheckWebhookPayload,
@@ -179,7 +193,8 @@ pub async fn handle_webhook(
     event_bus:          &EventBus,
 ) -> AppResult<()> {
     // 1. Look up the check.
-    let Some(check) = repository::get_check_by_external_id(pool, &payload.external_check_id).await? else {
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    let Some(check) = repository::get_check_by_external_id(&mut conn, &payload.external_check_id).await? else {
         tracing::warn!(
             external_check_id = %payload.external_check_id,
             "background check webhook for unknown external_check_id — ignoring"
@@ -197,7 +212,7 @@ pub async fn handle_webhook(
 
     // 4. Update the check.
     let updated = repository::update_check_result(
-        pool,
+        &mut conn,
         check.id,
         &payload.status,
         Some(&payload.external_check_id),
@@ -205,6 +220,7 @@ pub async fn handle_webhook(
         Some(Utc::now()),
         Some(expires_at),
     ).await?;
+    drop(conn);
 
     // 5–7. Write events based on outcome.
     match payload.status.as_str() {
@@ -325,12 +341,15 @@ pub async fn handle_webhook(
 // ── Queries ───────────────────────────────────────────────────────────────────
 
 /// Return the aggregate background check status for a user.
+///
+/// Read-only, no audit — kept on `&PgPool`.
 pub async fn get_status(
     pool:    &PgPool,
     user_id: UserId,
 ) -> AppResult<BackgroundCheckStatusResponse> {
     let uid    = i32::from(user_id);
-    let checks = repository::get_checks_by_user(pool, uid).await?;
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    let checks = repository::get_checks_by_user(&mut conn, uid).await?;
 
     // Latest of each type (list is DESC by created_at, so first match = latest).
     let sanctions_row = checks.iter().find(|c| c.check_type == "sanctions");
@@ -360,9 +379,23 @@ pub async fn get_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{event_bus::EventBus, types::UserId};
+    use crate::{event_bus::EventBus, transaction::RlsTransaction, types::UserId};
     use chrono::Duration;
     use sqlx::PgPool;
+
+    /// Helper: open an RlsTransaction, call `initiate_check`, commit on Ok.
+    /// Mirrors the handler pattern so tests exercise the same path as production.
+    async fn initiate_check_via_tx(
+        pool:      &PgPool,
+        user_id:   UserId,
+        req:       InitiateCheckRequest,
+        event_bus: &EventBus,
+    ) -> AppResult<BackgroundCheckResponse> {
+        let mut tx = RlsTransaction::begin(pool, i32::from(user_id)).await?;
+        let resp = initiate_check(&mut tx, pool, user_id, req, event_bus).await?;
+        tx.commit().await?;
+        Ok(resp)
+    }
 
     // ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -437,7 +470,7 @@ mod tests {
         create_completed_credential(&pool, i32::from(uid)).await;
         let bus = EventBus::new();
 
-        let resp = initiate_check(&pool, uid, req("sanctions"), &bus)
+        let resp = initiate_check_via_tx(&pool, uid, req("sanctions"), &bus)
             .await.expect("initiate_check must succeed");
 
         assert_eq!(resp.check_type, "sanctions");
@@ -452,7 +485,7 @@ mod tests {
         create_incomplete_credential(&pool, i32::from(uid)).await;
         let bus = EventBus::new();
 
-        let err = initiate_check(&pool, uid, req("sanctions"), &bus)
+        let err = initiate_check_via_tx(&pool, uid, req("sanctions"), &bus)
             .await.unwrap_err();
         assert!(matches!(err, DomainError::Forbidden), "expected Forbidden, got: {err:?}");
     }
@@ -463,7 +496,7 @@ mod tests {
         let uid = create_registered_user(&pool, &SafeEmail().fake::<String>()).await;
         let bus = EventBus::new();
 
-        let err = initiate_check(&pool, uid, req("sanctions"), &bus)
+        let err = initiate_check_via_tx(&pool, uid, req("sanctions"), &bus)
             .await.unwrap_err();
         assert!(matches!(err, DomainError::Forbidden), "expected Forbidden, got: {err:?}");
     }
@@ -475,7 +508,7 @@ mod tests {
         create_completed_credential(&pool, i32::from(uid)).await;
         let bus = EventBus::new();
 
-        let err = initiate_check(&pool, uid, InitiateCheckRequest {
+        let err = initiate_check_via_tx(&pool, uid, InitiateCheckRequest {
             check_type: "criminal".to_owned(),
             provider:   "comply_advantage".to_owned(),
         }, &bus).await.unwrap_err();
@@ -493,9 +526,11 @@ mod tests {
         external_id: &str,
     ) -> i32 {
         let cred_id = create_completed_credential(&pool, i32::from(uid)).await;
+        let mut conn = pool.acquire().await.unwrap();
         let check = repository::create_check(
-            &pool, i32::from(uid), cred_id, "comply_advantage", check_type,
+            &mut conn, i32::from(uid), cred_id, "comply_advantage", check_type,
         ).await.unwrap();
+        drop(conn);
         sqlx::query(
             "UPDATE background_checks SET external_check_id = $1 WHERE id = $2"
         )
@@ -617,7 +652,7 @@ mod tests {
         }
 
         // Now initiate criminal check (should be allowed since required checks passed).
-        let criminal = initiate_check(&pool, uid, InitiateCheckRequest {
+        let criminal = initiate_check_via_tx(&pool, uid, InitiateCheckRequest {
             check_type: "criminal".to_owned(),
             provider:   "comply_advantage".to_owned(),
         }, &bus).await.expect("criminal check must be initiatable after required checks pass");
@@ -675,7 +710,7 @@ mod tests {
         create_completed_credential(&pool, i32::from(uid)).await;
         let bus = EventBus::new();
 
-        let err = initiate_check(&pool, uid, InitiateCheckRequest {
+        let err = initiate_check_via_tx(&pool, uid, InitiateCheckRequest {
             check_type: "criminal".to_owned(),
             provider:   "comply_advantage".to_owned(),
         }, &bus).await.unwrap_err();
@@ -689,9 +724,9 @@ mod tests {
         create_completed_credential(&pool, i32::from(uid)).await;
         let bus = EventBus::new();
 
-        initiate_check(&pool, uid, req("sanctions"), &bus).await.unwrap();
+        initiate_check_via_tx(&pool, uid, req("sanctions"), &bus).await.unwrap();
 
-        let err = initiate_check(&pool, uid, req("sanctions"), &bus).await.unwrap_err();
+        let err = initiate_check_via_tx(&pool, uid, req("sanctions"), &bus).await.unwrap_err();
         assert!(matches!(err, DomainError::Conflict(_)),
             "duplicate pending check must be Conflict, got: {err:?}");
     }
@@ -703,7 +738,7 @@ mod tests {
         create_incomplete_credential(&pool, i32::from(uid)).await;
         let bus = EventBus::new();
 
-        let err = initiate_check(&pool, uid, req("sanctions"), &bus).await.unwrap_err();
+        let err = initiate_check_via_tx(&pool, uid, req("sanctions"), &bus).await.unwrap_err();
         assert!(matches!(err, DomainError::Forbidden));
     }
 }

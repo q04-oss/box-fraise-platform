@@ -49,7 +49,11 @@ pub async fn grant_role(
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<GrantRoleRequest>,
 ) -> AppResult<(StatusCode, Json<StaffRoleResponse>)> {
-    let resp = service::grant_staff_role(&state.db, user_id, body, &state.event_bus).await?;
+    let mut tx = box_fraise_domain::transaction::AdminRlsTransaction::begin(
+        &state.db,
+    ).await?;
+    let resp = service::grant_staff_role(&mut tx, &state.db, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -82,7 +86,11 @@ pub async fn schedule_visit(
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<ScheduleVisitRequest>,
 ) -> AppResult<(StatusCode, Json<StaffVisitResponse>)> {
-    let resp = service::schedule_visit(&state.db, user_id, body, &state.event_bus).await?;
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::schedule_visit(&mut tx, &state.db, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -118,7 +126,12 @@ pub async fn arrive(
     Path(visit_id):       Path<i32>,
     AppJson(body):        AppJson<ArriveAtVisitRequest>,
 ) -> AppResult<Json<StaffVisitResponse>> {
-    Ok(Json(service::arrive_at_visit(&state.db, visit_id, user_id, body).await?))
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::arrive_at_visit(&mut tx, &state.db, visit_id, user_id, body).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// POST /api/staff/visits/:id/complete
@@ -138,7 +151,12 @@ pub async fn complete(
     Path(visit_id):       Path<i32>,
     AppJson(body):        AppJson<CompleteVisitRequest>,
 ) -> AppResult<Json<StaffVisitResponse>> {
-    Ok(Json(service::complete_visit(&state.db, visit_id, user_id, body, &state.event_bus).await?))
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::complete_visit(&mut tx, &state.db, visit_id, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// POST /api/staff/visits/:id/quality-assessment
@@ -158,9 +176,13 @@ pub async fn quality_assessment(
     Path(visit_id):       Path<i32>,
     AppJson(body):        AppJson<QualityAssessmentRequest>,
 ) -> AppResult<(StatusCode, Json<QualityAssessmentRow>)> {
-    let resp = service::submit_quality_assessment(
-        &state.db, visit_id, user_id, body, &state.event_bus,
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
     ).await?;
+    let resp = service::submit_quality_assessment(
+        &mut tx, &state.db, visit_id, user_id, body, &state.event_bus,
+    ).await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 

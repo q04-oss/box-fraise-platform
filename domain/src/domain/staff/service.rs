@@ -6,6 +6,7 @@ use crate::{
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
+    transaction::{AdminRlsTransaction, RlsTransaction},
     types::UserId,
 };
 use crate::domain::auth::repository as user_repo;
@@ -64,7 +65,10 @@ fn is_sha256_hex(s: &str) -> bool {
 
 /// Grant a staff role to a user (BFIP Section 6.1).
 ///
-/// Requires the requesting user to be a platform admin.
+/// Requires the requesting user to be a platform admin. Runs under
+/// `AdminRlsTransaction` (cleanup #3) so the per-tx `app.is_admin`
+/// setting is in place for any RLS-protected reads/writes.
+///
 /// `staff_roles` is for **operational** roles only (`delivery_staff`,
 /// `attestation_reviewer`). Platform-admin status lives on
 /// `users.is_platform_admin` — see `docs/ACCESS_CONTROL_MATRIX.md` Section 5.
@@ -72,7 +76,8 @@ fn is_sha256_hex(s: &str) -> bool {
 /// layer; the database CHECK constraint added in migration 008 is a
 /// defence-in-depth backstop.
 pub async fn grant_staff_role(
-    pool:               &PgPool,
+    tx:                 &mut AdminRlsTransaction,
+    pool:               &PgPool, // pool: for audit writes + cross-domain user_repo reads (auth domain not yet migrated)
     requesting_user_id: UserId,
     req:                GrantRoleRequest,
     event_bus:          &EventBus,
@@ -82,6 +87,10 @@ pub async fn grant_staff_role(
     // 1. Requesting user must be platform_admin (boolean column — sole
     //    enforcement path; a staff_roles row would be authoritative-looking
     //    but inert).
+    //
+    // Cross-domain read into the auth domain — auth repository has not yet
+    // been migrated to the `&mut PgConnection` shape, so we keep the
+    // `&pool` call here per the cleanup #3 rollout rule.
     let requester = user_repo::find_by_id(pool, requesting_user_id)
         .await?
         .ok_or(DomainError::Unauthorized)?;
@@ -115,7 +124,7 @@ pub async fn grant_staff_role(
     }
 
     // 4. No active duplicate role at the same location.
-    if let Some(existing) = repository::get_active_role(pool, req.user_id, &req.role).await? {
+    if let Some(existing) = repository::get_active_role(tx.as_mut(), req.user_id, &req.role).await? {
         if existing.location_id == req.location_id {
             return Err(DomainError::conflict(
                 "user already has an active role of this type at this location",
@@ -125,7 +134,7 @@ pub async fn grant_staff_role(
 
     // 5. Create the role.
     let role = repository::grant_role(
-        pool,
+        tx.as_mut(),
         req.user_id,
         req.location_id,
         &req.role,
@@ -135,6 +144,8 @@ pub async fn grant_staff_role(
     ).await?;
 
     // 6. Audit event.
+    // Audit writes use `pool` (separate connection) — they commit
+    // independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(rid),
@@ -153,11 +164,16 @@ pub async fn grant_staff_role(
 }
 
 /// List all active staff roles for the requesting user.
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires
+/// a pool connection internally to satisfy the repository's
+/// `&mut PgConnection` signature.
 pub async fn get_my_roles(
     pool:    &PgPool,
     user_id: UserId,
 ) -> AppResult<Vec<StaffRoleResponse>> {
-    let rows = repository::get_active_roles_by_user(pool, i32::from(user_id)).await?;
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    let rows = repository::get_active_roles_by_user(&mut conn, i32::from(user_id)).await?;
     Ok(rows.into_iter().map(to_role_response).collect())
 }
 
@@ -166,7 +182,8 @@ pub async fn get_my_roles(
 /// Delivery staff can only schedule at their assigned location.
 /// Platform admins can schedule at any location.
 pub async fn schedule_visit(
-    pool:               &PgPool,
+    tx:                 &mut RlsTransaction,
+    pool:               &PgPool, // pool: for audit writes + cross-domain user_repo reads (auth domain not yet migrated)
     requesting_user_id: UserId,
     req:                ScheduleVisitRequest,
     event_bus:          &EventBus,
@@ -180,7 +197,7 @@ pub async fn schedule_visit(
     if user.is_banned { return Err(DomainError::Forbidden); }
 
     if !user.is_platform_admin {
-        let role = repository::get_active_role(pool, uid, "delivery_staff")
+        let role = repository::get_active_role(tx.as_mut(), uid, "delivery_staff")
             .await?
             .ok_or(DomainError::Forbidden)?;
 
@@ -200,7 +217,7 @@ pub async fn schedule_visit(
 
     // 4. Create visit.
     let visit = repository::create_visit(
-        pool,
+        tx.as_mut(),
         req.location_id,
         uid,
         &req.visit_type,
@@ -211,6 +228,8 @@ pub async fn schedule_visit(
     ).await?;
 
     // 5. Audit event.
+    // Audit writes use `pool` (separate connection) — they commit
+    // independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(uid),
@@ -230,7 +249,8 @@ pub async fn schedule_visit(
 
 /// Record arrival at a scheduled visit (sets status to in_progress).
 pub async fn arrive_at_visit(
-    pool:               &PgPool,
+    tx:                 &mut RlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     visit_id:           i32,
     requesting_user_id: UserId,
     req:                ArriveAtVisitRequest,
@@ -238,7 +258,7 @@ pub async fn arrive_at_visit(
     let uid = i32::from(requesting_user_id);
 
     // 1. Visit must exist and be scheduled.
-    let visit = repository::get_visit_by_id(pool, visit_id)
+    let visit = repository::get_visit_by_id(tx.as_mut(), visit_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -253,7 +273,7 @@ pub async fn arrive_at_visit(
 
     // 3. Update to in_progress.
     let updated = repository::update_visit_arrived(
-        pool,
+        tx.as_mut(),
         visit_id,
         Utc::now(),
         req.arrived_latitude,
@@ -261,6 +281,8 @@ pub async fn arrive_at_visit(
     ).await?;
 
     // 4. Audit event.
+    // Audit writes use `pool` (separate connection) — they commit
+    // independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(uid),
@@ -274,7 +296,8 @@ pub async fn arrive_at_visit(
 
 /// Mark a visit completed with box count and evidence.
 pub async fn complete_visit(
-    pool:               &PgPool,
+    tx:                 &mut RlsTransaction,
+    pool:               &PgPool, // pool: for audit writes + cross-domain user_repo reads (auth domain not yet migrated)
     visit_id:           i32,
     requesting_user_id: UserId,
     req:                CompleteVisitRequest,
@@ -283,7 +306,7 @@ pub async fn complete_visit(
     let uid = i32::from(requesting_user_id);
 
     // 1. Visit must be in_progress.
-    let visit = repository::get_visit_by_id(pool, visit_id)
+    let visit = repository::get_visit_by_id(tx.as_mut(), visit_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -326,7 +349,7 @@ pub async fn complete_visit(
 
     // 4. Update to completed.
     let updated = repository::update_visit_completed(
-        pool,
+        tx.as_mut(),
         visit_id,
         req.actual_box_count,
         req.delivery_signature.as_deref(),
@@ -335,6 +358,8 @@ pub async fn complete_visit(
     ).await?;
 
     // 5. Audit event.
+    // Audit writes use `pool` (separate connection) — they commit
+    // independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(uid),
@@ -351,7 +376,8 @@ pub async fn complete_visit(
 
 /// Submit a quality assessment for a business during a staff visit (BFIP Section 12.3).
 pub async fn submit_quality_assessment(
-    pool:               &PgPool,
+    tx:                 &mut RlsTransaction,
+    pool:               &PgPool, // pool: for audit writes + cross-domain user_repo reads (auth domain not yet migrated)
     visit_id:           i32,
     requesting_user_id: UserId,
     req:                QualityAssessmentRequest,
@@ -360,7 +386,7 @@ pub async fn submit_quality_assessment(
     let uid = i32::from(requesting_user_id);
 
     // 1. Visit must be in_progress or completed.
-    let visit = repository::get_visit_by_id(pool, visit_id)
+    let visit = repository::get_visit_by_id(tx.as_mut(), visit_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -380,7 +406,7 @@ pub async fn submit_quality_assessment(
 
     // 3. Create quality assessment.
     let assessment = repository::create_quality_assessment(
-        pool,
+        tx.as_mut(),
         visit_id,
         req.business_id,
         uid,
@@ -392,7 +418,7 @@ pub async fn submit_quality_assessment(
 
     // 4. Record in history and get current failure count.
     let fail_count = repository::record_assessment_history(
-        pool,
+        tx.as_mut(),
         req.business_id,
         assessment.id,
         assessment.overall_pass,
@@ -409,7 +435,7 @@ pub async fn submit_quality_assessment(
             )
             .bind(uid).bind(req.business_id).bind(uid)
             .bind(serde_json::json!({ "fail_count": fail_count }))
-            .execute(pool).await
+            .execute(tx.as_mut()).await
             {
                 tracing::error!(error = %e, "verification_events (business_approaching_suspension) failed");
             }
@@ -422,7 +448,7 @@ pub async fn submit_quality_assessment(
             )
             .bind(uid).bind(req.business_id).bind(uid)
             .bind(serde_json::json!({ "fail_count": fail_count }))
-            .execute(pool).await
+            .execute(tx.as_mut()).await
             {
                 tracing::error!(error = %e, "verification_events (business_suspended) failed");
             }
@@ -438,6 +464,8 @@ pub async fn submit_quality_assessment(
     }
 
     // 6. Audit event.
+    // Audit writes use `pool` (separate connection) — they commit
+    // independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(uid),
@@ -461,6 +489,10 @@ pub async fn submit_quality_assessment(
 }
 
 /// List visits — platform admins see all, delivery staff see their own.
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires
+/// a pool connection internally to satisfy the repository's
+/// `&mut PgConnection` signature.
 pub async fn list_visits(
     pool:    &PgPool,
     user_id: UserId,
@@ -468,10 +500,11 @@ pub async fn list_visits(
     let uid  = i32::from(user_id);
     let user = user_repo::find_by_id(pool, user_id).await?.ok_or(DomainError::Unauthorized)?;
 
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
     let rows = if user.is_platform_admin {
-        repository::get_all_visits(pool).await?
+        repository::get_all_visits(&mut conn).await?
     } else {
-        repository::get_visits_by_staff(pool, uid).await?
+        repository::get_visits_by_staff(&mut conn, uid).await?
     };
 
     Ok(rows.into_iter().map(to_visit_response).collect())
@@ -555,6 +588,70 @@ mod tests {
         }
     }
 
+    // ── Tx-driver helpers — open the right wrapper, call the service, commit ─
+
+    async fn call_grant_staff_role(
+        pool:               &PgPool,
+        requesting_user_id: UserId,
+        req:                GrantRoleRequest,
+        event_bus:          &EventBus,
+    ) -> AppResult<StaffRoleResponse> {
+        let mut tx = AdminRlsTransaction::begin(pool).await?;
+        let resp = grant_staff_role(&mut tx, pool, requesting_user_id, req, event_bus).await?;
+        tx.commit().await?;
+        Ok(resp)
+    }
+
+    async fn call_schedule_visit(
+        pool:               &PgPool,
+        requesting_user_id: UserId,
+        req:                ScheduleVisitRequest,
+        event_bus:          &EventBus,
+    ) -> AppResult<StaffVisitResponse> {
+        let mut tx = RlsTransaction::begin(pool, i32::from(requesting_user_id)).await?;
+        let resp = schedule_visit(&mut tx, pool, requesting_user_id, req, event_bus).await?;
+        tx.commit().await?;
+        Ok(resp)
+    }
+
+    async fn call_arrive_at_visit(
+        pool:               &PgPool,
+        visit_id:           i32,
+        requesting_user_id: UserId,
+        req:                ArriveAtVisitRequest,
+    ) -> AppResult<StaffVisitResponse> {
+        let mut tx = RlsTransaction::begin(pool, i32::from(requesting_user_id)).await?;
+        let resp = arrive_at_visit(&mut tx, pool, visit_id, requesting_user_id, req).await?;
+        tx.commit().await?;
+        Ok(resp)
+    }
+
+    async fn call_complete_visit(
+        pool:               &PgPool,
+        visit_id:           i32,
+        requesting_user_id: UserId,
+        req:                CompleteVisitRequest,
+        event_bus:          &EventBus,
+    ) -> AppResult<StaffVisitResponse> {
+        let mut tx = RlsTransaction::begin(pool, i32::from(requesting_user_id)).await?;
+        let resp = complete_visit(&mut tx, pool, visit_id, requesting_user_id, req, event_bus).await?;
+        tx.commit().await?;
+        Ok(resp)
+    }
+
+    async fn call_submit_quality_assessment(
+        pool:               &PgPool,
+        visit_id:           i32,
+        requesting_user_id: UserId,
+        req:                QualityAssessmentRequest,
+        event_bus:          &EventBus,
+    ) -> AppResult<QualityAssessmentRow> {
+        let mut tx = RlsTransaction::begin(pool, i32::from(requesting_user_id)).await?;
+        let resp = submit_quality_assessment(&mut tx, pool, visit_id, requesting_user_id, req, event_bus).await?;
+        tx.commit().await?;
+        Ok(resp)
+    }
+
     // ── Tests 1–3: grant_staff_role ───────────────────────────────────────────
 
     #[sqlx::test(migrations = "../server/migrations")]
@@ -565,7 +662,7 @@ mod tests {
         let loc_id = create_location(&pool).await;
         let bus    = EventBus::new();
 
-        let resp = grant_staff_role(
+        let resp = call_grant_staff_role(
             &pool, admin,
             grant_req(i32::from(target), "delivery_staff", Some(loc_id)),
             &bus,
@@ -584,7 +681,7 @@ mod tests {
         let loc_id    = create_location(&pool).await;
         let bus       = EventBus::new();
 
-        let err = grant_staff_role(
+        let err = call_grant_staff_role(
             &pool, non_admin,
             grant_req(i32::from(target), "delivery_staff", Some(loc_id)),
             &bus,
@@ -599,7 +696,7 @@ mod tests {
         let target = create_user(&pool, &SafeEmail().fake::<String>()).await;
         let bus    = EventBus::new();
 
-        let err = grant_staff_role(
+        let err = call_grant_staff_role(
             &pool, admin,
             grant_req(i32::from(target), "delivery_staff", None),
             &bus,
@@ -622,7 +719,7 @@ mod tests {
         let bus    = EventBus::new();
 
         // Service-layer rejection: actionable InvalidInput.
-        let err = grant_staff_role(
+        let err = call_grant_staff_role(
             &pool, admin,
             grant_req(i32::from(target), "platform_admin", None),
             &bus,
@@ -675,7 +772,7 @@ mod tests {
         .fetch_one(&pool).await.unwrap();
         assert_eq!(row_count.0, 0, "fixture must not insert any staff_roles row");
 
-        grant_staff_role(
+        call_grant_staff_role(
             &pool, admin_via_boolean,
             grant_req(i32::from(target), "delivery_staff", Some(loc_id)),
             &bus,
@@ -696,7 +793,7 @@ mod tests {
         .execute(&pool).await.unwrap();
 
         let target2 = create_user(&pool, &SafeEmail().fake::<String>()).await;
-        let err = grant_staff_role(
+        let err = call_grant_staff_role(
             &pool, pseudo,
             grant_req(i32::from(target2), "delivery_staff", Some(loc_id)),
             &bus,
@@ -718,9 +815,9 @@ mod tests {
         let loc_id = create_location(&pool).await;
         let bus    = EventBus::new();
 
-        grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
+        call_grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
 
-        let resp = schedule_visit(&pool, staff, schedule_req(loc_id), &bus)
+        let resp = call_schedule_visit(&pool, staff, schedule_req(loc_id), &bus)
             .await.expect("delivery_staff must be able to schedule visit");
 
         assert_eq!(resp.status, "scheduled");
@@ -734,7 +831,7 @@ mod tests {
         let loc_id    = create_location(&pool).await;
         let bus       = EventBus::new();
 
-        let err = schedule_visit(&pool, non_staff, schedule_req(loc_id), &bus)
+        let err = call_schedule_visit(&pool, non_staff, schedule_req(loc_id), &bus)
             .await.unwrap_err();
         assert!(matches!(err, DomainError::Forbidden));
     }
@@ -749,10 +846,10 @@ mod tests {
         let loc_id = create_location(&pool).await;
         let bus    = EventBus::new();
 
-        grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
-        let visit = schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
+        call_grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
+        let visit = call_schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
 
-        let resp = arrive_at_visit(
+        let resp = call_arrive_at_visit(
             &pool, visit.id, staff,
             ArriveAtVisitRequest { arrived_latitude: Some(53.5461), arrived_longitude: Some(-113.4938) },
         ).await.expect("arrive must succeed");
@@ -770,10 +867,10 @@ mod tests {
         let loc_id = create_location(&pool).await;
         let bus    = EventBus::new();
 
-        grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
-        let visit = schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
+        call_grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
+        let visit = call_schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
 
-        let err = arrive_at_visit(
+        let err = call_arrive_at_visit(
             &pool, visit.id, other,
             ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
         ).await.unwrap_err();
@@ -790,11 +887,11 @@ mod tests {
         let loc_id = create_location(&pool).await;
         let bus    = EventBus::new();
 
-        grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
-        let visit = schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
-        arrive_at_visit(&pool, visit.id, staff, ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None }).await.unwrap();
+        call_grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
+        let visit = call_schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
+        call_arrive_at_visit(&pool, visit.id, staff, ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None }).await.unwrap();
 
-        let resp = complete_visit(
+        let resp = call_complete_visit(
             &pool, visit.id, staff,
             CompleteVisitRequest { actual_box_count: 5, delivery_signature: None, evidence_hash: None, evidence_storage_uri: None },
             &bus,
@@ -815,11 +912,11 @@ mod tests {
         let loc_id = create_location(&pool).await;
         let bus    = EventBus::new();
 
-        grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
-        let visit = schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
-        arrive_at_visit(&pool, visit.id, staff, ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None }).await.unwrap();
+        call_grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
+        let visit = call_schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
+        call_arrive_at_visit(&pool, visit.id, staff, ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None }).await.unwrap();
 
-        let err = complete_visit(
+        let err = call_complete_visit(
             &pool, visit.id, staff,
             CompleteVisitRequest {
                 actual_box_count:     1,
@@ -847,13 +944,13 @@ mod tests {
         let loc_id = create_location(&pool).await;
         let bus    = EventBus::new();
 
-        grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
-        let visit = schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
-        arrive_at_visit(&pool, visit.id, staff, ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None }).await.unwrap();
+        call_grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
+        let visit = call_schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
+        call_arrive_at_visit(&pool, visit.id, staff, ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None }).await.unwrap();
 
         // Three flavours of badness — wrong length, uppercase, and non-hex.
         for bad in ["not_hex", "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"] {
-            let err = complete_visit(
+            let err = call_complete_visit(
                 &pool, visit.id, staff,
                 CompleteVisitRequest {
                     actual_box_count:     1,
@@ -880,9 +977,9 @@ mod tests {
         let biz_id  = create_business_at_location(pool, i32::from(admin), loc_id).await;
         let bus     = EventBus::new();
 
-        grant_staff_role(pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
-        let visit = schedule_visit(pool, staff, schedule_req(loc_id), &bus).await.unwrap();
-        arrive_at_visit(pool, visit.id, staff, ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None }).await.unwrap();
+        call_grant_staff_role(pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
+        let visit = call_schedule_visit(pool, staff, schedule_req(loc_id), &bus).await.unwrap();
+        call_arrive_at_visit(pool, visit.id, staff, ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None }).await.unwrap();
 
         (admin, staff, loc_id, biz_id, visit.id)
     }
@@ -892,7 +989,7 @@ mod tests {
         let (_, staff, _, biz_id, visit_id) = setup_staff_with_visit(&pool).await;
         let bus = EventBus::new();
 
-        let assessment = submit_quality_assessment(&pool, visit_id, staff, quality_req(biz_id, true), &bus)
+        let assessment = call_submit_quality_assessment(&pool, visit_id, staff, quality_req(biz_id, true), &bus)
             .await.expect("quality assessment must succeed");
 
         assert!(assessment.overall_pass);
@@ -908,7 +1005,7 @@ mod tests {
         let (_, staff, _, biz_id, visit_id) = setup_staff_with_visit(&pool).await;
         let bus = EventBus::new();
 
-        submit_quality_assessment(&pool, visit_id, staff, quality_req(biz_id, false), &bus).await.unwrap();
+        call_submit_quality_assessment(&pool, visit_id, staff, quality_req(biz_id, false), &bus).await.unwrap();
 
         let fail_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM business_assessment_history WHERE business_id = $1 AND passed = false"
@@ -922,7 +1019,7 @@ mod tests {
         let bus = EventBus::new();
 
         for _ in 0..3 {
-            submit_quality_assessment(&pool, visit_id, staff, quality_req(biz_id, false), &bus).await.unwrap();
+            call_submit_quality_assessment(&pool, visit_id, staff, quality_req(biz_id, false), &bus).await.unwrap();
         }
 
         let suspended: bool = sqlx::query_scalar(
@@ -942,7 +1039,7 @@ mod tests {
         let bus = EventBus::new();
 
         for _ in 0..2 {
-            submit_quality_assessment(&pool, visit_id, staff, quality_req(biz_id, false), &bus).await.unwrap();
+            call_submit_quality_assessment(&pool, visit_id, staff, quality_req(biz_id, false), &bus).await.unwrap();
         }
 
         let ve_count: i64 = sqlx::query_scalar(
@@ -966,7 +1063,7 @@ mod tests {
         let loc_id   = create_location(&pool).await;
         let bus      = EventBus::new();
 
-        let err = grant_staff_role(
+        let err = call_grant_staff_role(
             &pool, attacker,
             grant_req(i32::from(target), "delivery_staff", Some(loc_id)),
             &bus,
@@ -983,9 +1080,9 @@ mod tests {
         let other_loc  = create_location(&pool).await;
         let bus        = EventBus::new();
 
-        grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(their_loc)), &bus).await.unwrap();
+        call_grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(their_loc)), &bus).await.unwrap();
 
-        let err = schedule_visit(&pool, staff, schedule_req(other_loc), &bus).await.unwrap_err();
+        let err = call_schedule_visit(&pool, staff, schedule_req(other_loc), &bus).await.unwrap_err();
         assert!(matches!(err, DomainError::Forbidden),
             "delivery_staff must not schedule at a different location, got: {err:?}");
     }
@@ -999,10 +1096,10 @@ mod tests {
         let loc_id    = create_location(&pool).await;
         let bus       = EventBus::new();
 
-        grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
-        let visit = schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
+        call_grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
+        let visit = call_schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
 
-        let err = arrive_at_visit(
+        let err = call_arrive_at_visit(
             &pool, visit.id, attacker,
             ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
         ).await.unwrap_err();
@@ -1017,11 +1114,11 @@ mod tests {
         let loc_id = create_location(&pool).await;
         let bus    = EventBus::new();
 
-        grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
-        let visit = schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
+        call_grant_staff_role(&pool, admin, grant_req(i32::from(staff), "delivery_staff", Some(loc_id)), &bus).await.unwrap();
+        let visit = call_schedule_visit(&pool, staff, schedule_req(loc_id), &bus).await.unwrap();
         // Visit is in 'scheduled' state — not in_progress.
 
-        let err = complete_visit(
+        let err = call_complete_visit(
             &pool, visit.id, staff,
             CompleteVisitRequest { actual_box_count: 0, delivery_signature: None, evidence_hash: None, evidence_storage_uri: None },
             &bus,

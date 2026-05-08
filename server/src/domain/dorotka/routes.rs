@@ -66,10 +66,18 @@ pub async fn ask(
     // bucket, so an unauthenticated bot can't sneak past via 403s.
     rate_check(&state, ip)?;
 
+    // Hardening cleanup #3 — open a single per-request RLS-scoped tx so
+    // the soultoken gate read and the (currently audit-only) ask call run
+    // on the same connection with `app.user_id` set. On any `?` failure
+    // below the wrapper drops and Postgres rolls back automatically.
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+
     // Hardening §6 — soultoken gate. Runs before any LLM-config access so
     // a missing ANTHROPIC_API_KEY can't downgrade a forbidden response to
     // a 500.
-    service::require_active_soultoken(&state.db, user_id).await?;
+    service::require_active_soultoken(&mut tx, user_id).await?;
 
     // Sanitise input — returns 400 for empty or oversized queries
     let query = service::sanitise(&body.query)
@@ -87,6 +95,7 @@ pub async fn ask(
         .unwrap_or(box_fraise_integrations::anthropic::DEFAULT_API_URL);
 
     let answer = service::ask_dorotka(
+        &mut tx,
         &state.db,
         &state.http,
         api_key.expose_secret(),
@@ -96,6 +105,8 @@ pub async fn ask(
         ip,
         &state.event_bus,
     ).await?;
+
+    tx.commit().await?;
 
     Ok(Json(AskResponse {
         answer,

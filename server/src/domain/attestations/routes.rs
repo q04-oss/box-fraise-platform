@@ -40,7 +40,11 @@ pub async fn initiate(
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<InitiateAttestationRequest>,
 ) -> AppResult<(StatusCode, Json<VisitAttestationRow>)> {
-    let resp = service::initiate_attestation(&state.db, user_id, body, &state.event_bus).await?;
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::initiate_attestation(&mut tx, &state.db, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -90,9 +94,12 @@ pub async fn staff_sign(
     Path(attestation_id): Path<i32>,
     AppJson(body):        AppJson<StaffSignAttestationRequest>,
 ) -> AppResult<Json<VisitAttestationRow>> {
-    Ok(Json(
-        service::staff_sign(&state.db, attestation_id, user_id, body, &state.event_bus).await?,
-    ))
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::staff_sign(&mut tx, &state.db, attestation_id, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// POST /api/attestations/:id/reviewer-sign
@@ -111,9 +118,12 @@ pub async fn reviewer_sign(
     Path(attestation_id): Path<i32>,
     AppJson(body):        AppJson<ReviewerSignAttestationRequest>,
 ) -> AppResult<Json<VisitAttestationRow>> {
-    Ok(Json(
-        service::reviewer_sign(&state.db, attestation_id, user_id, body, &state.event_bus).await?,
-    ))
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::reviewer_sign(&mut tx, &state.db, attestation_id, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// POST /api/attestations/:id/reject
@@ -133,8 +143,10 @@ pub async fn reject(
     Path(attestation_id): Path<i32>,
     AppJson(body):        AppJson<RejectAttestationRequest>,
 ) -> AppResult<Json<VisitAttestationRow>> {
-    Ok(Json(
-        service::reject_attestation(&state.db, attestation_id, user_id, body, &state.event_bus)
-            .await?,
-    ))
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::reject_attestation(&mut tx, &state.db, attestation_id, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }

@@ -1,12 +1,12 @@
 #![allow(missing_docs)]
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use crate::error::{AppResult, DomainError};
 use super::types::{BackgroundCheckRow, BACKGROUND_CHECK_COLS};
 
 pub async fn create_check(
-    pool:                   &PgPool,
+    conn:                   &mut PgConnection,
     user_id:                i32,
     identity_credential_id: i32,
     provider:               &str,
@@ -22,13 +22,13 @@ pub async fn create_check(
     .bind(identity_credential_id)
     .bind(provider)
     .bind(check_type)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_checks_by_user(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
 ) -> AppResult<Vec<BackgroundCheckRow>> {
     sqlx::query_as(&format!(
@@ -36,13 +36,13 @@ pub async fn get_checks_by_user(
          WHERE user_id = $1 ORDER BY created_at DESC"
     ))
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_check_by_external_id(
-    pool:              &PgPool,
+    conn:              &mut PgConnection,
     external_check_id: &str,
 ) -> AppResult<Option<BackgroundCheckRow>> {
     sqlx::query_as(&format!(
@@ -50,13 +50,13 @@ pub async fn get_check_by_external_id(
          WHERE external_check_id = $1"
     ))
     .bind(external_check_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn update_check_result(
-    pool:              &PgPool,
+    conn:              &mut PgConnection,
     check_id:          i32,
     status:            &str,
     external_check_id: Option<&str>,
@@ -80,13 +80,13 @@ pub async fn update_check_result(
     .bind(response_hash)
     .bind(checked_at)
     .bind(expires_at)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_latest_check_by_type(
-    pool:       &PgPool,
+    conn:       &mut PgConnection,
     user_id:    i32,
     check_type: &str,
 ) -> AppResult<Option<BackgroundCheckRow>> {
@@ -97,7 +97,7 @@ pub async fn get_latest_check_by_type(
     ))
     .bind(user_id)
     .bind(check_type)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }

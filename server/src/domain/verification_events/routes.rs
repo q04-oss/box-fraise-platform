@@ -38,7 +38,15 @@ pub async fn my_trail(
     State(state):         State<AppState>,
     RequireUser(user_id): RequireUser,
 ) -> AppResult<Json<UserAuditTrailResponse>> {
-    Ok(Json(service::get_my_audit_trail(&state.db, user_id).await?))
+    // Hardening cleanup #3 — RLS-scoped per-request transaction.
+    // Begin → call service with `&mut tx` → on Ok, commit; on Err, the
+    // `?` operator drops `tx` and Postgres rolls back automatically.
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::get_my_audit_trail(&mut tx, &state.db, user_id).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// GET /api/audit/journey
@@ -75,5 +83,13 @@ pub async fn admin_trail(
     RequireUser(user_id): RequireUser,
     Path(target_id):      Path<i32>,
 ) -> AppResult<Json<UserAuditTrailResponse>> {
-    Ok(Json(service::get_admin_audit_trail(&state.db, user_id, target_id).await?))
+    // Hardening cleanup #3 — admin-scope RLS transaction. Caller-side
+    // platform_admin enforcement runs inside the service against the pool
+    // before any RLS-protected reads execute on `tx`.
+    let mut tx = box_fraise_domain::transaction::AdminRlsTransaction::begin(
+        &state.db,
+    ).await?;
+    let resp = service::get_admin_audit_trail(&mut tx, &state.db, user_id, target_id).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }

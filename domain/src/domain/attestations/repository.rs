@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use crate::error::{AppResult, DomainError};
 use super::types::{
@@ -11,7 +11,7 @@ use super::types::{
 // ── Attestations ──────────────────────────────────────────────────────────────
 
 pub async fn create_attestation(
-    pool:                  &PgPool,
+    conn:                  &mut PgConnection,
     visit_id:              i32,
     user_id:               i32,
     staff_id:              i32,
@@ -36,26 +36,26 @@ pub async fn create_attestation(
     .bind(reviewer_2_id)
     .bind(photo_hash)
     .bind(photo_storage_uri)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_attestation_by_id(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     id:   i32,
 ) -> AppResult<Option<VisitAttestationRow>> {
     sqlx::query_as(&format!(
         "SELECT {ATTESTATION_COLS} FROM visit_attestations WHERE id = $1"
     ))
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_attestations_by_user(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
 ) -> AppResult<Vec<VisitAttestationRow>> {
     sqlx::query_as(&format!(
@@ -63,13 +63,13 @@ pub async fn get_attestations_by_user(
          WHERE user_id = $1 ORDER BY created_at DESC"
     ))
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_pending_attestations_for_reviewer(
-    pool:        &PgPool,
+    conn:        &mut PgConnection,
     reviewer_id: i32,
 ) -> AppResult<Vec<VisitAttestationRow>> {
     sqlx::query_as(&format!(
@@ -79,13 +79,13 @@ pub async fn get_pending_attestations_for_reviewer(
          ORDER BY co_sign_deadline ASC NULLS LAST"
     ))
     .bind(reviewer_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn update_attestation_staff_signed(
-    pool:                   &PgPool,
+    conn:                   &mut PgConnection,
     id:                     i32,
     staff_signature:        &str,
     photo_hash:             Option<&str>,
@@ -112,13 +112,13 @@ pub async fn update_attestation_staff_signed(
     .bind(location_confirmed)
     .bind(user_present_confirmed)
     .bind(co_sign_deadline)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn approve_attestation(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     id:   i32,
 ) -> AppResult<VisitAttestationRow> {
     sqlx::query_as(&format!(
@@ -126,13 +126,13 @@ pub async fn approve_attestation(
          WHERE id = $1 RETURNING {ATTESTATION_COLS}"
     ))
     .bind(id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn set_rejected(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     id:   i32,
 ) -> AppResult<VisitAttestationRow> {
     sqlx::query_as(&format!(
@@ -140,7 +140,7 @@ pub async fn set_rejected(
          WHERE id = $1 RETURNING {ATTESTATION_COLS}"
     ))
     .bind(id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -148,7 +148,7 @@ pub async fn set_rejected(
 // ── Attempt history ───────────────────────────────────────────────────────────
 
 pub async fn record_attempt(
-    pool:                  &PgPool,
+    conn:                  &mut PgConnection,
     user_id:               i32,
     attestation_id:        i32,
     visit_id:              i32,
@@ -175,7 +175,7 @@ pub async fn record_attempt(
     .bind(outcome)
     .bind(rejection_reason)
     .bind(rejection_reviewer_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -183,7 +183,7 @@ pub async fn record_attempt(
 // ── Reviewer assignment log ───────────────────────────────────────────────────
 
 pub async fn log_reviewer_assignment(
-    pool:              &PgPool,
+    conn:              &mut PgConnection,
     visit_id:          i32,
     reviewer_id:       i32,
     cosign_count:      i32,
@@ -202,7 +202,7 @@ pub async fn log_reviewer_assignment(
     .bind(collusion_passed)
     .bind(collusion_details)
     .bind(cosign_count)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -217,7 +217,7 @@ pub async fn log_reviewer_assignment(
 /// `ON CONFLICT DO NOTHING` prevents double-signing; zero rows_affected ⇒
 /// the reviewer has already signed, and we return `DomainError::Conflict`.
 pub async fn record_reviewer_signature(
-    pool:                   &PgPool,
+    conn:                   &mut PgConnection,
     visit_id:               i32,
     reviewer_id:            i32,
     deadline:               DateTime<Utc>,
@@ -235,7 +235,7 @@ pub async fn record_reviewer_signature(
     .bind(deadline)
     .bind(signature)
     .bind(evidence_hash_reviewed)
-    .execute(pool)
+    .execute(conn)
     .await
     .map_err(DomainError::Db)?;
 
@@ -252,7 +252,7 @@ pub async fn record_reviewer_signature(
 /// value (`verifying_key_hex:signature_hex` after Hardening Section 1c) — the
 /// service layer parses and re-verifies them via aggregated Ed25519.
 pub async fn check_both_reviewers_signed(
-    pool:          &PgPool,
+    conn:          &mut PgConnection,
     visit_id:      i32,
     reviewer_1_id: i32,
     reviewer_2_id: i32,
@@ -266,7 +266,7 @@ pub async fn check_both_reviewers_signed(
     .bind(visit_id)
     .bind(reviewer_1_id)
     .bind(reviewer_2_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)?;
 

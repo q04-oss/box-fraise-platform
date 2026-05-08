@@ -50,9 +50,16 @@ pub async fn create(
         return Err(AppError::unprocessable("address is required"));
     }
 
-    let resp = service::create_business(
-        &state.db, user_id, body, &state.event_bus,
+    // Hardening cleanup #3 — RLS-scoped per-request transaction.
+    // Begin → call service with `&mut tx` → on Ok, commit; on Err, the
+    // `?` operator drops `tx` and Postgres rolls back automatically.
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
     ).await?;
+    let resp = service::create_business(
+        &mut tx, &state.db, user_id, body, &state.event_bus,
+    ).await?;
+    tx.commit().await?;
 
     Ok((StatusCode::CREATED, Json(resp)))
 }

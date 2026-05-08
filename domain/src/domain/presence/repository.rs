@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 use chrono::{DateTime, NaiveDate, Utc};
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use crate::error::{AppResult, DomainError};
 use super::types::{
@@ -11,7 +11,7 @@ use super::types::{
 // ── Sessions ──────────────────────────────────────────────────────────────────
 
 pub async fn create_presence_session(
-    pool:               &PgPool,
+    conn:               &mut PgConnection,
     user_id:            i32,
     business_id:        i32,
     beacon_id:          Option<i32>,
@@ -34,7 +34,7 @@ pub async fn create_presence_session(
     .bind(started_at)
     .bind(ended_at)
     .bind(total_dwell_minutes)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -43,7 +43,7 @@ pub async fn create_presence_session(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn create_presence_event(
-    pool:                   &PgPool,
+    conn:                   &mut PgConnection,
     user_id:                i32,
     business_id:            i32,
     beacon_id:              Option<i32>,
@@ -88,13 +88,13 @@ pub async fn create_presence_event(
     .bind(beacon_witness_hmac)
     .bind(hardware_identifier)
     .bind(calendar_date)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_presence_events_by_user(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
 ) -> AppResult<Vec<PresenceEventRow>> {
     sqlx::query_as(&format!(
@@ -102,7 +102,7 @@ pub async fn get_presence_events_by_user(
          WHERE user_id = $1 ORDER BY occurred_at DESC"
     ))
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -112,7 +112,7 @@ pub async fn get_presence_events_by_user(
 /// Atomically create or touch a presence threshold record for a user.
 /// ON CONFLICT (user_id): one threshold per user — if exists, update updated_at only.
 pub async fn get_or_create_threshold(
-    pool:        &PgPool,
+    conn:        &mut PgConnection,
     user_id:     i32,
     business_id: i32,
 ) -> AppResult<PresenceThresholdRow> {
@@ -124,13 +124,13 @@ pub async fn get_or_create_threshold(
     ))
     .bind(user_id)
     .bind(business_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn update_threshold(
-    pool:                     &PgPool,
+    conn:                     &mut PgConnection,
     threshold_id:             i32,
     event_count:              i32,
     days_count:               i32,
@@ -150,13 +150,13 @@ pub async fn update_threshold(
     .bind(days_count)
     .bind(last_qualifying_event_at)
     .bind(threshold_met_at)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_threshold_by_user(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
 ) -> AppResult<Option<PresenceThresholdRow>> {
     sqlx::query_as(&format!(
@@ -164,7 +164,7 @@ pub async fn get_threshold_by_user(
          WHERE user_id = $1"
     ))
     .bind(user_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -173,7 +173,7 @@ pub async fn get_threshold_by_user(
 
 /// Link a qualifying presence event to a threshold. Idempotent — ON CONFLICT DO NOTHING.
 pub async fn record_qualifying_event(
-    pool:             &PgPool,
+    conn:             &mut PgConnection,
     threshold_id:     i32,
     presence_event_id: i32,
 ) -> AppResult<()> {
@@ -183,7 +183,7 @@ pub async fn record_qualifying_event(
     )
     .bind(threshold_id)
     .bind(presence_event_id)
-    .execute(pool)
+    .execute(conn)
     .await
     .map_err(DomainError::Db)?;
     Ok(())
@@ -191,7 +191,7 @@ pub async fn record_qualifying_event(
 
 /// Fetch all presence events that have been linked to a threshold.
 pub async fn get_qualifying_events(
-    pool:         &PgPool,
+    conn:         &mut PgConnection,
     threshold_id: i32,
 ) -> AppResult<Vec<PresenceEventRow>> {
     // Columns must be prefixed with pe. to disambiguate from qpe.id in the JOIN.
@@ -208,7 +208,7 @@ pub async fn get_qualifying_events(
          ORDER BY pe.occurred_at"
     )
     .bind(threshold_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }

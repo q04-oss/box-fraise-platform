@@ -6,6 +6,7 @@ use crate::{
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
+    transaction::RlsTransaction,
     types::UserId,
 };
 use crate::domain::auth::repository as user_repo;
@@ -52,7 +53,8 @@ fn to_box_response(row: VisitBoxRow) -> VisitBoxResponse {
 ///
 /// User must exist and not be banned. Business must be active.
 pub async fn create_order(
-    pool:      &PgPool,
+    tx:        &mut RlsTransaction,
+    pool:      &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     user_id:   UserId,
     req:       CreateOrderRequest,
     event_bus: &EventBus,
@@ -70,7 +72,7 @@ pub async fn create_order(
         "SELECT is_active FROM businesses WHERE id = $1 AND deleted_at IS NULL"
     )
     .bind(req.business_id)
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -96,7 +98,7 @@ pub async fn create_order(
 
     // 4. Create order.
     let order = repository::create_order(
-        pool,
+        tx.as_mut(),
         uid,
         req.business_id,
         req.variety_description.as_deref(),
@@ -105,6 +107,8 @@ pub async fn create_order(
     ).await?;
 
     // 5. Audit + event.
+    // Audit writes use `pool` (separate connection) — they commit
+    // independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(uid),
@@ -131,7 +135,8 @@ pub async fn create_order(
 ///
 /// Requesting user must have `delivery_staff` role.
 pub async fn activate_box(
-    pool:               &PgPool,
+    tx:                 &mut RlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     visit_id:           i32,
     requesting_user_id: UserId,
     req:                ActivateBoxRequest,
@@ -146,7 +151,7 @@ pub async fn activate_box(
            AND (expires_at IS NULL OR expires_at > now())"
     )
     .bind(uid)
-    .fetch_one(pool)
+    .fetch_one(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -159,7 +164,7 @@ pub async fn activate_box(
         "SELECT COUNT(*) FROM staff_visits WHERE id = $1"
     )
     .bind(visit_id)
-    .fetch_one(pool)
+    .fetch_one(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -168,17 +173,19 @@ pub async fn activate_box(
     }
 
     // 3. Create visit_box record.
-    let vbox = repository::create_visit_box(pool, visit_id, &req.nfc_chip_uid, 1).await?;
+    let vbox = repository::create_visit_box(tx.as_mut(), visit_id, &req.nfc_chip_uid, 1).await?;
 
     // 4. Activate the box.
     let activated = repository::activate_box_db(
-        pool,
+        tx.as_mut(),
         vbox.id,
         &req.delivery_signature,
         req.expires_at,
     ).await?;
 
     // 5. Audit.
+    // Audit writes use `pool` (separate connection) — they commit
+    // independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(uid),
@@ -199,7 +206,8 @@ pub async fn activate_box(
 /// Single-use enforced at DB level via `WHERE tapped_at IS NULL`.
 /// A second tap records clone detection and returns `Conflict`.
 pub async fn collect_order(
-    pool:      &PgPool,
+    tx:        &mut RlsTransaction,
+    pool:      &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     user_id:   UserId,
     req:       CollectOrderRequest,
     event_bus: &EventBus,
@@ -213,7 +221,7 @@ pub async fn collect_order(
     if user.is_banned { return Err(DomainError::Forbidden); }
 
     // 2. Look up box.
-    let box_row = repository::get_box_by_uid(pool, &req.nfc_chip_uid)
+    let box_row = repository::get_box_by_uid(tx.as_mut(), &req.nfc_chip_uid)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -242,11 +250,13 @@ pub async fn collect_order(
     }
 
     // 3. Atomically tap the box (single-use guarantee at DB level).
-    let tapped = repository::tap_box(pool, box_row.id, uid).await?;
+    let tapped = repository::tap_box(tx.as_mut(), box_row.id, uid).await?;
 
     if tapped.is_none() {
         // Another request won the race — this is a clone detection event.
-        let _ = repository::record_clone_detected(pool, box_row.id).await;
+        let _ = repository::record_clone_detected(tx.as_mut(), box_row.id).await;
+        // Audit writes use `pool` (separate connection) — they commit
+        // independently so the audit row lands even if `tx` is rolled back.
         audit::write(
             pool,
             Some(uid),
@@ -262,19 +272,21 @@ pub async fn collect_order(
 
     // 4. Find the order for this box.
     let order = if let Some(order_id) = box_row.assigned_order_id {
-        repository::get_order_by_id(pool, order_id)
+        repository::get_order_by_id(tx.as_mut(), order_id)
             .await?
             .ok_or(DomainError::NotFound)?
     } else {
-        repository::find_pending_order_for_visit(pool, uid, box_row.visit_id)
+        repository::find_pending_order_for_visit(tx.as_mut(), uid, box_row.visit_id)
             .await?
             .ok_or(DomainError::NotFound)?
     };
 
     // 5. Collect the order.
-    let collected = repository::collect_order_db(pool, order.id, box_row.id).await?;
+    let collected = repository::collect_order_db(tx.as_mut(), order.id, box_row.id).await?;
 
     // 6. Audit + event.
+    // Audit writes use `pool` (separate connection) — they commit
+    // independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(uid),
@@ -296,11 +308,16 @@ pub async fn collect_order(
 }
 
 /// Return all orders for the authenticated user.
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn get_my_orders(
     pool:    &PgPool,
     user_id: UserId,
 ) -> AppResult<Vec<OrderResponse>> {
-    let rows = repository::get_orders_by_user(pool, i32::from(user_id)).await?;
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    let rows = repository::get_orders_by_user(&mut conn, i32::from(user_id)).await?;
     Ok(rows.into_iter().map(to_order_response).collect())
 }
 
@@ -308,14 +325,15 @@ pub async fn get_my_orders(
 ///
 /// Only the order owner may cancel. Collected orders cannot be cancelled.
 pub async fn cancel_order(
-    pool:      &PgPool,
+    tx:        &mut RlsTransaction,
+    pool:      &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     order_id:  i32,
     user_id:   UserId,
 ) -> AppResult<OrderResponse> {
     let uid = i32::from(user_id);
 
     // 1. Load order — must belong to this user.
-    let order = repository::get_order_by_id(pool, order_id)
+    let order = repository::get_order_by_id(tx.as_mut(), order_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -334,8 +352,10 @@ pub async fn cancel_order(
     }
 
     // 3. Cancel.
-    let cancelled = repository::cancel_order_db(pool, order_id).await?;
+    let cancelled = repository::cancel_order_db(tx.as_mut(), order_id).await?;
 
+    // Audit writes use `pool` (separate connection) — they commit
+    // independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(uid),
@@ -348,6 +368,10 @@ pub async fn cancel_order(
 }
 
 /// List all boxes for a staff visit — delivery_staff only.
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn list_boxes_for_visit(
     pool:               &PgPool,
     visit_id:           i32,
@@ -370,7 +394,8 @@ pub async fn list_boxes_for_visit(
         return Err(DomainError::Forbidden);
     }
 
-    let rows = repository::get_boxes_by_visit(pool, visit_id).await?;
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    let rows = repository::get_boxes_by_visit(&mut conn, visit_id).await?;
     Ok(rows.into_iter().map(to_box_response).collect())
 }
 
@@ -385,6 +410,7 @@ mod tests {
             types::{ArriveAtVisitRequest, GrantRoleRequest, ScheduleVisitRequest},
         },
         event_bus::EventBus,
+        transaction::{AdminRlsTransaction, RlsTransaction},
         types::UserId,
     };
     use sqlx::PgPool;
@@ -428,6 +454,57 @@ mod tests {
         id
     }
 
+    /// Helper: run `create_order` inside an RlsTransaction and commit.
+    async fn create_order_tx(
+        pool:    &PgPool,
+        user_id: UserId,
+        req:     CreateOrderRequest,
+        bus:     &EventBus,
+    ) -> AppResult<OrderResponse> {
+        let mut tx = RlsTransaction::begin(pool, i32::from(user_id)).await?;
+        let resp = create_order(&mut tx, pool, user_id, req, bus).await?;
+        tx.commit().await?;
+        Ok(resp)
+    }
+
+    /// Helper: run `activate_box` inside an RlsTransaction and commit.
+    async fn activate_box_tx(
+        pool:               &PgPool,
+        visit_id:           i32,
+        requesting_user_id: UserId,
+        req:                ActivateBoxRequest,
+    ) -> AppResult<VisitBoxResponse> {
+        let mut tx = RlsTransaction::begin(pool, i32::from(requesting_user_id)).await?;
+        let resp = activate_box(&mut tx, pool, visit_id, requesting_user_id, req).await?;
+        tx.commit().await?;
+        Ok(resp)
+    }
+
+    /// Helper: run `collect_order` inside an RlsTransaction and commit.
+    async fn collect_order_tx(
+        pool:    &PgPool,
+        user_id: UserId,
+        req:     CollectOrderRequest,
+        bus:     &EventBus,
+    ) -> AppResult<OrderResponse> {
+        let mut tx = RlsTransaction::begin(pool, i32::from(user_id)).await?;
+        let resp = collect_order(&mut tx, pool, user_id, req, bus).await?;
+        tx.commit().await?;
+        Ok(resp)
+    }
+
+    /// Helper: run `cancel_order` inside an RlsTransaction and commit.
+    async fn cancel_order_tx(
+        pool:     &PgPool,
+        order_id: i32,
+        user_id:  UserId,
+    ) -> AppResult<OrderResponse> {
+        let mut tx = RlsTransaction::begin(pool, i32::from(user_id)).await?;
+        let resp = cancel_order(&mut tx, pool, order_id, user_id).await?;
+        tx.commit().await?;
+        Ok(resp)
+    }
+
     /// Full setup: admin, delivery_staff + role, location, business, in-progress visit.
     /// Returns (admin, staff, loc_id, biz_id, visit_id).
     async fn setup_with_visit(pool: &PgPool) -> (UserId, UserId, i32, i32, i32) {
@@ -439,35 +516,48 @@ mod tests {
         let loc_id = create_location(pool).await;
         let biz_id = create_business(pool, loc_id, i32::from(admin)).await;
 
-        staff_svc::grant_staff_role(
-            pool, admin,
-            GrantRoleRequest {
-                user_id:      i32::from(staff),
-                role:         "delivery_staff".to_owned(),
-                location_id:  Some(loc_id),
-                expires_at:   None,
-                confirmed_by: None,
-            },
-            &bus,
-        ).await.unwrap();
+        {
+            let mut tx = AdminRlsTransaction::begin(pool).await.unwrap();
+            staff_svc::grant_staff_role(
+                &mut tx, pool, admin,
+                GrantRoleRequest {
+                    user_id:      i32::from(staff),
+                    role:         "delivery_staff".to_owned(),
+                    location_id:  Some(loc_id),
+                    expires_at:   None,
+                    confirmed_by: None,
+                },
+                &bus,
+            ).await.unwrap();
+            tx.commit().await.unwrap();
+        }
 
-        let visit = staff_svc::schedule_visit(
-            pool, staff,
-            ScheduleVisitRequest {
-                location_id:              loc_id,
-                visit_type:               "delivery".to_owned(),
-                scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
-                window_hours:             Some(4),
-                support_booking_capacity: Some(0),
-                expected_box_count:       Some(5),
-            },
-            &bus,
-        ).await.unwrap();
+        let visit = {
+            let mut tx = RlsTransaction::begin(pool, i32::from(staff)).await.unwrap();
+            let visit = staff_svc::schedule_visit(
+                &mut tx, pool, staff,
+                ScheduleVisitRequest {
+                    location_id:              loc_id,
+                    visit_type:               "delivery".to_owned(),
+                    scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
+                    window_hours:             Some(4),
+                    support_booking_capacity: Some(0),
+                    expected_box_count:       Some(5),
+                },
+                &bus,
+            ).await.unwrap();
+            tx.commit().await.unwrap();
+            visit
+        };
 
-        staff_svc::arrive_at_visit(
-            pool, visit.id, staff,
-            ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
-        ).await.unwrap();
+        {
+            let mut tx = RlsTransaction::begin(pool, i32::from(staff)).await.unwrap();
+            staff_svc::arrive_at_visit(
+                &mut tx, pool, visit.id, staff,
+                ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+            ).await.unwrap();
+            tx.commit().await.unwrap();
+        }
 
         (admin, staff, loc_id, biz_id, visit.id)
     }
@@ -479,7 +569,7 @@ mod tests {
         staff:    UserId,
         uid:      &str,
     ) -> String {
-        activate_box(
+        activate_box_tx(
             pool, visit_id, staff,
             ActivateBoxRequest {
                 nfc_chip_uid:       uid.to_owned(),
@@ -510,7 +600,7 @@ mod tests {
         let loc   = create_location(&pool).await;
         let biz   = create_business(&pool, loc, i32::from(admin)).await;
 
-        let resp = create_order(&pool, user, order_req(biz), &bus)
+        let resp = create_order_tx(&pool, user, order_req(biz), &bus)
             .await.expect("create_order must succeed");
 
         assert_eq!(resp.status, "pending");
@@ -535,7 +625,7 @@ mod tests {
         let loc   = create_location(&pool).await;
         let biz   = create_business(&pool, loc, i32::from(admin)).await;
 
-        let err = create_order(&pool, banned, order_req(biz), &bus).await.unwrap_err();
+        let err = create_order_tx(&pool, banned, order_req(biz), &bus).await.unwrap_err();
         assert!(matches!(err, DomainError::Forbidden));
     }
 
@@ -553,7 +643,7 @@ mod tests {
         )
         .bind(loc).bind(i32::from(user)).fetch_one(&pool).await.unwrap();
 
-        let err = create_order(&pool, user, order_req(inactive_biz), &bus).await.unwrap_err();
+        let err = create_order_tx(&pool, user, order_req(inactive_biz), &bus).await.unwrap_err();
         assert!(matches!(err, DomainError::InvalidInput(_)),
             "inactive business must be InvalidInput, got: {err:?}");
     }
@@ -565,7 +655,7 @@ mod tests {
         use fake::{Fake, faker::internet::en::SafeEmail};
         let (_, staff, _, _, visit_id) = setup_with_visit(&pool).await;
 
-        let resp = activate_box(
+        let resp = activate_box_tx(
             &pool, visit_id, staff,
             ActivateBoxRequest {
                 nfc_chip_uid:       "NFC-001".to_owned(),
@@ -584,7 +674,7 @@ mod tests {
         let (_, _, _, _, visit_id) = setup_with_visit(&pool).await;
         let non_staff = create_user_plain(&pool, &SafeEmail().fake::<String>()).await;
 
-        let err = activate_box(
+        let err = activate_box_tx(
             &pool, visit_id, non_staff,
             ActivateBoxRequest {
                 nfc_chip_uid:       "NFC-FAIL".to_owned(),
@@ -606,13 +696,13 @@ mod tests {
         let user = create_user_plain(&pool, &SafeEmail().fake::<String>()).await;
 
         // Create pending order for user at business.
-        create_order(&pool, user, order_req(biz_id), &bus).await.unwrap();
+        create_order_tx(&pool, user, order_req(biz_id), &bus).await.unwrap();
 
         // Activate a box.
         let uid = "NFC-COLLECT-001";
         setup_activated_box(&pool, visit_id, staff, uid).await;
 
-        let resp = collect_order(
+        let resp = collect_order_tx(
             &pool, user,
             CollectOrderRequest { nfc_chip_uid: uid.to_owned() },
             &bus,
@@ -643,16 +733,16 @@ mod tests {
         let (_, staff, _, biz_id, visit_id) = setup_with_visit(&pool).await;
         let user = create_user_plain(&pool, &SafeEmail().fake::<String>()).await;
 
-        create_order(&pool, user, order_req(biz_id), &bus).await.unwrap();
+        create_order_tx(&pool, user, order_req(biz_id), &bus).await.unwrap();
         let uid = "NFC-CLONE-001";
         setup_activated_box(&pool, visit_id, staff, uid).await;
 
         // First tap — succeeds.
-        collect_order(&pool, user, CollectOrderRequest { nfc_chip_uid: uid.to_owned() }, &bus)
+        collect_order_tx(&pool, user, CollectOrderRequest { nfc_chip_uid: uid.to_owned() }, &bus)
             .await.expect("first tap must succeed");
 
         // Second tap — clone detected.
-        let err = collect_order(
+        let err = collect_order_tx(
             &pool, user,
             CollectOrderRequest { nfc_chip_uid: uid.to_owned() },
             &bus,
@@ -679,17 +769,19 @@ mod tests {
         let (_, staff, _, biz_id, visit_id) = setup_with_visit(&pool).await;
         let user = create_user_plain(&pool, &SafeEmail().fake::<String>()).await;
 
-        create_order(&pool, user, order_req(biz_id), &bus).await.unwrap();
+        create_order_tx(&pool, user, order_req(biz_id), &bus).await.unwrap();
         let uid = "NFC-EXPIRED-001";
 
         // Activate with expires_at in the past.
-        let vbox = repository::create_visit_box(&pool, visit_id, uid, 1).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let vbox = repository::create_visit_box(&mut conn, visit_id, uid, 1).await.unwrap();
         repository::activate_box_db(
-            &pool, vbox.id, "sig",
+            &mut conn, vbox.id, "sig",
             Utc::now() - chrono::Duration::hours(1),
         ).await.unwrap();
+        drop(conn);
 
-        let err = collect_order(
+        let err = collect_order_tx(
             &pool, user,
             CollectOrderRequest { nfc_chip_uid: uid.to_owned() },
             &bus,
@@ -706,12 +798,14 @@ mod tests {
         let (_, _, _, biz_id, visit_id) = setup_with_visit(&pool).await;
         let user = create_user_plain(&pool, &SafeEmail().fake::<String>()).await;
 
-        create_order(&pool, user, order_req(biz_id), &bus).await.unwrap();
+        create_order_tx(&pool, user, order_req(biz_id), &bus).await.unwrap();
 
         // Create box but DO NOT activate it.
-        repository::create_visit_box(&pool, visit_id, "NFC-NOT-ACTIVE", 1).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        repository::create_visit_box(&mut conn, visit_id, "NFC-NOT-ACTIVE", 1).await.unwrap();
+        drop(conn);
 
-        let err = collect_order(
+        let err = collect_order_tx(
             &pool, user,
             CollectOrderRequest { nfc_chip_uid: "NFC-NOT-ACTIVE".to_owned() },
             &bus,
@@ -731,9 +825,9 @@ mod tests {
         let loc   = create_location(&pool).await;
         let biz   = create_business(&pool, loc, i32::from(admin)).await;
 
-        let order = create_order(&pool, user, order_req(biz), &bus).await.unwrap();
+        let order = create_order_tx(&pool, user, order_req(biz), &bus).await.unwrap();
 
-        let cancelled = cancel_order(&pool, order.id, user).await.unwrap();
+        let cancelled = cancel_order_tx(&pool, order.id, user).await.unwrap();
         assert_eq!(cancelled.status, "cancelled");
     }
 
@@ -744,13 +838,13 @@ mod tests {
         let (_, staff, _, biz_id, visit_id) = setup_with_visit(&pool).await;
         let user = create_user_plain(&pool, &SafeEmail().fake::<String>()).await;
 
-        let order = create_order(&pool, user, order_req(biz_id), &bus).await.unwrap();
+        let order = create_order_tx(&pool, user, order_req(biz_id), &bus).await.unwrap();
         let uid = "NFC-CANCEL-001";
         setup_activated_box(&pool, visit_id, staff, uid).await;
-        collect_order(&pool, user, CollectOrderRequest { nfc_chip_uid: uid.to_owned() }, &bus)
+        collect_order_tx(&pool, user, CollectOrderRequest { nfc_chip_uid: uid.to_owned() }, &bus)
             .await.unwrap();
 
-        let err = cancel_order(&pool, order.id, user).await.unwrap_err();
+        let err = cancel_order_tx(&pool, order.id, user).await.unwrap_err();
         assert!(matches!(err, DomainError::Conflict(_)),
             "cancelling a collected order must be Conflict, got: {err:?}");
     }
@@ -766,16 +860,16 @@ mod tests {
         let owner    = create_user_plain(&pool, &SafeEmail().fake::<String>()).await;
         let attacker = create_user_plain(&pool, &SafeEmail().fake::<String>()).await;
 
-        create_order(&pool, owner, order_req(biz_id), &bus).await.unwrap();
+        create_order_tx(&pool, owner, order_req(biz_id), &bus).await.unwrap();
         let uid = "NFC-ADV-TAPPED";
         setup_activated_box(&pool, visit_id, staff, uid).await;
 
         // Owner collects successfully.
-        collect_order(&pool, owner, CollectOrderRequest { nfc_chip_uid: uid.to_owned() }, &bus)
+        collect_order_tx(&pool, owner, CollectOrderRequest { nfc_chip_uid: uid.to_owned() }, &bus)
             .await.unwrap();
 
         // Attacker tries to collect the same box.
-        let err = collect_order(
+        let err = collect_order_tx(
             &pool, attacker,
             CollectOrderRequest { nfc_chip_uid: uid.to_owned() },
             &bus,
@@ -794,9 +888,9 @@ mod tests {
         let loc     = create_location(&pool).await;
         let biz     = create_business(&pool, loc, i32::from(admin)).await;
 
-        let order = create_order(&pool, owner, order_req(biz), &bus).await.unwrap();
+        let order = create_order_tx(&pool, owner, order_req(biz), &bus).await.unwrap();
 
-        let err = cancel_order(&pool, order.id, attacker).await.unwrap_err();
+        let err = cancel_order_tx(&pool, order.id, attacker).await.unwrap_err();
         assert!(matches!(err, DomainError::Forbidden));
     }
 
@@ -806,7 +900,7 @@ mod tests {
         let (_, _, _, _, visit_id) = setup_with_visit(&pool).await;
         let attacker = create_user_plain(&pool, &SafeEmail().fake::<String>()).await;
 
-        let err = activate_box(
+        let err = activate_box_tx(
             &pool, visit_id, attacker,
             ActivateBoxRequest {
                 nfc_chip_uid:       "NFC-ADV-NOSTAFF".to_owned(),
@@ -825,16 +919,18 @@ mod tests {
         let (_, _, _, biz_id, visit_id) = setup_with_visit(&pool).await;
         let attacker = create_user_plain(&pool, &SafeEmail().fake::<String>()).await;
 
-        create_order(&pool, attacker, order_req(biz_id), &bus).await.unwrap();
+        create_order_tx(&pool, attacker, order_req(biz_id), &bus).await.unwrap();
 
         // Create and activate box with expired window.
-        let vbox = repository::create_visit_box(&pool, visit_id, "NFC-ADV-EXP", 1).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let vbox = repository::create_visit_box(&mut conn, visit_id, "NFC-ADV-EXP", 1).await.unwrap();
         repository::activate_box_db(
-            &pool, vbox.id, "sig",
+            &mut conn, vbox.id, "sig",
             Utc::now() - chrono::Duration::seconds(1),
         ).await.unwrap();
+        drop(conn);
 
-        let err = collect_order(
+        let err = collect_order_tx(
             &pool, attacker,
             CollectOrderRequest { nfc_chip_uid: "NFC-ADV-EXP".to_owned() },
             &bus,

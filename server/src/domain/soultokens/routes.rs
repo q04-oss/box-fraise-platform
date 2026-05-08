@@ -45,9 +45,13 @@ pub async fn issue(
     AppJson(body):        AppJson<IssueSoultokenRequest>,
 ) -> AppResult<(StatusCode, Json<SoultokenResponse>)> {
     let hmac_key = state.cfg.soultoken_hmac_key.expose_secret().as_bytes().to_vec();
-    let resp = service::issue_soultoken(
-        &state.db, user_id, body, &hmac_key, &state.ed25519_key_pair, &state.event_bus,
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
     ).await?;
+    let resp = service::issue_soultoken(
+        &mut tx, &state.db, user_id, body, &hmac_key, &state.ed25519_key_pair, &state.event_bus,
+    ).await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -81,11 +85,14 @@ pub async fn renew(
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<RenewSoultokenRequest>,
 ) -> AppResult<Json<SoultokenRenewalResponse>> {
-    Ok(Json(
-        service::renew_soultoken(
-            &state.db, user_id, body, &state.ed25519_key_pair, &state.event_bus,
-        ).await?,
-    ))
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::renew_soultoken(
+        &mut tx, &state.db, user_id, body, &state.ed25519_key_pair, &state.event_bus,
+    ).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// GET /api/trust-registry/public-key
@@ -124,9 +131,14 @@ pub async fn revoke(
     Path(soultoken_id):   Path<i32>,
     AppJson(body):        AppJson<RevokeSoultokenRequest>,
 ) -> AppResult<Json<SoultokenResponse>> {
-    Ok(Json(
-        service::revoke_soultoken(&state.db, soultoken_id, user_id, body).await?,
-    ))
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::revoke_soultoken(
+        &mut tx, &state.db, soultoken_id, user_id, body,
+    ).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// POST /api/soultokens/:id/surrender
@@ -145,9 +157,12 @@ pub async fn surrender(
     Path(soultoken_id):   Path<i32>,
     AppJson(body):        AppJson<SurrenderSoultokenRequest>,
 ) -> AppResult<Json<SoultokenResponse>> {
-    Ok(Json(
-        service::surrender_soultoken(
-            &state.db, soultoken_id, user_id, body, &state.event_bus,
-        ).await?,
-    ))
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::surrender_soultoken(
+        &mut tx, &state.db, soultoken_id, user_id, body, &state.event_bus,
+    ).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }

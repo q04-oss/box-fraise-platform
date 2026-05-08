@@ -5,6 +5,7 @@ use crate::{
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
+    transaction::RlsTransaction,
     types::UserId,
 };
 use crate::domain::auth::repository as user_repo;
@@ -35,11 +36,16 @@ fn to_response(row: SupportBookingRow) -> SupportBookingResponse {
 // ── Queries ───────────────────────────────────────────────────────────────────
 
 /// Return all bookings for the authenticated user (BFIP Section 10).
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn get_my_bookings(
     pool:    &PgPool,
     user_id: UserId,
 ) -> AppResult<Vec<SupportBookingResponse>> {
-    let rows = repository::get_bookings_by_user(pool, i32::from(user_id)).await?;
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    let rows = repository::get_bookings_by_user(&mut conn, i32::from(user_id)).await?;
     Ok(rows.into_iter().map(to_response).collect())
 }
 
@@ -47,7 +53,8 @@ pub async fn get_my_bookings(
 
 /// Book a support slot at a scheduled or in-progress visit (BFIP Section 10.1).
 pub async fn create_booking(
-    pool:      &PgPool,
+    tx:        &mut RlsTransaction,
+    pool:      &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     user_id:   UserId,
     req:       CreateBookingRequest,
     event_bus: &EventBus,
@@ -55,6 +62,7 @@ pub async fn create_booking(
     let uid = i32::from(user_id);
 
     // 1. User must exist and not be banned.
+    //    Cross-domain repository (auth) still takes `&PgPool` — call with pool.
     let user = user_repo::find_by_id(pool, user_id)
         .await?
         .ok_or(DomainError::Unauthorized)?;
@@ -65,7 +73,7 @@ pub async fn create_booking(
         "SELECT status, support_booking_capacity FROM staff_visits WHERE id = $1"
     )
     .bind(req.visit_id)
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -77,7 +85,7 @@ pub async fn create_booking(
     }
 
     // 3. Check capacity.
-    let current_count = repository::active_booking_count_for_visit(pool, req.visit_id).await?;
+    let current_count = repository::active_booking_count_for_visit(tx.as_mut(), req.visit_id).await?;
     if current_count >= capacity as i64 {
         return Err(DomainError::InvalidInput("this visit is fully booked".to_string()));
     }
@@ -85,7 +93,7 @@ pub async fn create_booking(
     // 4. Create booking (unique index handles duplicate gracefully).
     let priority = req.priority.as_deref().unwrap_or("standard");
     let booking = repository::create_booking(
-        pool,
+        tx.as_mut(),
         req.visit_id,
         uid,
         req.issue_description.as_deref(),
@@ -93,7 +101,7 @@ pub async fn create_booking(
     ).await?;
 
     // 5. Mark confirmation sent (simulates push notification).
-    let _ = repository::mark_confirmation_sent(pool, booking.id).await;
+    let _ = repository::mark_confirmation_sent(tx.as_mut(), booking.id).await;
 
     // 6. Audit + event.
     audit::write(
@@ -121,14 +129,15 @@ pub async fn create_booking(
 ///
 /// Requesting user must be the delivery_staff member assigned to the visit.
 pub async fn attend_booking(
-    pool:               &PgPool,
+    tx:                 &mut RlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     booking_id:         i32,
     requesting_user_id: UserId,
 ) -> AppResult<SupportBookingResponse> {
     let uid = i32::from(requesting_user_id);
 
     // 1. Booking must exist and be in 'booked' status.
-    let booking = repository::get_booking_by_id(pool, booking_id)
+    let booking = repository::get_booking_by_id(tx.as_mut(), booking_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -144,7 +153,7 @@ pub async fn attend_booking(
     )
     .bind(uid)
     .bind(booking.visit_id)
-    .fetch_one(pool)
+    .fetch_one(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -153,7 +162,7 @@ pub async fn attend_booking(
     }
 
     // 3. Mark attended.
-    let updated = repository::attend_booking(pool, booking_id).await?;
+    let updated = repository::attend_booking(tx.as_mut(), booking_id).await?;
 
     audit::write(
         pool,
@@ -174,7 +183,8 @@ pub async fn attend_booking(
 /// Requesting user must be the delivery_staff member assigned to the visit.
 /// Gift box eligibility determines whether the platform or user covers the cost.
 pub async fn resolve_booking(
-    pool:               &PgPool,
+    tx:                 &mut RlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     booking_id:         i32,
     requesting_user_id: UserId,
     req:                ResolveBookingRequest,
@@ -183,7 +193,7 @@ pub async fn resolve_booking(
     let uid = i32::from(requesting_user_id);
 
     // 1. Booking must exist and be in 'attended' status.
-    let booking = repository::get_booking_by_id(pool, booking_id)
+    let booking = repository::get_booking_by_id(tx.as_mut(), booking_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -201,7 +211,7 @@ pub async fn resolve_booking(
            AND (expires_at IS NULL OR expires_at > now())"
     )
     .bind(uid)
-    .fetch_one(pool)
+    .fetch_one(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -214,7 +224,7 @@ pub async fn resolve_booking(
     )
     .bind(uid)
     .bind(booking.visit_id)
-    .fetch_one(pool)
+    .fetch_one(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -224,7 +234,7 @@ pub async fn resolve_booking(
 
     // 3. Resolve booking.
     let resolved = repository::resolve_booking(
-        pool,
+        tx.as_mut(),
         booking_id,
         &req.resolution_description,
         &req.resolution_signature,
@@ -234,11 +244,11 @@ pub async fn resolve_booking(
 
     // 4. Gift box logic.
     if req.gift_box_provided {
-        let eligible = repository::check_platform_gift_eligible(pool, booking.user_id).await?;
+        let eligible = repository::check_platform_gift_eligible(tx.as_mut(), booking.user_id).await?;
         let covered_by = if eligible { "platform" } else { "user" };
 
         repository::record_gift_box(
-            pool,
+            tx.as_mut(),
             booking.user_id,
             booking.visit_id,
             req.gift_box_id,
@@ -247,7 +257,7 @@ pub async fn resolve_booking(
         ).await?;
 
         if eligible {
-            repository::update_platform_gift_eligible_after(pool, booking.user_id).await?;
+            repository::update_platform_gift_eligible_after(tx.as_mut(), booking.user_id).await?;
 
             audit::write(
                 pool,
@@ -289,7 +299,8 @@ pub async fn resolve_booking(
 /// The booking owner or a platform admin may cancel.
 /// Bookings in 'attended' or later status cannot be cancelled.
 pub async fn cancel_booking(
-    pool:               &PgPool,
+    tx:                 &mut RlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     booking_id:         i32,
     requesting_user_id: UserId,
     req:                CancelBookingRequest,
@@ -297,11 +308,12 @@ pub async fn cancel_booking(
     let uid = i32::from(requesting_user_id);
 
     // 1. Booking must exist.
-    let booking = repository::get_booking_by_id(pool, booking_id)
+    let booking = repository::get_booking_by_id(tx.as_mut(), booking_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
     // 2. Must belong to user OR requesting user is platform_admin.
+    //    Cross-domain repository (auth) still takes `&PgPool` — call with pool.
     if booking.user_id != uid {
         let user = user_repo::find_by_id(pool, requesting_user_id)
             .await?
@@ -319,7 +331,7 @@ pub async fn cancel_booking(
     }
 
     // 4. Cancel.
-    let cancelled = repository::cancel_booking(pool, booking_id, &req.cancellation_reason).await?;
+    let cancelled = repository::cancel_booking(tx.as_mut(), booking_id, &req.cancellation_reason).await?;
 
     audit::write(
         pool,
@@ -336,12 +348,18 @@ pub async fn cancel_booking(
 }
 
 /// List all bookings for a visit — delivery_staff only (BFIP Section 10.5).
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn list_bookings_for_visit(
     pool:               &PgPool,
     visit_id:           i32,
     requesting_user_id: UserId,
 ) -> AppResult<Vec<SupportBookingResponse>> {
     let uid = i32::from(requesting_user_id);
+
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
 
     let has_role: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM staff_roles \
@@ -350,7 +368,7 @@ pub async fn list_bookings_for_visit(
            AND (expires_at IS NULL OR expires_at > now())"
     )
     .bind(uid)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await
     .map_err(DomainError::Db)?;
 
@@ -358,7 +376,7 @@ pub async fn list_bookings_for_visit(
         return Err(DomainError::Forbidden);
     }
 
-    let rows = repository::get_bookings_by_visit(pool, visit_id).await?;
+    let rows = repository::get_bookings_by_visit(&mut conn, visit_id).await?;
     Ok(rows.into_iter().map(to_response).collect())
 }
 
@@ -373,6 +391,7 @@ mod tests {
             types::{ArriveAtVisitRequest, GrantRoleRequest, ScheduleVisitRequest},
         },
         event_bus::EventBus,
+        transaction::AdminRlsTransaction,
         types::UserId,
     };
     use sqlx::PgPool;
@@ -419,8 +438,9 @@ mod tests {
         let staff = create_user(pool, &SafeEmail().fake::<String>()).await;
         let loc   = create_location(pool).await;
 
+        let mut tx_grant = AdminRlsTransaction::begin(pool).await.unwrap();
         staff_svc::grant_staff_role(
-            pool, admin,
+            &mut tx_grant, pool, admin,
             GrantRoleRequest {
                 user_id:      i32::from(staff),
                 role:         "delivery_staff".to_owned(),
@@ -430,9 +450,11 @@ mod tests {
             },
             &bus,
         ).await.unwrap();
+        tx_grant.commit().await.unwrap();
 
+        let mut tx_schedule = RlsTransaction::begin(pool, i32::from(staff)).await.unwrap();
         let visit = staff_svc::schedule_visit(
-            pool, staff,
+            &mut tx_schedule, pool, staff,
             ScheduleVisitRequest {
                 location_id:              loc,
                 visit_type:               "support".to_owned(),
@@ -443,11 +465,14 @@ mod tests {
             },
             &bus,
         ).await.unwrap();
+        tx_schedule.commit().await.unwrap();
 
+        let mut tx_arrive = RlsTransaction::begin(pool, i32::from(staff)).await.unwrap();
         staff_svc::arrive_at_visit(
-            pool, visit.id, staff,
+            &mut tx_arrive, pool, visit.id, staff,
             ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
         ).await.unwrap();
+        tx_arrive.commit().await.unwrap();
 
         (admin, staff, loc, visit.id)
     }
@@ -484,8 +509,10 @@ mod tests {
         let (_, _, _, visit_id) = setup_with_support_visit(&pool, 5).await;
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let resp = create_booking(&pool, user, booking_req(visit_id), &bus)
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let resp = create_booking(&mut tx, &pool, user, booking_req(visit_id), &bus)
             .await.expect("create_booking must succeed");
+        tx.commit().await.unwrap();
 
         assert_eq!(resp.status, "booked");
         assert_eq!(resp.visit_id, visit_id);
@@ -502,11 +529,15 @@ mod tests {
         let user1 = create_user(&pool, &SafeEmail().fake::<String>()).await;
         let user2 = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        create_booking(&pool, user1, booking_req(visit_id), &bus)
+        let mut tx1 = RlsTransaction::begin(&pool, i32::from(user1)).await.unwrap();
+        create_booking(&mut tx1, &pool, user1, booking_req(visit_id), &bus)
             .await.expect("first booking must succeed");
+        tx1.commit().await.unwrap();
 
-        let err = create_booking(&pool, user2, booking_req(visit_id), &bus)
+        let mut tx2 = RlsTransaction::begin(&pool, i32::from(user2)).await.unwrap();
+        let err = create_booking(&mut tx2, &pool, user2, booking_req(visit_id), &bus)
             .await.unwrap_err();
+        // tx2 dropped without commit → rollback on error path.
 
         assert!(matches!(err, DomainError::InvalidInput(_)),
             "at-capacity visit must be InvalidInput, got: {err:?}");
@@ -519,11 +550,15 @@ mod tests {
         let (_, _, _, visit_id) = setup_with_support_visit(&pool, 5).await;
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        create_booking(&pool, user, booking_req(visit_id), &bus)
+        let mut tx1 = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        create_booking(&mut tx1, &pool, user, booking_req(visit_id), &bus)
             .await.expect("first booking must succeed");
+        tx1.commit().await.unwrap();
 
-        let err = create_booking(&pool, user, booking_req(visit_id), &bus)
+        let mut tx2 = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let err = create_booking(&mut tx2, &pool, user, booking_req(visit_id), &bus)
             .await.unwrap_err();
+        // tx2 dropped without commit → rollback on error path.
 
         assert!(matches!(err, DomainError::Conflict(_)),
             "duplicate booking must be Conflict, got: {err:?}");
@@ -538,8 +573,14 @@ mod tests {
         let (_, staff, _, visit_id) = setup_with_support_visit(&pool, 5).await;
         let user   = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let booking = create_booking(&pool, user, booking_req(visit_id), &bus).await.unwrap();
-        let resp = attend_booking(&pool, booking.id, staff).await.expect("attend must succeed");
+        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
+        tx_create.commit().await.unwrap();
+
+        let mut tx_attend = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
+        let resp = attend_booking(&mut tx_attend, &pool, booking.id, staff)
+            .await.expect("attend must succeed");
+        tx_attend.commit().await.unwrap();
 
         assert_eq!(resp.status, "attended");
         assert!(resp.attended_at.is_some());
@@ -553,8 +594,13 @@ mod tests {
         let user     = create_user(&pool, &SafeEmail().fake::<String>()).await;
         let imposter = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let booking = create_booking(&pool, user, booking_req(visit_id), &bus).await.unwrap();
-        let err = attend_booking(&pool, booking.id, imposter).await.unwrap_err();
+        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
+        tx_create.commit().await.unwrap();
+
+        let mut tx_attend = RlsTransaction::begin(&pool, i32::from(imposter)).await.unwrap();
+        let err = attend_booking(&mut tx_attend, &pool, booking.id, imposter).await.unwrap_err();
+        // tx dropped without commit → rollback on error path.
 
         assert!(matches!(err, DomainError::Forbidden));
     }
@@ -568,11 +614,18 @@ mod tests {
         let (_, staff, _, visit_id) = setup_with_support_visit(&pool, 5).await;
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let booking = create_booking(&pool, user, booking_req(visit_id), &bus).await.unwrap();
-        attend_booking(&pool, booking.id, staff).await.unwrap();
+        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
+        tx_create.commit().await.unwrap();
 
-        let resp = resolve_booking(&pool, booking.id, staff, resolve_req(true), &bus)
+        let mut tx_attend = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
+        attend_booking(&mut tx_attend, &pool, booking.id, staff).await.unwrap();
+        tx_attend.commit().await.unwrap();
+
+        let mut tx_resolve = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
+        let resp = resolve_booking(&mut tx_resolve, &pool, booking.id, staff, resolve_req(true), &bus)
             .await.expect("resolve must succeed");
+        tx_resolve.commit().await.unwrap();
 
         assert_eq!(resp.status, "resolved");
         assert!(resp.resolved_at.is_some());
@@ -587,9 +640,17 @@ mod tests {
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
         let uid  = i32::from(user);
 
-        let booking = create_booking(&pool, user, booking_req(visit_id), &bus).await.unwrap();
-        attend_booking(&pool, booking.id, staff).await.unwrap();
-        resolve_booking(&pool, booking.id, staff, resolve_req(true), &bus).await.unwrap();
+        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
+        tx_create.commit().await.unwrap();
+
+        let mut tx_attend = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
+        attend_booking(&mut tx_attend, &pool, booking.id, staff).await.unwrap();
+        tx_attend.commit().await.unwrap();
+
+        let mut tx_resolve = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
+        resolve_booking(&mut tx_resolve, &pool, booking.id, staff, resolve_req(true), &bus).await.unwrap();
+        tx_resolve.commit().await.unwrap();
 
         // Gift box history row created as platform-covered.
         let covered_by: String = sqlx::query_scalar(
@@ -619,9 +680,17 @@ mod tests {
              WHERE id = $1"
         ).bind(uid).execute(&pool).await.unwrap();
 
-        let booking = create_booking(&pool, user, booking_req(visit_id), &bus).await.unwrap();
-        attend_booking(&pool, booking.id, staff).await.unwrap();
-        resolve_booking(&pool, booking.id, staff, resolve_req(true), &bus).await.unwrap();
+        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
+        tx_create.commit().await.unwrap();
+
+        let mut tx_attend = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
+        attend_booking(&mut tx_attend, &pool, booking.id, staff).await.unwrap();
+        tx_attend.commit().await.unwrap();
+
+        let mut tx_resolve = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
+        resolve_booking(&mut tx_resolve, &pool, booking.id, staff, resolve_req(true), &bus).await.unwrap();
+        tx_resolve.commit().await.unwrap();
 
         // Gift should be recorded as user-covered, not platform.
         let covered_by: String = sqlx::query_scalar(
@@ -640,9 +709,14 @@ mod tests {
         let (_, _, _, visit_id) = setup_with_support_visit(&pool, 5).await;
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let booking = create_booking(&pool, user, booking_req(visit_id), &bus).await.unwrap();
-        let resp = cancel_booking(&pool, booking.id, user, cancel_req())
+        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
+        tx_create.commit().await.unwrap();
+
+        let mut tx_cancel = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let resp = cancel_booking(&mut tx_cancel, &pool, booking.id, user, cancel_req())
             .await.expect("cancel must succeed for owner");
+        tx_cancel.commit().await.unwrap();
 
         assert_eq!(resp.status, "cancelled");
     }
@@ -654,10 +728,18 @@ mod tests {
         let (_, staff, _, visit_id) = setup_with_support_visit(&pool, 5).await;
         let user   = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let booking = create_booking(&pool, user, booking_req(visit_id), &bus).await.unwrap();
-        attend_booking(&pool, booking.id, staff).await.unwrap();
+        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
+        tx_create.commit().await.unwrap();
 
-        let err = cancel_booking(&pool, booking.id, user, cancel_req()).await.unwrap_err();
+        let mut tx_attend = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
+        attend_booking(&mut tx_attend, &pool, booking.id, staff).await.unwrap();
+        tx_attend.commit().await.unwrap();
+
+        let mut tx_cancel = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let err = cancel_booking(&mut tx_cancel, &pool, booking.id, user, cancel_req()).await.unwrap_err();
+        // tx dropped without commit → rollback on error path.
+
         assert!(matches!(err, DomainError::Conflict(_)),
             "cancelling attended booking must be Conflict, got: {err:?}");
     }
@@ -672,8 +754,13 @@ mod tests {
         let owner    = create_user(&pool, &SafeEmail().fake::<String>()).await;
         let attacker = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let booking = create_booking(&pool, owner, booking_req(visit_id), &bus).await.unwrap();
-        let err = cancel_booking(&pool, booking.id, attacker, cancel_req()).await.unwrap_err();
+        let mut tx_create = RlsTransaction::begin(&pool, i32::from(owner)).await.unwrap();
+        let booking = create_booking(&mut tx_create, &pool, owner, booking_req(visit_id), &bus).await.unwrap();
+        tx_create.commit().await.unwrap();
+
+        let mut tx_cancel = RlsTransaction::begin(&pool, i32::from(attacker)).await.unwrap();
+        let err = cancel_booking(&mut tx_cancel, &pool, booking.id, attacker, cancel_req()).await.unwrap_err();
+        // tx dropped without commit → rollback on error path.
 
         assert!(matches!(err, DomainError::Forbidden));
     }
@@ -686,11 +773,18 @@ mod tests {
         let user     = create_user(&pool, &SafeEmail().fake::<String>()).await;
         let attacker = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let booking = create_booking(&pool, user, booking_req(visit_id), &bus).await.unwrap();
-        attend_booking(&pool, booking.id, staff).await.unwrap();
+        let mut tx_create = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let booking = create_booking(&mut tx_create, &pool, user, booking_req(visit_id), &bus).await.unwrap();
+        tx_create.commit().await.unwrap();
 
-        let err = resolve_booking(&pool, booking.id, attacker, resolve_req(false), &bus)
+        let mut tx_attend = RlsTransaction::begin(&pool, i32::from(staff)).await.unwrap();
+        attend_booking(&mut tx_attend, &pool, booking.id, staff).await.unwrap();
+        tx_attend.commit().await.unwrap();
+
+        let mut tx_resolve = RlsTransaction::begin(&pool, i32::from(attacker)).await.unwrap();
+        let err = resolve_booking(&mut tx_resolve, &pool, booking.id, attacker, resolve_req(false), &bus)
             .await.unwrap_err();
+        // tx dropped without commit → rollback on error path.
         assert!(matches!(err, DomainError::Forbidden));
     }
 
@@ -703,9 +797,14 @@ mod tests {
         let user1    = create_user(&pool, &SafeEmail().fake::<String>()).await;
         let attacker = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        create_booking(&pool, user1, booking_req(visit_id), &bus).await.unwrap();
-        let err = create_booking(&pool, attacker, booking_req(visit_id), &bus)
+        let mut tx1 = RlsTransaction::begin(&pool, i32::from(user1)).await.unwrap();
+        create_booking(&mut tx1, &pool, user1, booking_req(visit_id), &bus).await.unwrap();
+        tx1.commit().await.unwrap();
+
+        let mut tx2 = RlsTransaction::begin(&pool, i32::from(attacker)).await.unwrap();
+        let err = create_booking(&mut tx2, &pool, attacker, booking_req(visit_id), &bus)
             .await.unwrap_err();
+        // tx dropped without commit → rollback on error path.
 
         assert!(matches!(err, DomainError::InvalidInput(_)));
     }
@@ -717,9 +816,14 @@ mod tests {
         let (_, _, _, visit_id) = setup_with_support_visit(&pool, 5).await;
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        create_booking(&pool, user, booking_req(visit_id), &bus).await.unwrap();
-        let err = create_booking(&pool, user, booking_req(visit_id), &bus)
+        let mut tx1 = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        create_booking(&mut tx1, &pool, user, booking_req(visit_id), &bus).await.unwrap();
+        tx1.commit().await.unwrap();
+
+        let mut tx2 = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        let err = create_booking(&mut tx2, &pool, user, booking_req(visit_id), &bus)
             .await.unwrap_err();
+        // tx dropped without commit → rollback on error path.
 
         assert!(matches!(err, DomainError::Conflict(_)));
     }

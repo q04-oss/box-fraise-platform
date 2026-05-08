@@ -49,7 +49,14 @@ pub async fn create_booking(
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<CreateBookingRequest>,
 ) -> AppResult<(StatusCode, Json<SupportBookingResponse>)> {
-    let resp = service::create_booking(&state.db, user_id, body, &state.event_bus).await?;
+    // Hardening cleanup #3 — RLS-scoped per-request transaction.
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::create_booking(
+        &mut tx, &state.db, user_id, body, &state.event_bus,
+    ).await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -91,9 +98,15 @@ pub async fn cancel_booking(
     Path(booking_id):     Path<i32>,
     AppJson(body):        AppJson<CancelBookingRequest>,
 ) -> AppResult<Json<SupportBookingResponse>> {
-    Ok(Json(
-        service::cancel_booking(&state.db, booking_id, user_id, body).await?,
-    ))
+    // Hardening cleanup #3 — RLS-scoped per-request transaction.
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::cancel_booking(
+        &mut tx, &state.db, booking_id, user_id, body,
+    ).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// POST /api/support/bookings/:id/attend
@@ -114,9 +127,15 @@ pub async fn attend_booking(
     RequireUser(user_id): RequireUser,
     Path(booking_id):     Path<i32>,
 ) -> AppResult<Json<SupportBookingResponse>> {
-    Ok(Json(
-        service::attend_booking(&state.db, booking_id, user_id).await?,
-    ))
+    // Hardening cleanup #3 — RLS-scoped per-request transaction.
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::attend_booking(
+        &mut tx, &state.db, booking_id, user_id,
+    ).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// POST /api/support/bookings/:id/resolve
@@ -140,9 +159,15 @@ pub async fn resolve_booking(
     Path(booking_id):     Path<i32>,
     AppJson(body):        AppJson<ResolveBookingRequest>,
 ) -> AppResult<Json<SupportBookingResponse>> {
-    Ok(Json(
-        service::resolve_booking(&state.db, booking_id, user_id, body, &state.event_bus).await?,
-    ))
+    // Hardening cleanup #3 — RLS-scoped per-request transaction.
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::resolve_booking(
+        &mut tx, &state.db, booking_id, user_id, body, &state.event_bus,
+    ).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// GET /api/staff/visits/:visit_id/bookings

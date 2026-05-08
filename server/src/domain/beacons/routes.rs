@@ -10,6 +10,7 @@ use crate::{
     error::{AppError, AppResult},
     http::extractors::{auth::RequireUser, json::AppJson},
 };
+use box_fraise_domain::transaction::RlsTransaction;
 use super::{service, types::*};
 
 pub fn router() -> Router<AppState> {
@@ -41,7 +42,9 @@ pub async fn create(
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<CreateBeaconRequest>,
 ) -> AppResult<(StatusCode, Json<BeaconResponse>)> {
-    let resp = service::create_beacon(&state.db, user_id, body, &state.event_bus).await?;
+    let mut tx = RlsTransaction::begin(&state.db, i32::from(user_id)).await?;
+    let resp = service::create_beacon(&mut tx, &state.db, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -87,7 +90,10 @@ pub async fn daily_uuid(
     RequireUser(user_id): RequireUser,
     Path(beacon_id):      Path<i32>,
 ) -> AppResult<Json<DailyUuidResponse>> {
-    Ok(Json(service::get_daily_uuid(&state.db, beacon_id, user_id).await?))
+    let mut tx = RlsTransaction::begin(&state.db, i32::from(user_id)).await?;
+    let resp = service::get_daily_uuid(&mut tx, &state.db, beacon_id, user_id).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }
 
 /// POST /api/beacons/:id/rotate-key
@@ -110,5 +116,8 @@ pub async fn rotate_key(
     RequireUser(user_id): RequireUser,
     Path(beacon_id):      Path<i32>,
 ) -> AppResult<Json<BeaconResponse>> {
-    Ok(Json(service::rotate_key(&state.db, beacon_id, user_id, &state.event_bus).await?))
+    let mut tx = RlsTransaction::begin(&state.db, i32::from(user_id)).await?;
+    let resp = service::rotate_key(&mut tx, &state.db, beacon_id, user_id, &state.event_bus).await?;
+    tx.commit().await?;
+    Ok(Json(resp))
 }

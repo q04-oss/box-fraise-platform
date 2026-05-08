@@ -49,7 +49,11 @@ pub async fn issue(
     RequireUser(user_id): RequireUser,
     AppJson(body):        AppJson<IssueAttestationTokenRequest>,
 ) -> AppResult<(StatusCode, Json<AttestationTokenResponse>)> {
-    let resp = service::issue_token(&state.db, user_id, body, &state.event_bus).await?;
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    let resp = service::issue_token(&mut tx, &state.db, user_id, body, &state.event_bus).await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -74,6 +78,10 @@ pub async fn verify(
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+    // Anonymous endpoint — third-party verification, no JWT. There is no
+    // authenticated user id to bind into `app.user_id`, so the cleanup #3
+    // `RlsTransaction` pattern does not apply here. The service stays on
+    // `&PgPool` and acquires connections per query.
     let result = service::verify_token(
         &state.db,
         body,
@@ -120,6 +128,10 @@ pub async fn revoke(
     RequireUser(user_id): RequireUser,
     Path(token_id):       Path<i32>,
 ) -> AppResult<StatusCode> {
-    service::revoke_my_token(&state.db, token_id, user_id).await?;
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(
+        &state.db, i32::from(user_id),
+    ).await?;
+    service::revoke_my_token(&mut tx, &state.db, token_id, user_id).await?;
+    tx.commit().await?;
     Ok(StatusCode::OK)
 }

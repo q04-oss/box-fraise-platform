@@ -1,5 +1,5 @@
 #![allow(missing_docs)] // Repository layer — internal implementation, documented at service layer.
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use crate::error::{AppResult, DomainError};
 use super::types::{BusinessRow, LocationRow, BUSINESS_COLS, LOCATION_COLS};
@@ -8,7 +8,7 @@ use super::types::{BusinessRow, LocationRow, BUSINESS_COLS, LOCATION_COLS};
 
 /// Insert a new location and return the created row.
 pub async fn create_location(
-    pool:          &PgPool,
+    conn:          &mut PgConnection,
     name:          &str,
     location_type: &str,
     address:       &str,
@@ -33,17 +33,17 @@ pub async fn create_location(
     .bind(timezone)
     .bind(contact_email)
     .bind(contact_phone)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
-pub async fn get_location_by_id(pool: &PgPool, location_id: i32) -> AppResult<Option<LocationRow>> {
+pub async fn get_location_by_id(conn: &mut PgConnection, location_id: i32) -> AppResult<Option<LocationRow>> {
     sqlx::query_as(&format!(
         "SELECT {LOCATION_COLS} FROM locations WHERE id = $1 AND is_active = true"
     ))
     .bind(location_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -52,7 +52,7 @@ pub async fn get_location_by_id(pool: &PgPool, location_id: i32) -> AppResult<Op
 
 /// Insert a new business in `pending` status and return the created row.
 pub async fn create_business(
-    pool:             &PgPool,
+    conn:             &mut PgConnection,
     location_id:      i32,
     primary_holder_id: i32,
     name:             &str,
@@ -65,42 +65,42 @@ pub async fn create_business(
     .bind(location_id)
     .bind(primary_holder_id)
     .bind(name)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
-pub async fn get_business_by_id(pool: &PgPool, business_id: i32) -> AppResult<Option<BusinessRow>> {
+pub async fn get_business_by_id(conn: &mut PgConnection, business_id: i32) -> AppResult<Option<BusinessRow>> {
     sqlx::query_as(&format!(
         "SELECT {BUSINESS_COLS} FROM businesses \
          WHERE id = $1 AND deleted_at IS NULL"
     ))
     .bind(business_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
-pub async fn get_businesses_by_holder(pool: &PgPool, user_id: i32) -> AppResult<Vec<BusinessRow>> {
+pub async fn get_businesses_by_holder(conn: &mut PgConnection, user_id: i32) -> AppResult<Vec<BusinessRow>> {
     sqlx::query_as(&format!(
         "SELECT {BUSINESS_COLS} FROM businesses \
          WHERE primary_holder_id = $1 AND deleted_at IS NULL \
          ORDER BY created_at DESC"
     ))
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 /// Count active businesses owned by a user (for the 5-business abuse cap).
-pub async fn count_active_businesses(pool: &PgPool, user_id: i32) -> AppResult<i64> {
+pub async fn count_active_businesses(conn: &mut PgConnection, user_id: i32) -> AppResult<i64> {
     sqlx::query_scalar(
         "SELECT COUNT(*) FROM businesses \
          WHERE primary_holder_id = $1 AND is_active = true AND deleted_at IS NULL"
     )
     .bind(user_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }

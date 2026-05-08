@@ -701,7 +701,11 @@ async fn authenticated_user_can_view_any_business_profile(pool: PgPool) {
 
     // Owner creates a business.
     let bus = box_fraise_domain::event_bus::EventBus::new();
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool, i32::from(owner.id))
+        .await
+        .unwrap();
     let biz = box_fraise_domain::domain::businesses::service::create_business(
+        &mut tx,
         &pool,
         owner.id,
         box_fraise_domain::domain::businesses::types::CreateBusinessRequest {
@@ -717,6 +721,7 @@ async fn authenticated_user_can_view_any_business_profile(pool: PgPool) {
     )
     .await
     .unwrap();
+    tx.commit().await.unwrap();
 
     // Visitor (different user, not owner) can view the business.
     let visitor_token = common::valid_token(i32::from(visitor.id));
@@ -1066,29 +1071,45 @@ async fn setup_attestation_handler_context(pool: &PgPool) -> (String, i32, i32, 
     .unwrap();
 
     // Grant staff delivery_staff role (admin grants to staff).
-    staff_svc::grant_staff_role(
-        pool, admin,
-        GrantRoleRequest {
-            user_id: staff_id, role: "delivery_staff".to_owned(),
-            location_id: Some(loc_id), expires_at: None, confirmed_by: None,
-        },
-        &bus,
-    ).await.unwrap();
+    {
+        let mut atx = box_fraise_domain::transaction::AdminRlsTransaction::begin(pool)
+            .await.unwrap();
+        staff_svc::grant_staff_role(
+            &mut atx, pool, admin,
+            GrantRoleRequest {
+                user_id: staff_id, role: "delivery_staff".to_owned(),
+                location_id: Some(loc_id), expires_at: None, confirmed_by: None,
+            },
+            &bus,
+        ).await.unwrap();
+        atx.commit().await.unwrap();
+    }
 
-    let visit = staff_svc::schedule_visit(
-        pool, staff,
-        ScheduleVisitRequest {
-            location_id: loc_id, visit_type: "combined".to_owned(),
-            scheduled_at: chrono::Utc::now() + chrono::Duration::hours(1),
-            window_hours: Some(4), support_booking_capacity: Some(0), expected_box_count: Some(0),
-        },
-        &bus,
-    ).await.unwrap();
+    let visit = {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(pool, i32::from(staff))
+            .await.unwrap();
+        let v = staff_svc::schedule_visit(
+            &mut tx, pool, staff,
+            ScheduleVisitRequest {
+                location_id: loc_id, visit_type: "combined".to_owned(),
+                scheduled_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                window_hours: Some(4), support_booking_capacity: Some(0), expected_box_count: Some(0),
+            },
+            &bus,
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+        v
+    };
 
-    staff_svc::arrive_at_visit(
-        pool, visit.id, staff,
-        ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
-    ).await.unwrap();
+    {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(pool, i32::from(staff))
+            .await.unwrap();
+        staff_svc::arrive_at_visit(
+            &mut tx, pool, visit.id, staff,
+            ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+    }
 
     // Two attestation reviewers (no location).
     let (r1_id,): (i32,) = sqlx::query_as(
@@ -1108,14 +1129,17 @@ async fn setup_attestation_handler_context(pool: &PgPool) -> (String, i32, i32, 
     .unwrap();
 
     for rid in [r1_id, r2_id] {
+        let mut atx = box_fraise_domain::transaction::AdminRlsTransaction::begin(pool)
+            .await.unwrap();
         staff_svc::grant_staff_role(
-            pool, admin,
+            &mut atx, pool, admin,
             GrantRoleRequest {
                 user_id: rid, role: "attestation_reviewer".to_owned(),
                 location_id: None, expires_at: None, confirmed_by: None,
             },
             &bus,
         ).await.unwrap();
+        atx.commit().await.unwrap();
     }
 
     // Target user: presence_confirmed + met threshold.
@@ -1207,7 +1231,10 @@ async fn post_attestations_staff_sign_returns_200(pool: PgPool) {
     let bus = EventBus::new();
     let state_for_setup = common::build_state(pool.clone(), None);
 
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&state_for_setup.db, staff_id)
+        .await.unwrap();
     let attest = attest_svc::initiate_attestation(
+        &mut tx,
         &state_for_setup.db,
         UserId::from(staff_id),
         InitiateAttestationRequest {
@@ -1221,6 +1248,7 @@ async fn post_attestations_staff_sign_returns_200(pool: PgPool) {
     )
     .await
     .expect("initiate must succeed for handler test setup");
+    tx.commit().await.unwrap();
 
     let state = common::build_state(pool, None);
     let app   = box_fraise_server::app::build(state);
@@ -1369,11 +1397,14 @@ async fn get_soultokens_me_returns_200_with_display_code(pool: PgPool) {
     let bus = EventBus::new();
     use secrecy::ExposeSecret;
     let hmac_key = state_setup.cfg.soultoken_hmac_key.expose_secret().as_bytes().to_vec();
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&state_setup.db, uid)
+        .await.unwrap();
     st_svc::issue_soultoken(
-        &state_setup.db, UserId::from(uid),
+        &mut tx, &state_setup.db, UserId::from(uid),
         IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
         &hmac_key, &state_setup.ed25519_key_pair, &bus,
     ).await.expect("issue must succeed for handler test setup");
+    tx.commit().await.unwrap();
 
     let state = common::build_state(pool, None);
     let app   = box_fraise_server::app::build(state);
@@ -1422,11 +1453,14 @@ async fn get_soultokens_me_response_contains_no_uuid(pool: PgPool) {
     let bus = EventBus::new();
     use secrecy::ExposeSecret;
     let hmac_key = state_setup.cfg.soultoken_hmac_key.expose_secret().as_bytes().to_vec();
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&state_setup.db, uid)
+        .await.unwrap();
     st_svc::issue_soultoken(
-        &state_setup.db, UserId::from(uid),
+        &mut tx, &state_setup.db, UserId::from(uid),
         IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
         &hmac_key, &state_setup.ed25519_key_pair, &bus,
     ).await.unwrap();
+    tx.commit().await.unwrap();
 
     let state = common::build_state(pool, None);
     let app   = box_fraise_server::app::build(state);
@@ -1512,14 +1546,17 @@ async fn post_orders_cancel_returns_403_for_wrong_user(pool: PgPool) {
 
     let bus = EventBus::new();
     let state_setup = common::build_state(pool.clone(), None);
+    let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&state_setup.db, owner_id)
+        .await.unwrap();
     let order = ord_svc::create_order(
-        &state_setup.db, UserId::from(owner_id),
+        &mut tx, &state_setup.db, UserId::from(owner_id),
         CreateOrderRequest {
             business_id: biz_id, variety_description: None,
             box_count: 1, amount_cents: 1000,
         },
         &bus,
     ).await.unwrap();
+    tx.commit().await.unwrap();
 
     // A different user tries to cancel.
     let (attacker_id, attacker_token) = create_platform_admin_user(&pool).await;
@@ -1569,59 +1606,90 @@ async fn post_orders_collect_returns_409_for_double_tap(pool: PgPool) {
     )
     .bind(loc_id).bind(admin_id).fetch_one(&pool).await.unwrap();
 
-    staff_svc::grant_staff_role(
-        &state_setup.db, admin,
-        GrantRoleRequest {
-            user_id: staff_id, role: "delivery_staff".to_owned(),
-            location_id: Some(loc_id), expires_at: None, confirmed_by: None,
-        },
-        &bus,
-    ).await.unwrap();
+    {
+        let mut atx = box_fraise_domain::transaction::AdminRlsTransaction::begin(&state_setup.db)
+            .await.unwrap();
+        staff_svc::grant_staff_role(
+            &mut atx, &state_setup.db, admin,
+            GrantRoleRequest {
+                user_id: staff_id, role: "delivery_staff".to_owned(),
+                location_id: Some(loc_id), expires_at: None, confirmed_by: None,
+            },
+            &bus,
+        ).await.unwrap();
+        atx.commit().await.unwrap();
+    }
 
-    let visit = staff_svc::schedule_visit(
-        &state_setup.db, staff,
-        ScheduleVisitRequest {
-            location_id: loc_id, visit_type: "delivery".to_owned(),
-            scheduled_at: chrono::Utc::now() + chrono::Duration::hours(1),
-            window_hours: Some(4), support_booking_capacity: Some(0), expected_box_count: Some(5),
-        },
-        &bus,
-    ).await.unwrap();
+    let visit = {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&state_setup.db, i32::from(staff))
+            .await.unwrap();
+        let v = staff_svc::schedule_visit(
+            &mut tx, &state_setup.db, staff,
+            ScheduleVisitRequest {
+                location_id: loc_id, visit_type: "delivery".to_owned(),
+                scheduled_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                window_hours: Some(4), support_booking_capacity: Some(0), expected_box_count: Some(5),
+            },
+            &bus,
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+        v
+    };
 
-    staff_svc::arrive_at_visit(
-        &state_setup.db, visit.id, staff,
-        ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
-    ).await.unwrap();
+    {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&state_setup.db, i32::from(staff))
+            .await.unwrap();
+        staff_svc::arrive_at_visit(
+            &mut tx, &state_setup.db, visit.id, staff,
+            ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+    }
 
     // Create order for user.
     let (user_id, user_token) = create_platform_admin_user(&pool).await;
     let user = UserId::from(user_id);
 
-    ord_svc::create_order(
-        &state_setup.db, user,
-        CreateOrderRequest {
-            business_id: biz_id, variety_description: None,
-            box_count: 1, amount_cents: 1000,
-        },
-        &bus,
-    ).await.unwrap();
+    {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&state_setup.db, user_id)
+            .await.unwrap();
+        ord_svc::create_order(
+            &mut tx, &state_setup.db, user,
+            CreateOrderRequest {
+                business_id: biz_id, variety_description: None,
+                box_count: 1, amount_cents: 1000,
+            },
+            &bus,
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+    }
 
     // Activate a box.
-    ord_svc::activate_box(
-        &state_setup.db, visit.id, staff,
-        ActivateBoxRequest {
-            nfc_chip_uid:       "NFC-HANDLER-DT".to_owned(),
-            delivery_signature: "sig".to_owned(),
-            expires_at:         chrono::Utc::now() + chrono::Duration::hours(4),
-        },
-    ).await.unwrap();
+    {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&state_setup.db, i32::from(staff))
+            .await.unwrap();
+        ord_svc::activate_box(
+            &mut tx, &state_setup.db, visit.id, staff,
+            ActivateBoxRequest {
+                nfc_chip_uid:       "NFC-HANDLER-DT".to_owned(),
+                delivery_signature: "sig".to_owned(),
+                expires_at:         chrono::Utc::now() + chrono::Duration::hours(4),
+            },
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+    }
 
     // First collect via service (succeeds).
-    ord_svc::collect_order(
-        &state_setup.db, user,
-        CollectOrderRequest { nfc_chip_uid: "NFC-HANDLER-DT".to_owned() },
-        &bus,
-    ).await.unwrap();
+    {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&state_setup.db, user_id)
+            .await.unwrap();
+        ord_svc::collect_order(
+            &mut tx, &state_setup.db, user,
+            CollectOrderRequest { nfc_chip_uid: "NFC-HANDLER-DT".to_owned() },
+            &bus,
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+    }
 
     // Second collect via HTTP (should be 409).
     let state = common::build_state(pool, None);
@@ -1664,30 +1732,46 @@ async fn setup_support_visit_for_handler(pool: &PgPool, capacity: i32) -> (i32, 
     ).bind(&staff_email).fetch_one(pool).await.unwrap();
     let staff_token = common::valid_token(staff_id);
 
-    staff_svc::grant_staff_role(pool, UserId::from(admin_id),
-        GrantRoleRequest {
-            user_id:      staff_id,
-            role:         "delivery_staff".to_owned(),
-            location_id:  Some(loc_id),
-            expires_at:   None,
-            confirmed_by: None,
-        }, &bus,
-    ).await.unwrap();
+    {
+        let mut atx = box_fraise_domain::transaction::AdminRlsTransaction::begin(pool)
+            .await.unwrap();
+        staff_svc::grant_staff_role(&mut atx, pool, UserId::from(admin_id),
+            GrantRoleRequest {
+                user_id:      staff_id,
+                role:         "delivery_staff".to_owned(),
+                location_id:  Some(loc_id),
+                expires_at:   None,
+                confirmed_by: None,
+            }, &bus,
+        ).await.unwrap();
+        atx.commit().await.unwrap();
+    }
 
-    let visit = staff_svc::schedule_visit(pool, UserId::from(staff_id),
-        ScheduleVisitRequest {
-            location_id:              loc_id,
-            visit_type:               "support".to_owned(),
-            scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
-            window_hours:             Some(4),
-            support_booking_capacity: Some(capacity),
-            expected_box_count:       Some(0),
-        }, &bus,
-    ).await.unwrap();
+    let visit = {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(pool, staff_id)
+            .await.unwrap();
+        let v = staff_svc::schedule_visit(&mut tx, pool, UserId::from(staff_id),
+            ScheduleVisitRequest {
+                location_id:              loc_id,
+                visit_type:               "support".to_owned(),
+                scheduled_at:             chrono::Utc::now() + chrono::Duration::hours(1),
+                window_hours:             Some(4),
+                support_booking_capacity: Some(capacity),
+                expected_box_count:       Some(0),
+            }, &bus,
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+        v
+    };
 
-    staff_svc::arrive_at_visit(pool, visit.id, UserId::from(staff_id),
-        ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
-    ).await.unwrap();
+    {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(pool, staff_id)
+            .await.unwrap();
+        staff_svc::arrive_at_visit(&mut tx, pool, visit.id, UserId::from(staff_id),
+            ArriveAtVisitRequest { arrived_latitude: None, arrived_longitude: None },
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+    }
 
     (staff_id, staff_token, visit.id)
 }
@@ -1734,11 +1818,16 @@ async fn post_support_bookings_returns_409_for_duplicate(pool: PgPool) {
     let user_token = common::valid_token(user_id);
 
     // Book via service first.
-    sup_svc::create_booking(
-        &pool, UserId::from(user_id),
-        CreateBookingRequest { visit_id, issue_description: None, priority: None },
-        &bus,
-    ).await.unwrap();
+    {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool, user_id)
+            .await.unwrap();
+        sup_svc::create_booking(
+            &mut tx, &pool, UserId::from(user_id),
+            CreateBookingRequest { visit_id, issue_description: None, priority: None },
+            &bus,
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+    }
 
     // Second booking via HTTP should conflict.
     let state = common::build_state(pool, None);
@@ -1769,14 +1858,25 @@ async fn post_support_bookings_resolve_returns_403_for_non_staff(pool: PgPool) {
         "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id"
     ).bind(&email).fetch_one(&pool).await.unwrap();
 
-    let booking = sup_svc::create_booking(
-        &pool, UserId::from(user_id),
-        CreateBookingRequest { visit_id, issue_description: None, priority: None },
-        &bus,
-    ).await.unwrap();
+    let booking = {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool, user_id)
+            .await.unwrap();
+        let b = sup_svc::create_booking(
+            &mut tx, &pool, UserId::from(user_id),
+            CreateBookingRequest { visit_id, issue_description: None, priority: None },
+            &bus,
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+        b
+    };
 
     // Mark attended via staff.
-    sup_svc::attend_booking(&pool, booking.id, UserId::from(staff_id)).await.unwrap();
+    {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool, staff_id)
+            .await.unwrap();
+        sup_svc::attend_booking(&mut tx, &pool, booking.id, UserId::from(staff_id)).await.unwrap();
+        tx.commit().await.unwrap();
+    }
 
     // A random non-staff user tries to resolve.
     let attacker_email: String = SafeEmail().fake();
@@ -1821,11 +1921,16 @@ async fn get_support_bookings_me_returns_200(pool: PgPool) {
         event_bus::EventBus, types::UserId,
     };
     let bus = EventBus::new();
-    sup_svc::create_booking(
-        &pool, UserId::from(user_id),
-        CreateBookingRequest { visit_id, issue_description: None, priority: None },
-        &bus,
-    ).await.unwrap();
+    {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool, user_id)
+            .await.unwrap();
+        sup_svc::create_booking(
+            &mut tx, &pool, UserId::from(user_id),
+            CreateBookingRequest { visit_id, issue_description: None, priority: None },
+            &bus,
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+    }
 
     let state = common::build_state(pool, None);
     let app   = box_fraise_server::app::build(state);
@@ -1916,10 +2021,15 @@ async fn setup_attested_user_with_soultoken_for_handler(
         .bind(uid).execute(pool).await.unwrap();
 
     let kp = common::test_ed25519_key_pair();
-    st_svc::issue_soultoken(pool, UserId::from(uid),
-        IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
-        b"test-soultoken-hmac-key-32bytes!!", &kp, &bus,
-    ).await.unwrap();
+    {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(pool, uid)
+            .await.unwrap();
+        st_svc::issue_soultoken(&mut tx, pool, UserId::from(uid),
+            IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
+            b"test-soultoken-hmac-key-32bytes!!", &kp, &bus,
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+    }
 
     (uid, common::valid_token(uid))
 }
@@ -1961,15 +2071,21 @@ async fn post_verify_returns_200_for_valid_token(pool: PgPool) {
         &pool, "attestation_token_verify_valid_user@example.com",
     ).await;
 
-    let issued = at_svc::issue_token(&pool, UserId::from(user_id),
-        IssueAttestationTokenRequest {
-            scope: "presence.verified".to_owned(),
-            requesting_business_soultoken_id: None,
-            user_device_id: None,
-            presentation_latitude: None,
-            presentation_longitude: None,
-        }, &bus,
-    ).await.unwrap();
+    let issued = {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool, user_id)
+            .await.unwrap();
+        let i = at_svc::issue_token(&mut tx, &pool, UserId::from(user_id),
+            IssueAttestationTokenRequest {
+                scope: "presence.verified".to_owned(),
+                requesting_business_soultoken_id: None,
+                user_device_id: None,
+                presentation_latitude: None,
+                presentation_longitude: None,
+            }, &bus,
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+        i
+    };
 
     let state = common::build_state(pool, None);
     let app   = box_fraise_server::app::build(state);
@@ -2024,15 +2140,21 @@ async fn get_me_returns_200_without_raw_token(pool: PgPool) {
         &pool, "attestation_token_get_me_user@example.com",
     ).await;
 
-    let issued = at_svc::issue_token(&pool, UserId::from(user_id),
-        IssueAttestationTokenRequest {
-            scope: "presence.verified".to_owned(),
-            requesting_business_soultoken_id: None,
-            user_device_id: None,
-            presentation_latitude: None,
-            presentation_longitude: None,
-        }, &bus,
-    ).await.unwrap();
+    let issued = {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool, user_id)
+            .await.unwrap();
+        let i = at_svc::issue_token(&mut tx, &pool, UserId::from(user_id),
+            IssueAttestationTokenRequest {
+                scope: "presence.verified".to_owned(),
+                requesting_business_soultoken_id: None,
+                user_device_id: None,
+                presentation_latitude: None,
+                presentation_longitude: None,
+            }, &bus,
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+        i
+    };
 
     let state = common::build_state(pool, None);
     let app   = box_fraise_server::app::build(state);
@@ -2697,8 +2819,13 @@ async fn admin_ban_user_sets_is_banned(pool: PgPool) {
         "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
     ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
 
-    user_svc::admin_ban_user(&pool, admin_id, target_id, "test ban".to_string())
-        .await.expect("ban must succeed");
+    {
+        let mut atx = box_fraise_domain::transaction::AdminRlsTransaction::begin(&pool)
+            .await.unwrap();
+        user_svc::admin_ban_user(&mut atx, &pool, admin_id, target_id, "test ban".to_string())
+            .await.expect("ban must succeed");
+        atx.commit().await.unwrap();
+    }
 
     let row: (bool, Option<chrono::DateTime<chrono::Utc>>, Option<String>) = sqlx::query_as(
         "SELECT is_banned, banned_at, banned_reason FROM users WHERE id = $1"
@@ -2727,8 +2854,13 @@ async fn admin_unban_user_clears_ban(pool: PgPool) {
          VALUES ($1, true, true, now(), 'previous reason') RETURNING id",
     ).bind(&SafeEmail().fake::<String>()).fetch_one(&pool).await.unwrap();
 
-    user_svc::admin_unban_user(&pool, admin_id, target_id)
-        .await.expect("unban must succeed");
+    {
+        let mut atx = box_fraise_domain::transaction::AdminRlsTransaction::begin(&pool)
+            .await.unwrap();
+        user_svc::admin_unban_user(&mut atx, &pool, admin_id, target_id)
+            .await.expect("unban must succeed");
+        atx.commit().await.unwrap();
+    }
 
     let row: (bool, Option<chrono::DateTime<chrono::Utc>>, Option<String>) = sqlx::query_as(
         "SELECT is_banned, banned_at, banned_reason FROM users WHERE id = $1"
@@ -2754,7 +2886,12 @@ async fn request_erasure_anonymises_user_record(pool: PgPool) {
     .bind(&SafeEmail().fake::<String>())
     .fetch_one(&pool).await.unwrap();
 
-    user_svc::request_erasure(&pool, uid).await.expect("erasure must succeed for soultoken-less user");
+    {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool, uid)
+            .await.unwrap();
+        user_svc::request_erasure(&mut tx, &pool, uid).await.expect("erasure must succeed for soultoken-less user");
+        tx.commit().await.unwrap();
+    }
 
     let row: (String, Option<String>, Option<String>, Option<String>, Option<chrono::DateTime<chrono::Utc>>) =
         sqlx::query_as(
@@ -2834,7 +2971,14 @@ async fn request_erasure_fails_if_active_soultoken(pool: PgPool) {
                                     attested_at = now() WHERE id = $2")
         .bind(st_id).bind(uid).execute(&pool).await.unwrap();
 
-    let err = user_svc::request_erasure(&pool, uid).await.unwrap_err();
+    let err = {
+        let mut tx = box_fraise_domain::transaction::RlsTransaction::begin(&pool, uid)
+            .await.unwrap();
+        let r = user_svc::request_erasure(&mut tx, &pool, uid).await;
+        // commit on success; on error, rollback by dropping tx (no need to commit)
+        if r.is_ok() { tx.commit().await.unwrap(); }
+        r.unwrap_err()
+    };
     assert!(
         matches!(err, box_fraise_domain::error::DomainError::Conflict(_)),
         "expected Conflict (active soultoken), got: {err:?}"
@@ -2845,6 +2989,7 @@ async fn request_erasure_fails_if_active_soultoken(pool: PgPool) {
 #[sqlx::test]
 async fn export_my_data_returns_complete_profile(pool: PgPool) {
     use box_fraise_domain::domain::users::service as user_svc;
+    use box_fraise_domain::transaction::RlsTransaction;
     use fake::{Fake, faker::internet::en::SafeEmail};
 
     let (uid,): (i32,) = sqlx::query_as(
@@ -2855,7 +3000,12 @@ async fn export_my_data_returns_complete_profile(pool: PgPool) {
         "INSERT INTO verification_events (user_id, event_type) VALUES ($1, 'identity_confirmed')"
     ).bind(uid).execute(&pool).await.unwrap();
 
-    let export = user_svc::export_my_data(&pool, uid).await.expect("export must succeed");
+    // Hardening cleanup #3 pilot — services on the migrated path require a
+    // RlsTransaction. Mirrors the handler's begin → call → commit shape.
+    let mut tx = RlsTransaction::begin(&pool, uid).await.expect("begin tx");
+    let export = user_svc::export_my_data(&mut tx, &pool, uid)
+        .await.expect("export must succeed");
+    tx.commit().await.expect("commit tx");
 
     assert_eq!(export.user_profile.id, uid);
     assert_eq!(export.user_profile.verification_status, "identity_confirmed");

@@ -1,5 +1,5 @@
 #![allow(missing_docs)]
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use crate::error::{AppResult, DomainError};
 use super::types::{GiftBoxHistoryRow, SupportBookingRow, SUPPORT_BOOKING_COLS};
@@ -7,7 +7,7 @@ use super::types::{GiftBoxHistoryRow, SupportBookingRow, SUPPORT_BOOKING_COLS};
 // ── Support bookings ──────────────────────────────────────────────────────────
 
 pub async fn create_booking(
-    pool:              &PgPool,
+    conn:              &mut PgConnection,
     visit_id:          i32,
     user_id:           i32,
     issue_description: Option<&str>,
@@ -23,7 +23,7 @@ pub async fn create_booking(
     .bind(user_id)
     .bind(issue_description)
     .bind(priority)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(|e| {
         if let sqlx::Error::Database(ref db) = e {
@@ -38,20 +38,20 @@ pub async fn create_booking(
 }
 
 pub async fn get_booking_by_id(
-    pool:       &PgPool,
+    conn:       &mut PgConnection,
     booking_id: i32,
 ) -> AppResult<Option<SupportBookingRow>> {
     sqlx::query_as(&format!(
         "SELECT {SUPPORT_BOOKING_COLS} FROM support_bookings WHERE id = $1"
     ))
     .bind(booking_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_bookings_by_user(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
 ) -> AppResult<Vec<SupportBookingRow>> {
     sqlx::query_as(&format!(
@@ -59,13 +59,13 @@ pub async fn get_bookings_by_user(
          WHERE user_id = $1 ORDER BY created_at DESC"
     ))
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_bookings_by_visit(
-    pool:     &PgPool,
+    conn:     &mut PgConnection,
     visit_id: i32,
 ) -> AppResult<Vec<SupportBookingRow>> {
     sqlx::query_as(&format!(
@@ -73,13 +73,13 @@ pub async fn get_bookings_by_visit(
          WHERE visit_id = $1 ORDER BY created_at ASC"
     ))
     .bind(visit_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn attend_booking(
-    pool:       &PgPool,
+    conn:       &mut PgConnection,
     booking_id: i32,
 ) -> AppResult<SupportBookingRow> {
     sqlx::query_as(&format!(
@@ -89,13 +89,13 @@ pub async fn attend_booking(
          RETURNING {SUPPORT_BOOKING_COLS}"
     ))
     .bind(booking_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn resolve_booking(
-    pool:                   &PgPool,
+    conn:                   &mut PgConnection,
     booking_id:             i32,
     resolution_description: &str,
     resolution_signature:   &str,
@@ -119,13 +119,13 @@ pub async fn resolve_booking(
     .bind(resolution_signature)
     .bind(resolution_staff_id)
     .bind(gift_box_provided)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn cancel_booking(
-    pool:                &PgPool,
+    conn:                &mut PgConnection,
     booking_id:          i32,
     cancellation_reason: &str,
 ) -> AppResult<SupportBookingRow> {
@@ -138,13 +138,13 @@ pub async fn cancel_booking(
     ))
     .bind(booking_id)
     .bind(cancellation_reason)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn mark_confirmation_sent(
-    pool:       &PgPool,
+    conn:       &mut PgConnection,
     booking_id: i32,
 ) -> AppResult<()> {
     sqlx::query(
@@ -153,14 +153,14 @@ pub async fn mark_confirmation_sent(
          WHERE id = $1"
     )
     .bind(booking_id)
-    .execute(pool)
+    .execute(conn)
     .await
     .map_err(DomainError::Db)?;
     Ok(())
 }
 
 pub async fn active_booking_count_for_visit(
-    pool:     &PgPool,
+    conn:     &mut PgConnection,
     visit_id: i32,
 ) -> AppResult<i64> {
     sqlx::query_scalar(
@@ -168,7 +168,7 @@ pub async fn active_booking_count_for_visit(
          WHERE visit_id = $1 AND status NOT IN ('cancelled', 'no_show')"
     )
     .bind(visit_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -176,7 +176,7 @@ pub async fn active_booking_count_for_visit(
 // ── Gift box history ──────────────────────────────────────────────────────────
 
 pub async fn record_gift_box(
-    pool:        &PgPool,
+    conn:        &mut PgConnection,
     user_id:     i32,
     visit_id:    i32,
     box_id:      Option<i32>,
@@ -194,13 +194,13 @@ pub async fn record_gift_box(
     .bind(box_id)
     .bind(gift_reason)
     .bind(covered_by)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_last_platform_gift(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
 ) -> AppResult<Option<GiftBoxHistoryRow>> {
     sqlx::query_as(
@@ -210,20 +210,20 @@ pub async fn get_last_platform_gift(
          ORDER BY gifted_at DESC LIMIT 1"
     )
     .bind(user_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn check_platform_gift_eligible(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
 ) -> AppResult<bool> {
     let eligible_after: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
         "SELECT platform_gift_eligible_after FROM users WHERE id = $1"
     )
     .bind(user_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)?;
 
@@ -231,7 +231,7 @@ pub async fn check_platform_gift_eligible(
 }
 
 pub async fn update_platform_gift_eligible_after(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
 ) -> AppResult<()> {
     sqlx::query(
@@ -240,7 +240,7 @@ pub async fn update_platform_gift_eligible_after(
          WHERE id = $1"
     )
     .bind(user_id)
-    .execute(pool)
+    .execute(conn)
     .await
     .map_err(DomainError::Db)?;
     Ok(())

@@ -6,6 +6,7 @@ use crate::{
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
+    transaction::RlsTransaction,
     types::UserId,
 };
 use crate::domain::auth::repository as user_repo;
@@ -58,7 +59,8 @@ fn to_meta(row: &super::types::AttestationTokenRow) -> AttestationTokenMeta {
 ///
 /// Returns the raw token ONCE — it is never stored and cannot be retrieved again.
 pub async fn issue_token(
-    pool:      &PgPool,
+    tx:        &mut RlsTransaction,
+    pool:      &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     user_id:   UserId,
     req:       IssueAttestationTokenRequest,
     event_bus: &EventBus,
@@ -66,13 +68,15 @@ pub async fn issue_token(
     let uid = i32::from(user_id);
 
     // 1. User must exist and not be banned.
+    //    Cross-domain repository (auth) still takes `&PgPool` — call with pool.
     let user = user_repo::find_by_id(pool, user_id)
         .await?
         .ok_or(DomainError::Unauthorized)?;
     if user.is_banned { return Err(DomainError::Forbidden); }
 
     // 2. User must have an active soultoken.
-    let soultoken = soultoken_repo::get_active_soultoken_by_user(pool, uid)
+    //    Cross-domain read on the RLS-scoped tx connection.
+    let soultoken = soultoken_repo::get_active_soultoken_by_user(tx.as_mut(), uid)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -85,7 +89,7 @@ pub async fn issue_token(
 
     // 4. Validate business soultoken if provided.
     if let Some(biz_soultoken_id) = req.requesting_business_soultoken_id {
-        let biz_soultoken = soultoken_repo::get_soultoken_by_id(pool, biz_soultoken_id)
+        let biz_soultoken = soultoken_repo::get_soultoken_by_id(tx.as_mut(), biz_soultoken_id)
             .await?
             .ok_or(DomainError::NotFound)?;
         if biz_soultoken.revoked_at.is_some() {
@@ -102,7 +106,7 @@ pub async fn issue_token(
     // 7. Create attestation token with 15-minute expiry.
     let expires_at = Utc::now() + chrono::Duration::minutes(15);
     let token = repository::create_attestation_token(
-        pool,
+        tx.as_mut(),
         uid,
         soultoken.id,
         &req.scope,
@@ -114,7 +118,8 @@ pub async fn issue_token(
         expires_at,
     ).await?;
 
-    // 8. Audit.
+    // 8. Audit. Outside the transaction (uses `pool`) so it lands
+    //    even if the caller's commit later fails.
     audit::write(
         pool,
         Some(uid),
@@ -144,6 +149,13 @@ pub async fn issue_token(
 ///
 /// Always returns HTTP 200 — the outcome field signals validity.
 /// All attempts are logged regardless of outcome.
+///
+/// **Anonymous endpoint** — third-party verification, no JWT. The function
+/// still writes (`third_party_verification_attempts`, `attestation_tokens`
+/// updates) but it executes in an anonymous attestation context: there is
+/// no authenticated user id to bind into `app.user_id`, so the cleanup #3
+/// `RlsTransaction` pattern does not apply here. The service therefore
+/// stays on `&PgPool` and acquires connections per query.
 pub async fn verify_token(
     pool:       &PgPool,
     req:        VerifyAttestationTokenRequest,
@@ -154,7 +166,10 @@ pub async fn verify_token(
     let token_hash = hash_token(&req.raw_token);
 
     // 2. Look up token by hash.
-    let token_opt = repository::get_token_by_hash(pool, &token_hash).await?;
+    let token_opt = {
+        let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+        repository::get_token_by_hash(&mut conn, &token_hash).await?
+    };
 
     // 3. Record attempt regardless of outcome (always log).
     // We build the attempt record after determining the outcome below.
@@ -169,8 +184,9 @@ pub async fn verify_token(
         let ua         = user_agent.clone();
         let outcome    = outcome.to_string();
         async move {
+            let Ok(mut conn) = pool.acquire().await else { return };
             let _ = repository::record_verification_attempt(
-                &pool,
+                &mut conn,
                 &hash,
                 tid,
                 biz_id,
@@ -231,7 +247,8 @@ pub async fn verify_token(
 
     // 8. Rate limit check (by business soultoken, last 60 seconds).
     if let Some(biz_id) = req.requesting_business_soultoken_id {
-        let recent = repository::get_recent_attempts_by_business(pool, biz_id, 1).await?;
+        let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+        let recent = repository::get_recent_attempts_by_business(&mut conn, biz_id, 1).await?;
         if recent > 10 {
             return Err(DomainError::InvalidInput(
                 "rate limit exceeded — too many verification attempts".to_string(),
@@ -240,7 +257,10 @@ pub async fn verify_token(
     }
 
     // 9. Mark verified.
-    let verified = repository::mark_token_verified(pool, token.id).await?;
+    let verified = {
+        let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+        repository::mark_token_verified(&mut conn, token.id).await?
+    };
 
     // 10. Record success attempt.
     record(pool, Some(token.id), "success").await;
@@ -272,23 +292,29 @@ pub async fn verify_token(
 }
 
 /// Return all attestation tokens for the user — raw_token never included (BFIP Section 11.4).
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn get_my_tokens(
     pool:    &PgPool,
     user_id: UserId,
 ) -> AppResult<Vec<AttestationTokenMeta>> {
-    let rows = repository::get_tokens_by_user(pool, i32::from(user_id)).await?;
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    let rows = repository::get_tokens_by_user(&mut conn, i32::from(user_id)).await?;
     Ok(rows.iter().map(to_meta).collect())
 }
 
 /// Revoke an attestation token before it expires (BFIP Section 11.3).
 pub async fn revoke_my_token(
-    pool:      &PgPool,
+    tx:        &mut RlsTransaction,
+    pool:      &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     token_id:  i32,
     user_id:   UserId,
 ) -> AppResult<()> {
     let uid = i32::from(user_id);
 
-    let token = repository::get_tokens_by_user(pool, uid)
+    let token = repository::get_tokens_by_user(tx.as_mut(), uid)
         .await?
         .into_iter()
         .find(|t| t.id == token_id)
@@ -298,8 +324,10 @@ pub async fn revoke_my_token(
         return Err(DomainError::Forbidden);
     }
 
-    repository::revoke_token(pool, token_id).await?;
+    repository::revoke_token(tx.as_mut(), token_id).await?;
 
+    // Audit. Outside the transaction (uses `pool`) so it lands
+    // even if the caller's commit later fails.
     audit::write(
         pool,
         Some(uid),
@@ -340,6 +368,20 @@ mod tests {
         )
         .bind(email).fetch_one(pool).await.unwrap();
         UserId::from(id)
+    }
+
+    /// Issue a token through the migrated `issue_token` API — opens an
+    /// `RlsTransaction`, calls the service, commits on success.
+    async fn issue_token_via_tx(
+        pool:    &PgPool,
+        user_id: UserId,
+        req:     IssueAttestationTokenRequest,
+        bus:     &EventBus,
+    ) -> AppResult<AttestationTokenResponse> {
+        let mut tx = RlsTransaction::begin(pool, i32::from(user_id)).await?;
+        let resp = issue_token(&mut tx, pool, user_id, req, bus).await?;
+        tx.commit().await?;
+        Ok(resp)
     }
 
     /// Full setup: attested user with active soultoken.
@@ -426,14 +468,16 @@ mod tests {
         // Issue soultoken using the correct signature.
         let user = UserId::from(uid);
         let kp   = test_key_pair();
+        let mut tx = RlsTransaction::begin(pool, uid).await.unwrap();
         let st = soultoken_svc::issue_soultoken(
-            pool, user,
+            &mut tx, pool, user,
             IssueSoultokenRequest {
                 attestation_id: attest_id,
                 token_type:     "user".to_owned(),
             },
             TEST_HMAC_KEY, &kp, &bus,
         ).await.expect("issue_soultoken must succeed");
+        tx.commit().await.unwrap();
 
         (user, st.id)
     }
@@ -463,7 +507,7 @@ mod tests {
         let bus = EventBus::new();
         let (user, _) = setup_attested_user_with_soultoken(&pool).await;
 
-        let resp = issue_token(&pool, user, issue_req(), &bus)
+        let resp = issue_token_via_tx(&pool, user, issue_req(), &bus)
             .await.expect("issue_token must succeed");
 
         assert_eq!(resp.scope, "presence.verified");
@@ -478,7 +522,7 @@ mod tests {
         let bus  = EventBus::new();
         let user = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let err = issue_token(&pool, user, issue_req(), &bus).await.unwrap_err();
+        let err = issue_token_via_tx(&pool, user, issue_req(), &bus).await.unwrap_err();
         assert!(matches!(err, DomainError::NotFound));
     }
 
@@ -487,7 +531,7 @@ mod tests {
         let bus = EventBus::new();
         let (user, _) = setup_attested_user_with_soultoken(&pool).await;
 
-        let resp = issue_token(&pool, user, issue_req(), &bus).await.unwrap();
+        let resp = issue_token_via_tx(&pool, user, issue_req(), &bus).await.unwrap();
         let raw  = &resp.raw_token;
 
         // Scan every text column in attestation_tokens for the raw token value.
@@ -514,7 +558,7 @@ mod tests {
         let bus = EventBus::new();
         let (user, _) = setup_attested_user_with_soultoken(&pool).await;
 
-        let issued = issue_token(&pool, user, issue_req(), &bus).await.unwrap();
+        let issued = issue_token_via_tx(&pool, user, issue_req(), &bus).await.unwrap();
 
         let result = verify_token(&pool, verify_req(&issued.raw_token), None, None, &bus)
             .await.expect("verify_token must succeed");
@@ -531,7 +575,7 @@ mod tests {
         let (user, soultoken_id) = setup_attested_user_with_soultoken(&pool).await;
 
         // Issue and then manually expire the token.
-        let issued = issue_token(&pool, user, issue_req(), &bus).await.unwrap();
+        let issued = issue_token_via_tx(&pool, user, issue_req(), &bus).await.unwrap();
         let hash   = hash_token(&issued.raw_token);
         sqlx::query(
             "UPDATE attestation_tokens SET expires_at = now() - INTERVAL '1 minute' \
@@ -551,7 +595,7 @@ mod tests {
         let bus = EventBus::new();
         let (user, _) = setup_attested_user_with_soultoken(&pool).await;
 
-        let issued = issue_token(&pool, user, issue_req(), &bus).await.unwrap();
+        let issued = issue_token_via_tx(&pool, user, issue_req(), &bus).await.unwrap();
 
         // First verification succeeds.
         let r1 = verify_token(&pool, verify_req(&issued.raw_token), None, None, &bus)
@@ -570,7 +614,7 @@ mod tests {
         let bus = EventBus::new();
         let (user, _) = setup_attested_user_with_soultoken(&pool).await;
 
-        let issued   = issue_token(&pool, user, issue_req(), &bus).await.unwrap();
+        let issued   = issue_token_via_tx(&pool, user, issue_req(), &bus).await.unwrap();
         let mut tampered = issued.raw_token.clone();
         // Flip one character.
         unsafe {
@@ -617,7 +661,7 @@ mod tests {
             ).bind(biz_soultoken_id).execute(&pool).await.unwrap();
         }
 
-        let issued = issue_token(&pool, user, issue_req(), &bus).await.unwrap();
+        let issued = issue_token_via_tx(&pool, user, issue_req(), &bus).await.unwrap();
         let req = VerifyAttestationTokenRequest {
             raw_token:                        issued.raw_token.clone(),
             requesting_business_soultoken_id: Some(biz_soultoken_id),
@@ -634,7 +678,7 @@ mod tests {
         let bus = EventBus::new();
         let (user, _) = setup_attested_user_with_soultoken(&pool).await;
 
-        let issued = issue_token(&pool, user, issue_req(), &bus).await.unwrap();
+        let issued = issue_token_via_tx(&pool, user, issue_req(), &bus).await.unwrap();
         let hash   = hash_token(&issued.raw_token);
 
         // Get the token id.
@@ -642,7 +686,9 @@ mod tests {
             "SELECT id FROM attestation_tokens WHERE token_hash = $1"
         ).bind(&hash).fetch_one(&pool).await.unwrap();
 
-        revoke_my_token(&pool, token_id, user).await.expect("revoke must succeed");
+        let mut tx = RlsTransaction::begin(&pool, i32::from(user)).await.unwrap();
+        revoke_my_token(&mut tx, &pool, token_id, user).await.expect("revoke must succeed");
+        tx.commit().await.unwrap();
 
         let result = verify_token(&pool, verify_req(&issued.raw_token), None, None, &bus)
             .await.unwrap();
@@ -657,7 +703,7 @@ mod tests {
         let bus = EventBus::new();
         let (user, _) = setup_attested_user_with_soultoken(&pool).await;
 
-        let issued  = issue_token(&pool, user, issue_req(), &bus).await.unwrap();
+        let issued  = issue_token_via_tx(&pool, user, issue_req(), &bus).await.unwrap();
         let raw_val = issued.raw_token.clone();
 
         // get_my_tokens returns metadata only — no raw_token field.
@@ -673,7 +719,7 @@ mod tests {
         let bus = EventBus::new();
         let (user, _) = setup_attested_user_with_soultoken(&pool).await;
 
-        let issued     = issue_token(&pool, user, issue_req(), &bus).await.unwrap();
+        let issued     = issue_token_via_tx(&pool, user, issue_req(), &bus).await.unwrap();
         let token_hash = hash_token(&issued.raw_token);
 
         // Attacker submits the hash directly (hash-of-hash won't match stored hash).
@@ -692,13 +738,15 @@ mod tests {
         let (user, _)= setup_attested_user_with_soultoken(&pool).await;
         let attacker = create_user(&pool, &SafeEmail().fake::<String>()).await;
 
-        let issued = issue_token(&pool, user, issue_req(), &bus).await.unwrap();
+        let issued = issue_token_via_tx(&pool, user, issue_req(), &bus).await.unwrap();
         let hash   = hash_token(&issued.raw_token);
         let (token_id,): (i32,) = sqlx::query_as(
             "SELECT id FROM attestation_tokens WHERE token_hash = $1"
         ).bind(&hash).fetch_one(&pool).await.unwrap();
 
-        let err = revoke_my_token(&pool, token_id, attacker).await.unwrap_err();
+        let mut tx = RlsTransaction::begin(&pool, i32::from(attacker)).await.unwrap();
+        let err = revoke_my_token(&mut tx, &pool, token_id, attacker).await.unwrap_err();
+        // tx dropped without commit → rollback on error path.
         assert!(matches!(err, DomainError::NotFound),
             "attacker must get NotFound (not Forbidden — no enumeration), got: {err:?}");
     }
@@ -709,7 +757,7 @@ mod tests {
         let bus = EventBus::new();
         let (user, _) = setup_attested_user_with_soultoken(&pool).await;
 
-        let issued   = issue_token(&pool, user, issue_req(), &bus).await.unwrap();
+        let issued   = issue_token_via_tx(&pool, user, issue_req(), &bus).await.unwrap();
         let fake_tok = "0".repeat(64);
 
         let t0 = Instant::now();

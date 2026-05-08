@@ -8,6 +8,7 @@ use crate::{
     error::{AppResult, DomainError},
     event_bus::EventBus,
     events::DomainEvent,
+    transaction::RlsTransaction,
     types::UserId,
 };
 use crate::domain::auth::repository as user_repo;
@@ -155,7 +156,8 @@ fn to_renewal_response(row: super::types::SoultokenRenewalRow) -> SoultokenRenew
 /// The user must have `verification_status = 'attested'`.
 /// Builds the full verification chain: identity_credential + presence_threshold + attestation.
 pub async fn issue_soultoken(
-    pool:        &PgPool,
+    tx:          &mut RlsTransaction,
+    pool:        &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     user_id:     UserId,
     req:         IssueSoultokenRequest,
     hmac_key:    &[u8],
@@ -175,7 +177,7 @@ pub async fn issue_soultoken(
     }
 
     // 2. Check user does not already have an active soultoken.
-    if repository::get_active_soultoken_by_user(pool, uid).await?.is_some() {
+    if repository::get_active_soultoken_by_user(tx.as_mut(), uid).await?.is_some() {
         return Err(DomainError::Conflict(
             "user already has an active soultoken".to_string(),
         ));
@@ -187,7 +189,7 @@ pub async fn issue_soultoken(
          WHERE id = $1 AND status = 'approved'"
     )
     .bind(req.attestation_id)
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await
     .map_err(DomainError::Db)?
     .ok_or_else(|| DomainError::InvalidInput(
@@ -201,7 +203,7 @@ pub async fn issue_soultoken(
          ORDER BY created_at DESC LIMIT 1"
     )
     .bind(uid)
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -216,7 +218,7 @@ pub async fn issue_soultoken(
     // would produce a signature that no longer verifies once the row is read
     // back, because RFC3339 formatting differs at the sub-microsecond level.
     let token = repository::create_soultoken(
-        pool,
+        tx.as_mut(),
         token_uuid,
         &display_code,
         1,
@@ -239,10 +241,10 @@ pub async fn issue_soultoken(
         &display_code,
         key_pair,
     );
-    repository::update_signature(pool, token.id, &signature).await?;
+    repository::update_signature(tx.as_mut(), token.id, &signature).await?;
 
     // 8. Update users.soultoken_id.
-    repository::update_user_soultoken_id(pool, uid, Some(token.id)).await?;
+    repository::update_user_soultoken_id(tx.as_mut(), uid, Some(token.id)).await?;
 
     // 9. Write verification_event and audit_event.
     if let Err(e) = sqlx::query(
@@ -253,12 +255,14 @@ pub async fn issue_soultoken(
     .bind(uid)
     .bind(token.id)
     .bind(serde_json::json!({ "token_type": &req.token_type }))
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     {
         tracing::error!(error = %e, "verification_events (soultoken_issued) insert failed");
     }
 
+    // Audit writes use `pool` (separate connection) — they commit
+    // independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(uid),
@@ -284,12 +288,17 @@ pub async fn issue_soultoken(
 /// Return the active soultoken for the authenticated user (BFIP Section 7.2).
 ///
 /// Never includes uuid in the response.
+///
+/// Read-only, no audit — kept on `&PgPool` per cleanup #3 rule. Acquires a
+/// pool connection internally to satisfy the repository's `&mut PgConnection`
+/// signature.
 pub async fn get_my_soultoken(
     pool:    &PgPool,
     user_id: UserId,
 ) -> AppResult<SoultokenResponse> {
     let uid = i32::from(user_id);
-    let row = repository::get_active_soultoken_by_user(pool, uid)
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    let row = repository::get_active_soultoken_by_user(&mut conn, uid)
         .await?
         .ok_or(DomainError::NotFound)?;
     Ok(to_response(row))
@@ -299,7 +308,8 @@ pub async fn get_my_soultoken(
 ///
 /// Revocation resets the user to `registered` — they must restart the protocol.
 pub async fn revoke_soultoken(
-    pool:               &PgPool,
+    tx:                 &mut RlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     soultoken_id:       i32,
     requesting_user_id: UserId,
     req:                RevokeSoultokenRequest,
@@ -322,7 +332,7 @@ pub async fn revoke_soultoken(
                AND (expires_at IS NULL OR expires_at > now())"
         )
         .bind(rid)
-        .fetch_one(pool)
+        .fetch_one(tx.as_mut())
         .await
         .map_err(DomainError::Db)?;
         count > 0
@@ -333,7 +343,7 @@ pub async fn revoke_soultoken(
     }
 
     // 2. Load soultoken — must exist, not already revoked.
-    let token = repository::get_soultoken_by_id(pool, soultoken_id)
+    let token = repository::get_soultoken_by_id(tx.as_mut(), soultoken_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -351,7 +361,7 @@ pub async fn revoke_soultoken(
 
     // 4. Revoke soultoken.
     let revoked = repository::revoke_soultoken(
-        pool,
+        tx.as_mut(),
         soultoken_id,
         &req.revocation_reason,
         Some(rid),
@@ -368,7 +378,7 @@ pub async fn revoke_soultoken(
          WHERE id = $1"
     )
     .bind(token.holder_user_id)
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -382,12 +392,14 @@ pub async fn revoke_soultoken(
     .bind(soultoken_id)
     .bind(rid)
     .bind(serde_json::json!({ "reason": &req.revocation_reason }))
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     {
         tracing::error!(error = %e, "verification_events (soultoken_revoked) insert failed");
     }
 
+    // Audit writes use `pool` (separate connection) — they commit
+    // independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(rid),
@@ -407,7 +419,8 @@ pub async fn revoke_soultoken(
 ///
 /// Requires in-person visit and witnessed by delivery staff.
 pub async fn surrender_soultoken(
-    pool:               &PgPool,
+    tx:                 &mut RlsTransaction,
+    pool:               &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     soultoken_id:       i32,
     requesting_user_id: UserId,
     req:                SurrenderSoultokenRequest,
@@ -416,7 +429,7 @@ pub async fn surrender_soultoken(
     let uid = i32::from(requesting_user_id);
 
     // 1. Load soultoken — must not be already revoked.
-    let token = repository::get_soultoken_by_id(pool, soultoken_id)
+    let token = repository::get_soultoken_by_id(tx.as_mut(), soultoken_id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -434,7 +447,7 @@ pub async fn surrender_soultoken(
         "SELECT COUNT(*) FROM staff_visits WHERE id = $1"
     )
     .bind(req.revocation_visit_id)
-    .fetch_one(pool)
+    .fetch_one(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -453,7 +466,7 @@ pub async fn surrender_soultoken(
            AND (expires_at IS NULL OR expires_at > now())"
     )
     .bind(req.surrender_witnessed_by)
-    .fetch_one(pool)
+    .fetch_one(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -465,7 +478,7 @@ pub async fn surrender_soultoken(
 
     // 5. Revoke with reason = 'voluntary_surrender'.
     let revoked = repository::revoke_soultoken(
-        pool,
+        tx.as_mut(),
         soultoken_id,
         "voluntary_surrender",
         None,
@@ -482,7 +495,7 @@ pub async fn surrender_soultoken(
          WHERE id = $1"
     )
     .bind(uid)
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     .map_err(DomainError::Db)?;
 
@@ -500,13 +513,15 @@ pub async fn surrender_soultoken(
             "revocation_visit_id":    req.revocation_visit_id,
             "surrender_witnessed_by": req.surrender_witnessed_by,
         }))
-        .execute(pool)
+        .execute(tx.as_mut())
         .await
         {
             tracing::error!(error = %e, "verification_events ({event_type}) insert failed");
         }
     }
 
+    // Audit writes use `pool` (separate connection) — they commit
+    // independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(uid),
@@ -532,7 +547,8 @@ pub async fn surrender_soultoken(
 ///
 /// A qualifying presence event extends the validity window.
 pub async fn renew_soultoken(
-    pool:              &PgPool,
+    tx:                &mut RlsTransaction,
+    pool:              &PgPool, // pool: for audit writes only — audit is outside the transaction so it lands even on rollback
     user_id:           UserId,
     req:               RenewSoultokenRequest,
     key_pair:          &Ed25519KeyPair,
@@ -541,7 +557,7 @@ pub async fn renew_soultoken(
     let uid = i32::from(user_id);
 
     // 1. Get active soultoken — must exist and not be revoked or expired.
-    let token = repository::get_active_soultoken_by_user(pool, uid)
+    let token = repository::get_active_soultoken_by_user(tx.as_mut(), uid)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -559,11 +575,11 @@ pub async fn renew_soultoken(
     // 4. Update soultoken expires_at and re-sign with the new payload.
     //    Use the row returned by the UPDATE so the signature is computed from
     //    the µs-precision timestamps Postgres actually stored.
-    let renewed = repository::renew_soultoken(pool, token.id, new_expires_at).await?;
+    let renewed = repository::renew_soultoken(tx.as_mut(), token.id, new_expires_at).await?;
 
     // The internal UUID is not carried on `SoultokenRow` — fetch it here so the
     // signing payload can be rebuilt for the new expires_at.
-    let token_uuid = repository::get_soultoken_uuid(pool, token.id)
+    let token_uuid = repository::get_soultoken_uuid(tx.as_mut(), token.id)
         .await?
         .ok_or(DomainError::NotFound)?;
 
@@ -575,11 +591,11 @@ pub async fn renew_soultoken(
         &renewed.display_code,
         key_pair,
     );
-    repository::update_signature(pool, token.id, &new_signature).await?;
+    repository::update_signature(tx.as_mut(), token.id, &new_signature).await?;
 
     // 5. Create renewal record.
     let renewal = repository::create_renewal(
-        pool,
+        tx.as_mut(),
         token.id,
         uid,
         req.presence_event_id,
@@ -601,12 +617,14 @@ pub async fn renew_soultoken(
         "new_expires_at":     new_expires_at.to_rfc3339(),
         "presence_event_id":  req.presence_event_id.unwrap_or(0),
     }))
-    .execute(pool)
+    .execute(tx.as_mut())
     .await
     {
         tracing::error!(error = %e, "verification_events (soultoken_renewed) insert failed");
     }
 
+    // Audit writes use `pool` (separate connection) — they commit
+    // independently so the audit row lands even if `tx` is rolled back.
     audit::write(
         pool,
         Some(uid),
@@ -652,6 +670,11 @@ mod tests {
             Ed25519KeyPair::from_hex(TEST_SIGNING_KEY_HEX)
                 .expect("static test signing key must parse")
         })
+    }
+
+    /// Helper — open an `RlsTransaction` for `uid` in tests.
+    async fn begin_tx(pool: &PgPool, uid: i32) -> RlsTransaction {
+        RlsTransaction::begin(pool, uid).await.expect("begin tx")
     }
 
     // ── Test fixture ──────────────────────────────────────────────────────────
@@ -754,11 +777,13 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let resp = issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.expect("issue_soultoken must succeed");
+        tx.commit().await.unwrap();
 
         // Display code format: XXXX-XXXX-XXXX
         let re = regex::Regex::new(r"^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$").unwrap();
@@ -801,11 +826,13 @@ mod tests {
         let bus = EventBus::new();
         let mut rx = bus.subscribe();
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let resp = issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.expect("issue_soultoken must succeed");
+        tx.commit().await.unwrap();
 
         // Receive must succeed — the bus is in-process and capacity 256.
         let event = rx.try_recv().expect("SoultokenIssued event must be published");
@@ -835,8 +862,9 @@ mod tests {
         .bind(&SafeEmail().fake::<String>())
         .fetch_one(&pool).await.unwrap();
 
+        let mut tx = begin_tx(&pool, uid).await;
         let err = issue_soultoken(
-            &pool, UserId::from(uid),
+            &mut tx, &pool, UserId::from(uid),
             IssueSoultokenRequest { attestation_id: 999, token_type: "user".to_owned() },
             TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap_err();
@@ -850,14 +878,17 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let err = issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap_err();
@@ -914,11 +945,13 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         let resp = get_my_soultoken(&pool, user_id).await.unwrap();
 
@@ -949,19 +982,23 @@ mod tests {
         .fetch_one(&pool).await.unwrap();
         let admin = UserId::from(admin_id);
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let token = issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
+        let mut tx = begin_tx(&pool, admin_id).await;
         revoke_soultoken(
-            &pool, token.id, admin,
+            &mut tx, &pool, token.id, admin,
             RevokeSoultokenRequest {
                 revocation_reason:   "stripe_flag".to_owned(),
                 revocation_visit_id: None,
             },
         ).await.expect("revoke must succeed");
+        tx.commit().await.unwrap();
 
         let status: String = sqlx::query_scalar(
             "SELECT verification_status FROM users WHERE id = $1"
@@ -981,15 +1018,18 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let token = issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         // Attempt surrender with non-existent visit
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let err = surrender_soultoken(
-            &pool, token.id, user_id,
+            &mut tx, &pool, token.id, user_id,
             SurrenderSoultokenRequest {
                 revocation_visit_id:    999_999,
                 surrender_witnessed_by: i32::from(user_id),
@@ -1008,19 +1048,23 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let token = issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         let before_renewal = token.expires_at;
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let renewal = renew_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
             test_key_pair(), &bus,
         ).await.expect("renew must succeed");
+        tx.commit().await.unwrap();
 
         assert!(renewal.new_expires_at > before_renewal,
             "new_expires_at must be after previous expires_at");
@@ -1040,22 +1084,27 @@ mod tests {
         .fetch_one(&pool).await.unwrap();
         let admin = UserId::from(admin_id);
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let token = issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
+        let mut tx = begin_tx(&pool, admin_id).await;
         revoke_soultoken(
-            &pool, token.id, admin,
+            &mut tx, &pool, token.id, admin,
             RevokeSoultokenRequest {
                 revocation_reason:   "platform_ban".to_owned(),
                 revocation_visit_id: None,
             },
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let err = renew_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
             test_key_pair(), &bus,
         ).await.unwrap_err();
@@ -1072,11 +1121,13 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let token = issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         // Attacker is a regular user (no admin or reviewer role)
         let (attacker_id,): (i32,) = sqlx::query_as(
@@ -1085,8 +1136,9 @@ mod tests {
         .bind(&SafeEmail().fake::<String>())
         .fetch_one(&pool).await.unwrap();
 
+        let mut tx = begin_tx(&pool, attacker_id).await;
         let err = revoke_soultoken(
-            &pool, token.id, UserId::from(attacker_id),
+            &mut tx, &pool, token.id, UserId::from(attacker_id),
             RevokeSoultokenRequest {
                 revocation_reason: "stripe_flag".to_owned(),
                 revocation_visit_id: None,
@@ -1102,11 +1154,13 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let token = issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         let (attacker_id,): (i32,) = sqlx::query_as(
             "INSERT INTO users (email, email_verified) VALUES ($1, true) RETURNING id",
@@ -1114,8 +1168,9 @@ mod tests {
         .bind(&SafeEmail().fake::<String>())
         .fetch_one(&pool).await.unwrap();
 
+        let mut tx = begin_tx(&pool, attacker_id).await;
         let err = surrender_soultoken(
-            &pool, token.id, UserId::from(attacker_id),
+            &mut tx, &pool, token.id, UserId::from(attacker_id),
             SurrenderSoultokenRequest {
                 revocation_visit_id:    1,
                 surrender_witnessed_by: attacker_id,
@@ -1131,11 +1186,13 @@ mod tests {
         let (user_id, attest_id) = setup_attested_user(&pool).await;
         let bus = EventBus::new();
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, test_key_pair(), &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         // Backdate expires_at to the past
         sqlx::query(
@@ -1144,8 +1201,9 @@ mod tests {
         )
         .bind(i32::from(user_id)).execute(&pool).await.unwrap();
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         let err = renew_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
             test_key_pair(), &bus,
         ).await.unwrap_err();
@@ -1163,10 +1221,11 @@ mod tests {
     async fn fetch_signing_inputs(pool: &PgPool, uid: i32)
         -> (Uuid, SoultokenRow, String)
     {
-        let row = repository::get_active_soultoken_by_user(pool, uid)
+        let mut conn = pool.acquire().await.unwrap();
+        let row = repository::get_active_soultoken_by_user(&mut conn, uid)
             .await.unwrap()
             .expect("soultoken must exist");
-        let token_uuid = repository::get_soultoken_uuid(pool, row.id)
+        let token_uuid = repository::get_soultoken_uuid(&mut conn, row.id)
             .await.unwrap()
             .expect("uuid must exist");
         let signature = row.signature.clone()
@@ -1180,11 +1239,13 @@ mod tests {
         let bus = EventBus::new();
         let kp  = Ed25519KeyPair::generate();
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, &kp, &bus,
         ).await.expect("issue_soultoken must succeed");
+        tx.commit().await.unwrap();
 
         let uid = i32::from(user_id);
         let (token_uuid, row, signature) = fetch_signing_inputs(&pool, uid).await;
@@ -1207,11 +1268,13 @@ mod tests {
         let bus = EventBus::new();
         let kp  = Ed25519KeyPair::generate();
 
+        let mut tx = begin_tx(&pool, i32::from(user_id)).await;
         issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, &kp, &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         let uid = i32::from(user_id);
         let (token_uuid, row, signature) = fetch_signing_inputs(&pool, uid).await;
@@ -1237,19 +1300,23 @@ mod tests {
         let kp  = Ed25519KeyPair::generate();
         let uid = i32::from(user_id);
 
+        let mut tx = begin_tx(&pool, uid).await;
         issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, &kp, &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         let (token_uuid, row_before, sig_before) = fetch_signing_inputs(&pool, uid).await;
 
+        let mut tx = begin_tx(&pool, uid).await;
         renew_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
             &kp, &bus,
         ).await.expect("renew must succeed");
+        tx.commit().await.unwrap();
 
         let (_uuid_after, row_after, sig_after) = fetch_signing_inputs(&pool, uid).await;
 
@@ -1310,19 +1377,23 @@ mod tests {
         let kp  = Ed25519KeyPair::generate();
         let uid = i32::from(user_id);
 
+        let mut tx = begin_tx(&pool, uid).await;
         issue_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             IssueSoultokenRequest { attestation_id: attest_id, token_type: "user".to_owned() },
             TEST_HMAC_KEY, &kp, &bus,
         ).await.unwrap();
+        tx.commit().await.unwrap();
 
         let (token_uuid, _row_before, sig_before) = fetch_signing_inputs(&pool, uid).await;
 
+        let mut tx = begin_tx(&pool, uid).await;
         renew_soultoken(
-            &pool, user_id,
+            &mut tx, &pool, user_id,
             RenewSoultokenRequest { presence_event_id: None, renewal_type: "beacon_dwell".to_owned() },
             &kp, &bus,
         ).await.expect("renew must succeed");
+        tx.commit().await.unwrap();
 
         let (_, row_after, sig_after) = fetch_signing_inputs(&pool, uid).await;
 

@@ -22,5 +22,7 @@ pub mod error;
 pub mod event_bus;
 /// Domain event enum — all event variants emitted by the platform.
 pub mod events;
+/// Per-request RLS-scoped transaction wrappers (Hardening cleanup #3).
+pub mod transaction;
 /// Newtype ID wrappers and shared value types.
 pub mod types;

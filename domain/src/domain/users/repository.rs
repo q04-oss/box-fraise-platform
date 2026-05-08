@@ -1,12 +1,12 @@
 #![allow(missing_docs)] // Repository layer — internal implementation, documented at service layer.
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use crate::{error::{DomainError, AppResult}, types::UserId};
 use super::types::*;
 
 /// Case-insensitive display_name search. Only email-verified, non-banned, non-deleted users.
 /// Capped at 8 results to limit enumeration.
-pub async fn search(pool: &PgPool, query: &str) -> AppResult<Vec<UserSearchResult>> {
+pub async fn search(conn: &mut PgConnection, query: &str) -> AppResult<Vec<UserSearchResult>> {
     sqlx::query_as::<_, UserSearchResult>(
         "SELECT id, display_name, email_verified, verification_status
          FROM users
@@ -18,12 +18,12 @@ pub async fn search(pool: &PgPool, query: &str) -> AppResult<Vec<UserSearchResul
          LIMIT 8",
     )
     .bind(format!("%{}%", query.trim()))
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
-pub async fn public_profile(pool: &PgPool, id: UserId) -> AppResult<Option<PublicProfile>> {
+pub async fn public_profile(conn: &mut PgConnection, id: UserId) -> AppResult<Option<PublicProfile>> {
     #[derive(sqlx::FromRow)]
     struct Row {
         id:                  UserId,
@@ -39,7 +39,7 @@ pub async fn public_profile(pool: &PgPool, id: UserId) -> AppResult<Option<Publi
          WHERE id = $1 AND is_banned = false AND deleted_at IS NULL",
     )
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)?;
 

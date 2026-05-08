@@ -1,5 +1,5 @@
 #![allow(missing_docs)]
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use crate::error::{AppResult, DomainError};
 use super::types::{
@@ -9,7 +9,7 @@ use super::types::{
 // ── Attestation tokens ────────────────────────────────────────────────────────
 
 pub async fn create_attestation_token(
-    pool:                            &PgPool,
+    conn:                            &mut PgConnection,
     user_id:                         i32,
     soultoken_id:                    i32,
     scope:                           &str,
@@ -37,13 +37,13 @@ pub async fn create_attestation_token(
     .bind(presentation_latitude)
     .bind(presentation_longitude)
     .bind(expires_at)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_token_by_hash(
-    pool:       &PgPool,
+    conn:       &mut PgConnection,
     token_hash: &str,
 ) -> AppResult<Option<AttestationTokenRow>> {
     sqlx::query_as(&format!(
@@ -51,13 +51,13 @@ pub async fn get_token_by_hash(
          WHERE token_hash = $1"
     ))
     .bind(token_hash)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn get_tokens_by_user(
-    pool:    &PgPool,
+    conn:    &mut PgConnection,
     user_id: i32,
 ) -> AppResult<Vec<AttestationTokenRow>> {
     sqlx::query_as(&format!(
@@ -65,13 +65,13 @@ pub async fn get_tokens_by_user(
          WHERE user_id = $1 ORDER BY issued_at DESC"
     ))
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn mark_token_verified(
-    pool:     &PgPool,
+    conn:     &mut PgConnection,
     token_id: i32,
 ) -> AppResult<AttestationTokenRow> {
     sqlx::query_as(&format!(
@@ -81,13 +81,13 @@ pub async fn mark_token_verified(
          RETURNING {ATTESTATION_TOKEN_COLS}"
     ))
     .bind(token_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 pub async fn revoke_token(
-    pool:     &PgPool,
+    conn:     &mut PgConnection,
     token_id: i32,
 ) -> AppResult<AttestationTokenRow> {
     sqlx::query_as(&format!(
@@ -96,7 +96,7 @@ pub async fn revoke_token(
          RETURNING {ATTESTATION_TOKEN_COLS}"
     ))
     .bind(token_id)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
@@ -104,7 +104,7 @@ pub async fn revoke_token(
 // ── Verification attempts ─────────────────────────────────────────────────────
 
 pub async fn record_verification_attempt(
-    pool:                            &PgPool,
+    conn:                            &mut PgConnection,
     token_hash:                      &str,
     attestation_token_id:            Option<i32>,
     requesting_business_soultoken_id: Option<i32>,
@@ -129,14 +129,14 @@ pub async fn record_verification_attempt(
     .bind(ip_address)
     .bind(user_agent)
     .bind(outcome)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)
 }
 
 /// Count verification attempts from a business soultoken in the last N minutes.
 pub async fn get_recent_attempts_by_business(
-    pool:                            &PgPool,
+    conn:                            &mut PgConnection,
     requesting_business_soultoken_id: i32,
     minutes:                         i32,
 ) -> AppResult<i32> {
@@ -147,7 +147,7 @@ pub async fn get_recent_attempts_by_business(
     )
     .bind(requesting_business_soultoken_id)
     .bind(minutes)
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await
     .map_err(DomainError::Db)?;
     Ok(count as i32)
