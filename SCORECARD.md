@@ -648,3 +648,29 @@ Three completed Grade-A items since 05-07 (full app_user RLS validation pass, Ap
 
 ### Summary
 The Stripe billing webhook (Top-3 from 05-08 02:00) lands as a clean four-file domain quartet with 4 passing tests, the SIGTERM handler (Top-4) is in place, and the dedicated `test-rls` CI job (Top-1) closes the previous Engineer Usability gap — together they move four dimension scores up and lift the weighted overall from **B+ 8.64 → A 9.01**, with the remaining work well-bounded around a business-facing reporting domain, `/metrics` auth, and APN wiring.
+
+---
+## [2026-05-09 docs-delta] Scorecard
+
+Delta-only entry — no code changes since `2fd83f9`. Single addition: `79c4f90 docs: CLAUDE.md — session briefing document` (187-line briefing covering project identity, architecture, layer discipline, key decisions, deferred items, session-start commands, commit conventions).
+
+| Dimension | Score | Weight | Weighted | Δ since 05-08 post-billing |
+|-----------|-------|--------|----------|----------------------------|
+| Security | 8.7 / 10 | 1.5x | 13.05 | — |
+| Architecture | 9.2 / 10 | 1.0x | 9.20 | — |
+| Engineer Usability | 9.4 / 10 | 1.0x | 9.40 | +0.1 |
+| Protocol Conformance | 9.2 / 10 | 1.5x | 13.80 | — |
+| Operational Readiness | 8.4 / 10 | 1.0x | 8.40 | — |
+| Product Completeness | 9.3 / 10 | 1.0x | 9.30 | — |
+| **Overall (straight)** | **9.03 / 10** | | | +0.01 |
+| **Overall (weighted)** | **9.02 / 10** | | 63.15 / 7 | +0.01 |
+| **Grade** | **A** | | | — |
+
+### Δ Justification
+**Engineer Usability 9.3 → 9.4** — `CLAUDE.md` (`79c4f90`) is the kind of self-contained briefing doc that materially shortens AI-assisted session startup: it consolidates project identity, three-crate architecture, layer discipline, immutable design decisions, deferred items, and exact PowerShell session-start commands in 187 lines. New AI sessions no longer need to crawl the codebase to recover context. Doesn't move the dimension to 9.5+ because the underlying "no `just bootstrap`" + "only 2 fuzz targets" + "`handler.rs` 3000+ LOC" gaps from 05-08 02:00 remain. Other dimensions unchanged — no code, CI, schema, or test additions since the prior entry.
+
+### Top 6 improvements (unchanged from 05-08 post-billing)
+The earlier list still applies — none of those items shipped since.
+
+### Summary
+Pure docs delta. CLAUDE.md is a real onboarding win (+0.1 EU) but doesn't move the rubric materially elsewhere; weighted score nudges 9.01 → 9.02, grade A holds. Re-running the full multi-agent scorecard would produce the same numbers; running it as a "no-op verification" is deferred until real code changes land.
