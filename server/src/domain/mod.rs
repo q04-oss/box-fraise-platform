@@ -16,3 +16,4 @@ pub mod verification_events;
 pub mod platform_configuration;
 pub mod analytics;
 pub mod notifications;
+pub mod billing;

@@ -3069,6 +3069,19 @@ async fn get_analytics_conversion_returns_200_for_admin(pool: PgPool) {
 // assert with `assert_ne!(429)`.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// `sqlx::test` resets the Postgres sequence per-test, so two adjacent
+// rate-limit tests both get `users.id = 1`. Redis is shared (REDIS_URL or
+// a single testcontainer), so the previous test's `rate:1:...` counter
+// would otherwise carry into the next. Wipe the namespace at entry.
+async fn flush_rate_limit_keys(redis: &deadpool_redis::Pool) {
+    use deadpool_redis::redis::AsyncCommands;
+    let mut conn = redis.get().await.unwrap();
+    let keys: Vec<String> = conn.keys("rate:*").await.unwrap_or_default();
+    for key in keys {
+        let _: () = conn.del(&key).await.unwrap_or(());
+    }
+}
+
 #[sqlx::test]
 async fn per_user_rate_limit_blocks_after_limit_exceeded(pool: PgPool) {
     use fake::{Fake, faker::internet::en::SafeEmail};
@@ -3076,6 +3089,7 @@ async fn per_user_rate_limit_blocks_after_limit_exceeded(pool: PgPool) {
         eprintln!("skipping: Redis unavailable");
         return;
     };
+    flush_rate_limit_keys(&redis_pool).await;
 
     // Lower the per-hour attestation limit to 2 for the duration of this test.
     sqlx::query("UPDATE platform_configuration SET value = '2' WHERE key = 'rate_limit_attestations_per_hour'")
@@ -3132,6 +3146,7 @@ async fn per_user_rate_limit_is_per_user_not_global(pool: PgPool) {
         eprintln!("skipping: Redis unavailable");
         return;
     };
+    flush_rate_limit_keys(&redis_pool).await;
 
     // Tightest possible: 1 attestation per hour per user.
     sqlx::query("UPDATE platform_configuration SET value = '1' WHERE key = 'rate_limit_attestations_per_hour'")

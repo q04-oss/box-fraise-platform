@@ -30,3 +30,5 @@ pub mod attestation_tokens;
 pub mod verification_events;
 /// Platform configuration — runtime-configurable BFIP protocol parameters (BFIP Section 15).
 pub mod platform_configuration;
+/// Billing — Stripe subscription lifecycle for `business_subscriptions` (Hardening §10).
+pub mod billing;

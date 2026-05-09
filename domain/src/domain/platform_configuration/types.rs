@@ -99,17 +99,8 @@ pub struct UpdateFeatureFlagRequest {
     pub enabled: bool,
 }
 
-/// Snapshot of a `business_subscriptions` row for the admin billing
-/// dashboard. The full billing domain (Stripe webhook, status events) is
-/// pending — this row type lives here as a temporary read surface
-/// alongside the admin route that serves it. Once the dedicated `billing`
-/// domain lands, both this type and `list_business_subscriptions` will
-/// move to `domain/src/domain/billing/`.
-#[derive(Debug, Clone, sqlx::FromRow, Serialize, utoipa::ToSchema)]
-pub struct BusinessSubscriptionRow {
-    pub id:                     i32,
-    pub business_id:            i32,
-    pub tier:                   String,
-    pub stripe_subscription_id: Option<String>,
-    pub current_period_end:     Option<DateTime<Utc>>,
-}
+// `BusinessSubscriptionRow` lived here as a temporary read surface;
+// it now belongs to `domain::billing::types`, alongside the webhook
+// handler that writes the rows. The admin read endpoint in this
+// module's routes still serves it — it imports from `billing::types`
+// so the schema stays single-sourced.

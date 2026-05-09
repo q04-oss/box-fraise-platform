@@ -184,5 +184,5 @@ TODO marker in code or docs at the relevant call site.
 - **§7 SSE event payloads**: `display_code` in `SoultokenIssued`, `business_id` in `OrderReady`.
 - **§11 `constant_time_eq` utility crate**: would let `integrations` import the canonical impl instead of duplicating.
 - **§1c `SOULTOKEN_HMAC_KEY` multi-version key rotation**: the version field is recorded; multi-key lookup deferred until rotation is operationally required.
-- **§10 Stripe billing webhook**: the `business_subscriptions` table is scaffolding; row creation/updates ship with the iOS app.
+- ~~**§10 Stripe billing webhook**: the `business_subscriptions` table is scaffolding; row creation/updates ship with the iOS app.~~ — **shipped Grade A item 3**: `domain::billing::service::handle_stripe_webhook` handles `payment_intent.succeeded` and `customer.subscription.{created,updated,deleted}`; route `POST /api/billing/webhook` lives in the 60s `webhook_routes` group.
 - ~~**§6 per-user rate-limit middleware**: limit values seeded in `platform_configuration` (migration 009); per-user keying deferred pending post-auth middleware.~~ — **shipped Grade A item 3**: see `server/src/http/middleware/user_rate_limit.rs`. Wired into `attestations`, `background_checks`, `identity`, `dorotka` initiate routes; reads from `platform_configuration` so ops retune without redeploy.

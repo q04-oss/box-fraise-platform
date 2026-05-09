@@ -206,6 +206,7 @@ pub fn build(state: AppState) -> Router {
     let webhook_routes = Router::new()
         .merge(crate::domain::background_checks::routes::webhook_router())
         .merge(crate::domain::identity_credentials::routes::webhook_router())
+        .merge(crate::domain::billing::routes::webhook_router())
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(60)));
 
     let llm_routes = crate::domain::dorotka::routes::router()

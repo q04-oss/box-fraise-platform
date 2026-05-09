@@ -108,7 +108,7 @@ Every section's last commit is in `ROADMAP.md` Phase 2.
 - [x] `admin_ban_user` / `admin_unban_user` — bans revoke active soultokens.
 - [x] `deploy/SECRETS_ROTATION.md` (per-secret cadence + procedures).
 - [x] `deploy/INCIDENT_RESPONSE.md` (P0–P3 playbook).
-- [ ] Stripe subscription webhook (post-iOS).
+- [x] Stripe subscription webhook — `domain::billing::service::handle_stripe_webhook` handles `payment_intent.succeeded` and `customer.subscription.{created,updated,deleted}`; route `POST /api/billing/webhook` registered in the 60s `webhook_routes` group (Grade A item 3).
 - [ ] Per-endpoint rate-limit tuning (deferred).
 
 ### §11 — Protocol updates
@@ -143,7 +143,7 @@ not by section:
 | `record_consent` at background-check initiation               | §9      | `domain/src/domain/background_checks/service.rs`                |
 | `constant_time_eq` shared utility crate                       | §11     | `integrations/src/stripe.rs` doc-comment                        |
 | `SOULTOKEN_HMAC_KEY` multi-version key rotation               | §1c     | `domain/src/domain/soultokens/service.rs::derive_display_code`  |
-| Stripe billing subscription webhook                           | §10     | `business_subscriptions` table left empty                       |
+| ~~Stripe billing subscription webhook~~ — **shipped Grade A item 3**: `domain::billing` handles `payment_intent.succeeded` and `customer.subscription.{created,updated,deleted}`; route `POST /api/billing/webhook` registered in the 60s `webhook_routes` group; HMAC verified per-request against `STRIPE_WEBHOOK_SECRET`. | §10     | `domain/src/domain/billing/service.rs`, `server/src/domain/billing/routes.rs` |
 | ~~Per-endpoint rate-limit tuning (config rows seeded in migration 009; per-user keying requires post-auth middleware refactor)~~ — **shipped Grade A item 3**: per-user limiter wired into `attestations`, `background_checks`, `identity`, `dorotka` routes; reads limit values from `platform_configuration` so ops retune without redeploy. | §6 / §10 | `server/src/http/middleware/user_rate_limit.rs`                 |
 
 None of the above block production launch — they're either operational

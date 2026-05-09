@@ -5,12 +5,15 @@ use axum::{
     Json, Router,
 };
 
-use box_fraise_domain::domain::platform_configuration::{
-    repository,
-    service,
-    types::{
-        BusinessSubscriptionRow, FeatureFlagRow, PlatformConfigurationHistoryResponse,
-        PlatformConfigurationResponse, UpdateConfigurationRequest, UpdateFeatureFlagRequest,
+use box_fraise_domain::domain::{
+    billing::{repository as billing_repo, types::BusinessSubscriptionRow},
+    platform_configuration::{
+        service,
+        types::{
+            FeatureFlagRow, PlatformConfigurationHistoryResponse,
+            PlatformConfigurationResponse, UpdateConfigurationRequest,
+            UpdateFeatureFlagRequest,
+        },
     },
 };
 use crate::{
@@ -173,7 +176,7 @@ pub async fn list_subscriptions(
     // succeeds under both `fraise` (BYPASSRLS) and `app_user_prod`
     // (RLS active via grant_app_admin role-switch).
     let mut tx = box_fraise_domain::transaction::AdminRlsTransaction::begin(&state.db).await?;
-    let rows = repository::list_business_subscriptions(tx.as_mut()).await?;
+    let rows = billing_repo::list_all(tx.as_mut()).await?;
     tx.commit().await?;
     Ok(Json(rows))
 }
