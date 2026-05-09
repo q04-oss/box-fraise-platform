@@ -63,14 +63,16 @@ Hardening §5 and §7.
 
 ---
 
-## Phase 3 — Whisked app
+## Phase 3 — Whisked app — *in progress (2026-05-09)*
 
 The matcha bar's loyalty surface, sharing the same backend.
 
-- Whisked-specific domains on `box-fraise-platform`.
-- Whisked business type added to `locations`.
-- Whisked Dorotka context (already present — host-header switching).
-- Separate iOS app, same backend.
+- [x] Whisked-specific domains on `box-fraise-platform` — `whisked_menu` (public catalogue) and `whisked_orders` (place / get / validate-pickup / staff dashboard) shipped in migration `012_whisked.sql` plus the matching `domain/` and `server/domain/` quartets.
+- [x] Pickup-code lifecycle: 4-char `W-XXXX` codes minted at order placement, atomically consumed via `POST /api/whisked/orders/:id/validate` (partial unique index on `pickup_code WHERE pickup_code_used_at IS NULL`).
+- [x] iOS MVP shipped at `q04-oss/whisked-ios@32b6d6e` — menu / cart / order / pickup-code / profile.
+- [ ] Whisked business type added to `locations`.
+- [ ] Whisked Dorotka context (already present — host-header switching).
+- [ ] Stripe `PaymentIntent` integration on `place_order` (currently stored as `NULL`; pay-at-counter for now).
 
 ---
 

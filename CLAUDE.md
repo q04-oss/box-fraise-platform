@@ -23,16 +23,16 @@ PostgreSQL 18 · deadpool-redis 7 · tokio · ring (HMAC + ECDSA) · ed25519-dal
   `app_user_prod` (RLS-enforced). Run with `--test-threads=1` locally to avoid
   the cluster-wide `CREATE ROLE` race.
 - **Last commit**: `2fd83f9` (scorecard 2026-05-08 A).
-- **Migrations**: `001`–`011` applied. `001` schema, `002` RLS, `003` app_user,
+- **Migrations**: `001`–`012` applied. `001` schema, `002` RLS, `003` app_user,
   `004` analytics views, `005` compliance, `006` feature flags, `007` billing,
   `008` consolidate platform_admin, `009` rate limits, `010` concurrent fixes,
-  `011` App Attest pubkey.
-- **Domain modules** (17 in `domain/src/domain/` + 2 server-only in
+  `011` App Attest pubkey, `012` whisked menu/orders/pickup-codes.
+- **Domain modules** (19 in `domain/src/domain/` + 2 server-only in
   `server/src/domain/`): attestation_tokens, attestations, auth,
   background_checks, beacons, **billing**, businesses, dorotka,
   identity_credentials, orders, platform_configuration, presence, soultokens,
-  staff, support, users, verification_events · plus server-side `analytics`
-  and `notifications` (SSE).
+  staff, support, users, verification_events, **whisked_menu**, **whisked_orders**
+  · plus server-side `analytics` and `notifications` (SSE).
 
 ## 3. Architecture in one page
 

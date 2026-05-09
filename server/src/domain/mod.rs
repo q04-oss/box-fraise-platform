@@ -17,3 +17,5 @@ pub mod platform_configuration;
 pub mod analytics;
 pub mod notifications;
 pub mod billing;
+pub mod whisked_menu;
+pub mod whisked_orders;

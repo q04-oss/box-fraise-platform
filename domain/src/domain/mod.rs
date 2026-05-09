@@ -32,3 +32,7 @@ pub mod verification_events;
 pub mod platform_configuration;
 /// Billing — Stripe subscription lifecycle for `business_subscriptions` (Hardening §10).
 pub mod billing;
+/// Whisked menu — public catalogue of drinks served by Whisked bars.
+pub mod whisked_menu;
+/// Whisked orders — customer pickup-ordering with `W-XXXX` pickup codes.
+pub mod whisked_orders;

@@ -201,6 +201,8 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::platform_configuration::routes::router())
         .merge(crate::domain::analytics::routes::router())
         .merge(crate::domain::notifications::routes::router())
+        .merge(crate::domain::whisked_menu::routes::router())
+        .merge(crate::domain::whisked_orders::routes::router())
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)));
 
     let webhook_routes = Router::new()
