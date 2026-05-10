@@ -674,3 +674,46 @@ The earlier list still applies — none of those items shipped since.
 
 ### Summary
 Pure docs delta. CLAUDE.md is a real onboarding win (+0.1 EU) but doesn't move the rubric materially elsewhere; weighted score nudges 9.01 → 9.02, grade A holds. Re-running the full multi-agent scorecard would produce the same numbers; running it as a "no-op verification" is deferred until real code changes land.
+
+---
+## [2026-05-10 whisked-delta] Scorecard
+
+Delta-only entry — `6ed3103 feat/whisked: menu + orders domains with pickup-code lifecycle` ships migration `012_whisked.sql` (3 tables + partial unique index + idempotent seed), two new domain quartets (`whisked_menu`, `whisked_orders`), 6 new HTTP routes (`/api/whisked/menu`, `/api/whisked/orders` × 4 + `/api/whisked/business/{id}/orders`), pickup-code generation + atomic consumption, and 4 new `#[sqlx::test]` cases. Workspace test count 448 → 452.
+
+| Dimension | Score | Weight | Weighted | Δ since 05-09 docs-delta |
+|-----------|-------|--------|----------|--------------------------|
+| Security | 8.7 / 10 | 1.5x | 13.05 | — |
+| Architecture | 9.3 / 10 | 1.0x | 9.30 | +0.1 |
+| Engineer Usability | 9.4 / 10 | 1.0x | 9.40 | — |
+| Protocol Conformance | 9.2 / 10 | 1.5x | 13.80 | — |
+| Operational Readiness | 8.4 / 10 | 1.0x | 8.40 | — |
+| Product Completeness | 9.5 / 10 | 1.0x | 9.50 | +0.2 |
+| **Overall (straight)** | **9.08 / 10** | | | +0.05 |
+| **Overall (weighted)** | **9.06 / 10** | | 63.45 / 7 | +0.04 |
+| **Grade** | **A** | | | — |
+
+### Δ Justification
+
+**Architecture 9.2 → 9.3** — `whisked_menu` and `whisked_orders` land as pristine four-file quartets (mod / types / repository / service) matching the platform's enforced shape; both have `#![deny(clippy::disallowed_methods)]` on the route files, and grep against `server/src/domain/**/routes.rs` for `sqlx::query` still returns zero matches. The repository layer holds every SQL statement; the service layer composes `RlsTransaction` + `audit::write(pool, …)` outside the transaction following the canonical pattern. Two implementation choices worth flagging: `validate_pickup` runs on `&PgPool` rather than `RlsTransaction` (defensible — the atomic UPDATE is one statement and there's no `app.user_id` to scope to since the caller is the staff acting on someone else's order); and `place_order` interleaves a non-tx `audit::write` with the upsert connection (intentional — audit must survive rollback). Stops short of 9.5 because no compiler-enforced ban on `sqlx::query*` in route files yet (the 05-08 02:00 Top-3 still applies), and no integration tests at the route level for the Whisked surface (the 4 new tests exercise the service layer only).
+
+**Product Completeness 9.3 → 9.5** — Whisked is a first-class new product surface, not an extension of an existing flow. The 6 new endpoints unlock: customer menu browse, place order with `W-XXXX` pickup code mint, fetch order detail, fetch pickup code, staff validate-pickup with atomic code consumption, staff dashboard listing active orders + status transitions. Pickup-code lifecycle is end-to-end: partial unique index on `(pickup_code) WHERE pickup_code_used_at IS NULL` prevents two simultaneous active orders minting the same code, and the atomic UPDATE is race-safe under concurrent staff scans. Working flow count grows from ≈28 to ≈33+ when Whisked surfaces are counted; the iOS MVP at `whisked-ios@32b6d6e` consumes these endpoints. Stops at 9.5 because the Stripe `PaymentIntent` call is deferred (`stripe_payment_intent_id` always `NULL` at placement — pay-at-counter for now), the `whisked` business type isn't yet a first-class enum on `locations`, and Dorotka host-header switching for Whisked context isn't wired.
+
+**Engineer Usability 9.4 (unchanged)** — 4 new `#[sqlx::test]` cases (`place_order_creates_order_with_pickup_code`, `validate_pickup_marks_order_collected`, `validate_pickup_rejects_wrong_code`, `validate_pickup_rejects_already_used_code`) bring the workspace count to 452, but on a 448-test base 4 new tests is below the noise floor for a dimension move. CLAUDE.md updated (migration list `001`–`012`, domain count 17 → 19, whisked_menu / whisked_orders called out). The deferred items from 05-08 02:00 (no `just bootstrap`, only 2 fuzz targets, `handler.rs` 3000+ LOC) remain.
+
+**Security / Protocol Conformance / Operational Readiness — unchanged.** Whisked code uses the existing security primitives (audit pattern, RlsTransaction, no new auth surface, no new crypto). Whisked isn't a BFIP section so it doesn't move §1–§19 conformance. No infra / observability changes.
+
+### Top 6 improvements
+
+The 05-08 post-billing list still applies, with one item closing rank:
+
+1. **Business-facing reporting domain** — unchanged. → +0.13 weighted.
+2. **`/metrics` auth + automated staging deploy** — unchanged. → +0.06 weighted.
+3. **`clippy::disallowed_types` ban** — *now extra urgent*: 4 new route files (whisked × 2, plus the existing 17) all rely on per-file `#![deny(clippy::disallowed_methods)]`; one omission and a future raw SQL slips through. → Architecture +0.4, **+0.06 weighted**.
+4. **`just bootstrap` recipe** — unchanged. → +0.06 weighted.
+5. **APN client wired to existing `push_token` column** — unchanged; whisked-ios is now actually waiting on this for `notification_type = "order_update"` silent pushes. → +0.04 weighted.
+6. **Stripe-Signature `t=` 5-min freshness window** — unchanged. → +0.04 weighted.
+
+New **Top 7** candidate from this pass: **Stripe `PaymentIntent` integration on `whisked_orders::place_order`** — currently stored as `NULL`, blocks real payment flow on the Whisked iOS app. Self-contained, ~50 LOC.
+
+### Summary
+Whisked v1 backend ships clean: two new domain quartets, six routes, atomic pickup-code lifecycle, 4 new tests, 452/0 under `--test-threads=1`. Architecture nudges +0.1 for the disciplined extension; Product Completeness +0.2 for a brand-new product surface end-to-end. Weighted overall **9.02 → 9.06**, grade **A** holds. Stripe PaymentIntent and APN push wiring are the next two leverage points specifically for Whisked.
