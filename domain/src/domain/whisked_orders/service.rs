@@ -301,15 +301,23 @@ pub async fn lookup_order_by_pickup_code(
 /// Atomically consume the pickup code and mark the order collected.
 ///
 /// Pre-checks return specific errors so the iOS staff app can surface
-/// distinct UX states (not-ready, wrong code, already-used). The final
-/// `UPDATE … WHERE pickup_code_used_at IS NULL AND status = 'ready'` is the
-/// race-safe step — if a concurrent request consumed the code between our
-/// pre-check and the update, we surface `Conflict` rather than a stale 200.
+/// distinct UX states (not-ready, wrong code, already-used). After
+/// pre-checks pass, the previously-authorized Stripe `PaymentIntent` is
+/// captured (no-op when the order has no PI — empty stripe key at
+/// placement time). Capture happens *before* the atomic UPDATE so a
+/// payment-system failure short-circuits the collection: better "not
+/// collected, no charge" than "collected, no charge". The final
+/// `UPDATE … WHERE pickup_code_used_at IS NULL AND status = 'ready'` is
+/// the race-safe step — if a concurrent request consumed the code
+/// between our pre-check and the update, we surface `Conflict` rather
+/// than a stale 200.
 pub async fn validate_pickup(
-    pool:             &PgPool,
-    business_user_id: i32,
-    order_id:         i32,
-    pickup_code:      &str,
+    pool:              &PgPool,
+    http:              &reqwest::Client,
+    business_user_id:  i32,
+    order_id:          i32,
+    pickup_code:       &str,
+    stripe_secret_key: &str,
 ) -> AppResult<WhiskedOrderRow> {
     let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
 
@@ -334,6 +342,18 @@ pub async fn validate_pickup(
             "Order is not ready for pickup",
         ));
     }
+
+    // Capture the previously-authorized PaymentIntent before flipping the
+    // order to `collected`. If Stripe is unreachable or capture fails we
+    // bail out *without* marking the order consumed — staff retries the
+    // scan once the upstream issue clears. No-op when the order was
+    // placed without Stripe (empty key at placement time).
+    capture_payment_intent_if_configured(
+        http,
+        stripe_secret_key,
+        order.stripe_payment_intent_id.as_deref(),
+    )
+    .await?;
 
     let updated = repository::collect_with_pickup_code(&mut conn, order_id, pickup_code).await?;
 
@@ -434,12 +454,49 @@ pub async fn list_active_for_business(
 /// Adapter so route handlers can use the `ValidatePickupRequest` type
 /// directly without unpacking.
 pub async fn validate_pickup_request(
-    pool:             &PgPool,
-    business_user_id: i32,
-    order_id:         i32,
-    req:              ValidatePickupRequest,
+    pool:              &PgPool,
+    http:              &reqwest::Client,
+    business_user_id:  i32,
+    order_id:          i32,
+    req:               ValidatePickupRequest,
+    stripe_secret_key: &str,
 ) -> AppResult<WhiskedOrderRow> {
-    validate_pickup(pool, business_user_id, order_id, &req.pickup_code).await
+    validate_pickup(
+        pool,
+        http,
+        business_user_id,
+        order_id,
+        &req.pickup_code,
+        stripe_secret_key,
+    )
+    .await
+}
+
+/// Capture a Stripe `PaymentIntent` when both a PI id and a key are
+/// configured. Returns `Ok(())` cleanly when either is absent (the
+/// order was placed without Stripe). On Stripe failure, logs at
+/// `tracing::error!` and surfaces `ExternalServiceError`.
+async fn capture_payment_intent_if_configured(
+    http:              &reqwest::Client,
+    stripe_secret_key: &str,
+    payment_intent_id: Option<&str>,
+) -> AppResult<()> {
+    let Some(pi_id) = payment_intent_id else { return Ok(()); };
+    if stripe_secret_key.is_empty() {
+        return Ok(());
+    }
+    let client = box_fraise_integrations::stripe::StripeClient::new(stripe_secret_key, http);
+    client.capture_payment_intent(pi_id).await.map_err(|e| {
+        tracing::error!(
+            error = %e,
+            payment_intent_id = %pi_id,
+            "stripe capture failed during validate_pickup",
+        );
+        DomainError::ExternalServiceError(
+            "Payment capture failed — order not collected".to_string(),
+        )
+    })?;
+    Ok(())
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -538,7 +595,7 @@ mod tests {
         repository::_test_force_status(&mut conn, resp.order.id, "ready").await.unwrap();
         drop(conn);
 
-        let updated = validate_pickup(&pool, uid, resp.order.id, &resp.pickup_code)
+        let updated = validate_pickup(&pool, &http, uid, resp.order.id, &resp.pickup_code, "")
             .await
             .expect("validate_pickup must succeed for ready order with correct code");
 
@@ -569,7 +626,7 @@ mod tests {
         repository::_test_force_status(&mut conn, resp.order.id, "ready").await.unwrap();
         drop(conn);
 
-        let err = validate_pickup(&pool, uid, resp.order.id, "W-WRNG")
+        let err = validate_pickup(&pool, &http, uid, resp.order.id, "W-WRNG", "")
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Forbidden), "wrong code must be Forbidden, got {err:?}");
@@ -599,9 +656,9 @@ mod tests {
         drop(conn);
 
         // First call succeeds.
-        validate_pickup(&pool, uid, resp.order.id, &resp.pickup_code).await.unwrap();
+        validate_pickup(&pool, &http, uid, resp.order.id, &resp.pickup_code, "").await.unwrap();
         // Second call must fail with Conflict.
-        let err = validate_pickup(&pool, uid, resp.order.id, &resp.pickup_code)
+        let err = validate_pickup(&pool, &http, uid, resp.order.id, &resp.pickup_code, "")
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Conflict(_)), "double-validate must be Conflict, got {err:?}");
@@ -647,7 +704,8 @@ mod tests {
         let (resp, uid) = place_and_make_ready(&pool).await;
 
         // Validate (collect) the order so pickup_code_used_at is stamped.
-        validate_pickup(&pool, uid, resp.order.id, &resp.pickup_code)
+        let http = test_http();
+        validate_pickup(&pool, &http, uid, resp.order.id, &resp.pickup_code, "")
             .await
             .expect("validate must succeed");
 
@@ -689,6 +747,31 @@ mod tests {
         assert!(
             resp.stripe_client_secret.is_none(),
             "stripe_client_secret must be None when no stripe key is set",
+        );
+    }
+
+    /// When an order has no `stripe_payment_intent_id` (placed in dev /
+    /// test mode without a Stripe key), `validate_pickup` must short-
+    /// circuit the capture step and still mark the order collected.
+    /// Regression guard for the signature change that added Stripe capture
+    /// — proves the None-PI branch keeps the existing happy path intact.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn validate_pickup_skips_capture_when_no_payment_intent(pool: PgPool) {
+        let (resp, uid) = place_and_make_ready(&pool).await;
+        // Order was placed with empty stripe key → PI id must be NULL.
+        assert!(
+            resp.order.stripe_payment_intent_id.is_none(),
+            "test setup must not have minted a PaymentIntent",
+        );
+
+        let http = test_http();
+        let row = validate_pickup(&pool, &http, uid, resp.order.id, &resp.pickup_code, "")
+            .await
+            .expect("validate must succeed when there's no PaymentIntent to capture");
+        assert_eq!(row.status, "collected");
+        assert!(
+            row.pickup_code_used_at.is_some(),
+            "pickup_code_used_at must be stamped even when capture is skipped",
         );
     }
 }

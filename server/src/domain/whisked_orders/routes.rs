@@ -159,7 +159,12 @@ pub async fn validate(
     AppJson(body):        AppJson<ValidatePickupRequest>,
 ) -> AppResult<Json<WhiskedOrderRow>> {
     let row = service::validate_pickup_request(
-        &state.db, i32::from(user_id), order_id, body,
+        &state.db,
+        &state.http,
+        i32::from(user_id),
+        order_id,
+        body,
+        state.cfg.stripe_secret_key.expose_secret(),
     ).await?;
     Ok(Json(row))
 }
