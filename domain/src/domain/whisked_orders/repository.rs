@@ -50,6 +50,43 @@ pub async fn get_by_id(
     .map_err(DomainError::Db)
 }
 
+/// Look up an order by its `pickup_code`. Only matches orders that are
+/// `ready` AND haven't been consumed yet — those are the only valid
+/// targets for a staff scan. Returns `None` for any other state so the
+/// caller surfaces `NotFound` to the dashboard.
+pub async fn get_order_by_pickup_code(
+    conn:        &mut PgConnection,
+    pickup_code: &str,
+) -> Result<Option<WhiskedOrderRow>, sqlx::Error> {
+    sqlx::query_as(&format!(
+        "SELECT {WHISKED_ORDER_COLS} FROM whisked_orders \
+         WHERE pickup_code = $1 \
+         AND pickup_code_used_at IS NULL \
+         AND status = 'ready'"
+    ))
+    .bind(pickup_code)
+    .fetch_optional(conn)
+    .await
+}
+
+/// Fetch the `display_name` for a single user. Returns `Some(None)` when
+/// the user exists but has no display name set; `None` when the user
+/// doesn't exist. Flattened to `Option<String>` at the call site so the
+/// dashboard can render "—" for either case.
+pub async fn get_user_display_name(
+    conn:    &mut PgConnection,
+    user_id: i32,
+) -> AppResult<Option<String>> {
+    let row: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT display_name FROM users WHERE id = $1"
+    )
+    .bind(user_id)
+    .fetch_optional(conn)
+    .await
+    .map_err(DomainError::Db)?;
+    Ok(row.flatten())
+}
+
 pub async fn list_active_for_business(
     conn:        &mut PgConnection,
     business_id: i32,

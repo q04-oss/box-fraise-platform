@@ -170,6 +170,24 @@ impl AppState {
     }
 }
 
+// ── Static-asset handlers (Whisked dashboard) ────────────────────────────────
+
+/// Whisked staff dashboard — single inlined HTML/CSS/JS bundle served as a
+/// static asset. The HTML lives next to this file (`whisked_dashboard.html`)
+/// and is read at compile time via `include_str!`, so no filesystem access
+/// is required at request time and the dashboard cannot drift from the
+/// binary it ships with.
+///
+/// Authentication is JWT-via-localStorage handled entirely in-page (the
+/// HTML accepts a magic-link sign-in or a directly-pasted JWT). The staff
+/// dashboard talks to the same `/api/whisked/*` routes the iOS app uses.
+async fn whisked_dashboard() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!("whisked_dashboard.html"),
+    )
+}
+
 // ── Router ────────────────────────────────────────────────────────────────────
 
 #[allow(deprecated)] // tower_http 0.6 deprecated TimeoutLayer::new; no non-deprecated replacement yet
@@ -203,6 +221,7 @@ pub fn build(state: AppState) -> Router {
         .merge(crate::domain::notifications::routes::router())
         .merge(crate::domain::whisked_menu::routes::router())
         .merge(crate::domain::whisked_orders::routes::router())
+        .route("/whisked/dashboard", axum::routing::get(whisked_dashboard))
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)));
 
     let webhook_routes = Router::new()

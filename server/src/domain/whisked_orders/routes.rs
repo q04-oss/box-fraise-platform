@@ -27,6 +27,7 @@ use super::{service, types::*};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/whisked/orders",                       post(place))
+        .route("/api/whisked/orders/by-code/{pickup_code}", get(get_by_code))
         .route("/api/whisked/orders/{id}",                  get(get_one))
         .route("/api/whisked/orders/{id}/pickup-code",      get(pickup_code))
         .route("/api/whisked/orders/{id}/validate",         post(validate))
@@ -86,6 +87,29 @@ pub async fn get_one(
     let mut tx = RlsTransaction::begin(&state.db, i32::from(user_id)).await?;
     let resp = service::get_order(&mut tx, &state.db, i32::from(user_id), order_id).await?;
     tx.commit().await?;
+    Ok(Json(resp))
+}
+
+/// GET /api/whisked/orders/by-code/:pickup_code — staff dashboard lookup
+/// returning the order matching an active (`ready`, not-yet-consumed)
+/// pickup code. JWT-only; per-business ownership is enforced by the
+/// staff validate-pickup endpoint, not by this lookup, because the
+/// dashboard polls business listings under a separate route.
+#[utoipa::path(
+    get, path = "/api/whisked/orders/by-code/{pickup_code}", tag = "whisked",
+    params(("pickup_code" = String, Path, description = "Pickup code, e.g. W-4829")),
+    responses(
+        (status = 200, description = "Order matching the pickup code", body = WhiskedOrderResponse),
+        (status = 404, description = "No active ready order with that code"),
+    ),
+    security(("bearer_auth" = [])),
+)]
+pub async fn get_by_code(
+    State(state):           State<AppState>,
+    RequireUser(_user_id):  RequireUser,
+    Path(pickup_code):      Path<String>,
+) -> AppResult<Json<WhiskedOrderResponse>> {
+    let resp = service::lookup_order_by_pickup_code(&state.db, &pickup_code).await?;
     Ok(Json(resp))
 }
 

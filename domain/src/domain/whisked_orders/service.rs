@@ -151,11 +151,14 @@ pub async fn place_order(
     )
     .await;
 
+    let customer_name = repository::get_user_display_name(tx.as_mut(), user_id).await?;
+
     Ok(WhiskedOrderResponse {
         pickup_code:          order_row.pickup_code.clone(),
         order:                order_row,
         items:                item_rows,
         stripe_client_secret,
+        customer_name,
     })
 }
 
@@ -254,6 +257,7 @@ pub async fn get_order(
         return Err(DomainError::Forbidden);
     }
     let items = repository::list_items_for_order(tx.as_mut(), order_id).await?;
+    let customer_name = repository::get_user_display_name(tx.as_mut(), order.user_id).await?;
     Ok(WhiskedOrderResponse {
         pickup_code:          order.pickup_code.clone(),
         order,
@@ -262,6 +266,33 @@ pub async fn get_order(
         // client_secret locally for the in-flight order; subsequent fetches
         // don't re-issue the secret.
         stripe_client_secret: None,
+        customer_name,
+    })
+}
+
+/// Look up an active (`ready`, not-yet-collected) order by its `W-XXXX`
+/// pickup code. Used by the staff dashboard's pickup-validation input so
+/// the operator can type the code, resolve it to an order id, and
+/// validate without hand-pasting URLs. Caller authorization (JWT-only;
+/// the dashboard already runs behind a per-business owner login) is
+/// enforced at the route layer.
+pub async fn lookup_order_by_pickup_code(
+    pool:        &PgPool,
+    pickup_code: &str,
+) -> AppResult<WhiskedOrderResponse> {
+    let mut conn = pool.acquire().await.map_err(DomainError::Db)?;
+    let order = repository::get_order_by_pickup_code(&mut conn, pickup_code)
+        .await
+        .map_err(DomainError::Db)?
+        .ok_or(DomainError::NotFound)?;
+    let items = repository::list_items_for_order(&mut conn, order.id).await?;
+    let customer_name = repository::get_user_display_name(&mut conn, order.user_id).await?;
+    Ok(WhiskedOrderResponse {
+        pickup_code:          order.pickup_code.clone(),
+        order,
+        items,
+        stripe_client_secret: None,
+        customer_name,
     })
 }
 
@@ -386,11 +417,13 @@ pub async fn list_active_for_business(
     let mut out = Vec::with_capacity(rows.len());
     for order in rows {
         let items = repository::list_items_for_order(&mut conn, order.id).await?;
+        let customer_name = repository::get_user_display_name(&mut conn, order.user_id).await?;
         out.push(WhiskedOrderResponse {
             pickup_code:          order.pickup_code.clone(),
             order,
             items,
             stripe_client_secret: None,
+            customer_name,
         });
     }
     Ok(out)
@@ -572,6 +605,60 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Conflict(_)), "double-validate must be Conflict, got {err:?}");
+    }
+
+    /// Helper: place + force ready, returning `(WhiskedOrderResponse, biz_id)`.
+    /// Both new by-code tests need the same setup; collapsing it here keeps
+    /// each test focused on its own assertion.
+    async fn place_and_make_ready(pool: &PgPool) -> (WhiskedOrderResponse, i32) {
+        let (uid, biz_id) = make_user_and_business(pool).await;
+        let http = test_http();
+        let mut tx = RlsTransaction::begin(pool, uid).await.unwrap();
+        let resp = place_order(
+            &mut tx, pool, &http, uid,
+            PlaceOrderRequest {
+                business_id: biz_id,
+                items: vec![OrderItemRequest { menu_item_id: 1, quantity: 1 }],
+            },
+            "",
+        ).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        repository::_test_force_status(&mut conn, resp.order.id, "ready").await.unwrap();
+        (resp, uid)
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn get_order_by_pickup_code_returns_ready_order(pool: PgPool) {
+        let (resp, _uid) = place_and_make_ready(&pool).await;
+
+        let mut conn = pool.acquire().await.unwrap();
+        let found = repository::get_order_by_pickup_code(&mut conn, &resp.pickup_code)
+            .await
+            .expect("query must succeed");
+        let row = found.expect("ready order must be returned by code");
+        assert_eq!(row.id, resp.order.id);
+        assert_eq!(row.pickup_code, resp.pickup_code);
+        assert_eq!(row.status, "ready");
+    }
+
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn get_order_by_pickup_code_returns_none_after_collection(pool: PgPool) {
+        let (resp, uid) = place_and_make_ready(&pool).await;
+
+        // Validate (collect) the order so pickup_code_used_at is stamped.
+        validate_pickup(&pool, uid, resp.order.id, &resp.pickup_code)
+            .await
+            .expect("validate must succeed");
+
+        let mut conn = pool.acquire().await.unwrap();
+        let found = repository::get_order_by_pickup_code(&mut conn, &resp.pickup_code)
+            .await
+            .expect("query must succeed");
+        assert!(
+            found.is_none(),
+            "collected order must not be returned by code (status=collected, pickup_code_used_at IS NOT NULL)",
+        );
     }
 
     /// Empty `stripe_secret_key` short-circuits the Stripe call so the order

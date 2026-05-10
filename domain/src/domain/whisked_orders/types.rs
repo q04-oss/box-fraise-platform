@@ -74,6 +74,10 @@ pub struct WhiskedOrderResponse {
     /// SDK uses this to confirm the payment without round-tripping the
     /// secret key.
     pub stripe_client_secret:  Option<String>,
+    /// `users.display_name` for the customer who placed this order. `None`
+    /// if the customer hasn't set one. Surfaced so the staff dashboard
+    /// can show e.g. "Lara M. — W-4829" on each order card.
+    pub customer_name:         Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]

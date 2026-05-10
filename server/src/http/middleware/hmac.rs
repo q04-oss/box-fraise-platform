@@ -111,6 +111,19 @@ pub async fn validate(
         return next.run(req).await;
     }
 
+    // Whisked routes: browser dashboard cannot sign requests without
+    // exposing the HMAC key. JWT auth is enforced at the handler level
+    // instead. The prefix match covers the dashboard HTML at
+    // `/whisked/dashboard`, every `/api/whisked/*` endpoint (menu, orders,
+    // business listings, validate, status), and any future Whisked route —
+    // no middleware change needed when new endpoints land.
+    {
+        let path = req.uri().path();
+        if path.starts_with("/api/whisked/") || path.starts_with("/whisked/") {
+            return next.run(req).await;
+        }
+    }
+
     // ── Extract headers before the body is consumed ───────────────────────────
     let ts_str = owned_header(&req, "x-fraise-ts");
     let sig    = owned_header(&req, "x-fraise-sig");

@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Whisked dashboard</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      background: #0a0a0a; color: #e0e0e0;
+      font-family: ui-monospace, "SF Mono", Monaco, Menlo, Consolas, "Courier New", monospace;
+    }
+    a { color: #ff9800; text-decoration: none; }
+    button {
+      background: none; border: 1px solid #444; color: #e0e0e0;
+      padding: 0.4rem 0.85rem; cursor: pointer; font-family: inherit;
+      font-size: 0.75rem; letter-spacing: 0.12em; text-transform: uppercase;
+    }
+    button:hover { border-color: #888; color: #fff; }
+    button.primary { background: #ff9800; border-color: #ff9800; color: #0a0a0a; }
+    button.primary:hover { background: #ffb44a; border-color: #ffb44a; }
+    input, textarea {
+      background: #111; border: 1px solid #333; color: #e0e0e0;
+      font-family: inherit; padding: 0.6rem 0.8rem; width: 100%;
+    }
+    input:focus { outline: none; border-color: #ff9800; }
+    .hide { display: none !important; }
+
+    /* ── Login screen ──────────────────────────────────────── */
+    .login-wrap {
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; padding: 2rem;
+    }
+    .login {
+      width: 100%; max-width: 420px;
+      border: 1px solid #222; padding: 2rem;
+    }
+    .login h1 {
+      margin: 0 0 0.5rem; font-size: 1.4rem; font-weight: normal;
+      letter-spacing: 0.12em; text-transform: uppercase; color: #fff;
+    }
+    .login .subtitle {
+      color: #888; font-size: 0.78rem; margin-bottom: 1.8rem;
+      letter-spacing: 0.18em; text-transform: uppercase;
+    }
+    .login fieldset { border: 1px solid #1a1a1a; padding: 1rem; margin: 0 0 1rem; }
+    .login legend { padding: 0 0.5rem; color: #888; font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase; }
+    .login label { display: block; color: #888; font-size: 0.72rem; margin-bottom: 0.4rem; letter-spacing: 0.1em; text-transform: uppercase; }
+    .login p.msg { color: #888; font-size: 0.85rem; margin: 0.8rem 0 0; }
+    .login p.err { color: #f44336; font-size: 0.85rem; margin: 0.8rem 0 0; }
+
+    /* ── Dashboard layout ──────────────────────────────────── */
+    header {
+      display: flex; align-items: baseline; gap: 1rem;
+      padding: 1rem 2rem; border-bottom: 1px solid #222;
+    }
+    header h1 {
+      margin: 0; font-size: 1.2rem; font-weight: normal;
+      letter-spacing: 0.18em; text-transform: uppercase; color: #fff;
+    }
+    header .biz { color: #666; font-size: 0.75rem; letter-spacing: 0.16em; text-transform: uppercase; }
+    header .right { margin-left: auto; display: flex; gap: 1rem; align-items: baseline; }
+    header .right .clock { color: #666; font-size: 0.78rem; }
+
+    main {
+      display: grid; grid-template-columns: 3fr 2fr;
+      gap: 1.5rem; padding: 1.5rem 2rem;
+    }
+    section.panel { display: flex; flex-direction: column; min-height: 0; }
+    section.panel > h2 {
+      margin: 0 0 1rem; color: #888;
+      font-size: 0.78rem; font-weight: normal;
+      letter-spacing: 0.18em; text-transform: uppercase;
+    }
+
+    /* ── Order queue ───────────────────────────────────────── */
+    .orders { display: flex; flex-direction: column; gap: 1rem; overflow-y: auto; }
+    .order {
+      border: 1px solid #222; padding: 1rem 1.2rem;
+      display: grid; grid-template-columns: auto 1fr auto; gap: 1rem;
+      align-items: start;
+    }
+    .order .code {
+      font-size: 1.8rem; font-weight: 700;
+      letter-spacing: 0.18em; color: #fff;
+      align-self: center;
+    }
+    .order .body { display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; }
+    .order .who { font-size: 0.95rem; color: #e0e0e0; }
+    .order .items {
+      color: #888; font-size: 0.82rem; line-height: 1.5;
+    }
+    .order .meta { display: flex; gap: 1rem; color: #555; font-size: 0.72rem; letter-spacing: 0.06em; }
+    .order .total { color: #aaa; }
+    .order .actions { display: flex; flex-direction: column; gap: 0.4rem; align-items: stretch; }
+    .order .actions button { width: 100%; }
+
+    .badge {
+      display: inline-block;
+      padding: 0.18rem 0.55rem; font-size: 0.68rem;
+      letter-spacing: 0.16em; text-transform: uppercase;
+      border-radius: 2px;
+    }
+    .badge.pending   { background: rgba(136, 136, 136, 0.16); color: #888; }
+    .badge.preparing { background: rgba(255, 152, 0,   0.20); color: #ff9800; }
+    .badge.ready {
+      background: rgba(76, 175, 80, 0.22); color: #4caf50;
+      animation: pulse 1.6s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.55; }
+    }
+
+    .empty { color: #444; padding: 2rem 0; text-align: center; font-size: 0.85rem; }
+
+    /* ── Validation panel ──────────────────────────────────── */
+    .validate {
+      border: 1px solid #222; padding: 1.5rem;
+      display: flex; flex-direction: column; gap: 1rem;
+    }
+    .validate h3 {
+      margin: 0; color: #888; font-size: 0.78rem;
+      font-weight: normal; letter-spacing: 0.18em; text-transform: uppercase;
+    }
+    .validate input.code-input {
+      font-size: 2.5rem; padding: 1rem 1.2rem;
+      text-align: center; letter-spacing: 0.18em;
+      text-transform: uppercase;
+      background: #111; border-color: #2a2a2a;
+    }
+    .validate input.code-input::placeholder { color: #2a2a2a; letter-spacing: 0.18em; }
+    .validate .hint { color: #555; font-size: 0.78rem; text-align: center; }
+    .validate .result {
+      min-height: 1.6rem; padding: 0.6rem 0; text-align: center;
+      font-size: 0.95rem; letter-spacing: 0.04em;
+    }
+    .validate .result.ok    { color: #4caf50; }
+    .validate .result.err   { color: #f44336; }
+    .validate .result.busy  { color: #888; }
+  </style>
+</head>
+<body>
+
+  <!-- ── LOGIN SCREEN ─────────────────────────────────────────── -->
+  <div id="login-screen" class="login-wrap">
+    <div class="login">
+      <h1>Whisked</h1>
+      <p class="subtitle">staff dashboard</p>
+
+      <fieldset>
+        <legend>Sign in</legend>
+        <label for="login-email">Email</label>
+        <input id="login-email" type="email" autocomplete="email" placeholder="you@whisked.ca" />
+        <p class="msg">
+          We'll email you a sign-in link. Open the link on this device, copy
+          the token, and paste it below.
+        </p>
+        <p style="margin: 0.8rem 0 0;">
+          <button id="login-send">Send link</button>
+        </p>
+        <p id="login-msg" class="msg"></p>
+        <p id="login-err" class="err"></p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Have a token already?</legend>
+        <label for="login-token">JWT</label>
+        <input id="login-token" type="text" placeholder="eyJhbGciOiJIUzI1NiJ9..." />
+        <p style="margin: 0.8rem 0 0;">
+          <button id="login-paste" class="primary">Use this token</button>
+        </p>
+      </fieldset>
+
+      <p class="msg" style="margin-top: 1.4rem;">
+        Tip: append <code>?token=...</code> to the dashboard URL once and the
+        token is saved to this browser for next time.
+      </p>
+    </div>
+  </div>
+
+  <!-- ── DASHBOARD ────────────────────────────────────────────── -->
+  <div id="dashboard-screen" class="hide">
+    <header>
+      <h1>Whisked</h1>
+      <span class="biz">business <span id="biz-label">?</span></span>
+      <div class="right">
+        <span id="clock" class="clock">--:--</span>
+        <button id="logout">Sign out</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="panel">
+        <h2>Order queue</h2>
+        <div id="orders" class="orders">
+          <p class="empty">Loading…</p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Pickup code</h2>
+        <div class="validate">
+          <h3>Enter pickup code</h3>
+          <input id="code-input" class="code-input"
+                 placeholder="W-XXXX"
+                 autocomplete="off" autocapitalize="characters" spellcheck="false" />
+          <p class="hint">Press Enter to confirm pickup.</p>
+          <div id="validate-result" class="result"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+<script>
+"use strict";
+
+// ── Config from URL ─────────────────────────────────────────────
+const params      = new URLSearchParams(window.location.search);
+const businessId  = params.get("business_id") || "1";
+document.getElementById("biz-label").textContent = "#" + businessId;
+
+// If the URL carries a fresh token (e.g. from a magic-link redirect),
+// stash it in localStorage and strip from the URL so reloads don't
+// re-process the same token.
+const urlToken = params.get("token");
+if (urlToken) {
+  localStorage.setItem("whisked.jwt", urlToken);
+  const clean = new URL(window.location.href);
+  clean.searchParams.delete("token");
+  window.history.replaceState({}, document.title, clean.toString());
+}
+
+// ── Auth state ─────────────────────────────────────────────────
+let token = localStorage.getItem("whisked.jwt");
+
+function authedHeaders(extra) {
+  const h = { "Authorization": "Bearer " + token };
+  return extra ? Object.assign(h, extra) : h;
+}
+
+async function apiFetch(path, init) {
+  init = init || {};
+  init.headers = Object.assign(authedHeaders(), init.headers || {});
+  const resp = await fetch(path, init);
+  if (resp.status === 401) {
+    localStorage.removeItem("whisked.jwt");
+    token = null;
+    showLogin();
+    throw new Error("unauthorized");
+  }
+  return resp;
+}
+
+// ── Bootstrap ──────────────────────────────────────────────────
+async function boot() {
+  if (!token) { showLogin(); return; }
+  // Verify the token before showing the dashboard so a stale JWT lands
+  // the operator on the login screen rather than a perpetually-empty
+  // queue.
+  try {
+    const r = await apiFetch("/api/auth/me");
+    if (!r.ok) throw new Error("auth/me " + r.status);
+    showDashboard();
+    await refreshAll();
+    startPolling();
+  } catch (_) { /* showLogin() already called on 401 */ }
+}
+
+function showLogin() {
+  document.getElementById("login-screen").classList.remove("hide");
+  document.getElementById("dashboard-screen").classList.add("hide");
+}
+
+function showDashboard() {
+  document.getElementById("login-screen").classList.add("hide");
+  document.getElementById("dashboard-screen").classList.remove("hide");
+}
+
+// ── Login wiring ───────────────────────────────────────────────
+document.getElementById("login-send").addEventListener("click", async () => {
+  const email = document.getElementById("login-email").value.trim();
+  const msg   = document.getElementById("login-msg");
+  const err   = document.getElementById("login-err");
+  msg.textContent = ""; err.textContent = "";
+  if (!email) { err.textContent = "Email required."; return; }
+  try {
+    const r = await fetch("/api/auth/magic-link", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    if (!r.ok) throw new Error("magic-link " + r.status);
+    msg.textContent = "Link sent. Open it on this device, then paste the token below.";
+  } catch (e) { err.textContent = "Failed to send link. Try again."; }
+});
+
+document.getElementById("login-paste").addEventListener("click", () => {
+  const t = document.getElementById("login-token").value.trim();
+  if (!t) { document.getElementById("login-err").textContent = "Paste a JWT."; return; }
+  localStorage.setItem("whisked.jwt", t);
+  token = t;
+  boot();
+});
+
+document.getElementById("logout").addEventListener("click", () => {
+  localStorage.removeItem("whisked.jwt");
+  token = null;
+  showLogin();
+});
+
+// ── Menu cache (item names) ────────────────────────────────────
+let menuById = {};
+async function loadMenu() {
+  try {
+    const r = await apiFetch("/api/whisked/menu");
+    if (!r.ok) return;
+    const items = await r.json();
+    menuById = {};
+    for (const m of items) menuById[m.id] = m;
+  } catch (_) {}
+}
+
+// ── Queue ──────────────────────────────────────────────────────
+async function refreshQueue() {
+  try {
+    const r = await apiFetch("/api/whisked/business/" + businessId + "/orders");
+    if (!r.ok) return;
+    const orders = await r.json();
+    renderQueue(orders);
+  } catch (_) {}
+}
+
+function renderQueue(orders) {
+  const root = document.getElementById("orders");
+  if (!orders.length) { root.innerHTML = '<p class="empty">No active orders.</p>'; return; }
+  // Newest at top — matches how staff scan the screen.
+  orders.sort((a, b) => new Date(b.order.created_at) - new Date(a.order.created_at));
+  root.innerHTML = orders.map(orderCardHtml).join("");
+  // Wire action buttons.
+  for (const btn of root.querySelectorAll("button[data-action]")) {
+    btn.addEventListener("click", () => transition(btn.dataset.id, btn.dataset.action));
+  }
+}
+
+function orderCardHtml(resp) {
+  const o = resp.order;
+  const status = o.status;
+  const who    = resp.customer_name || "Whisked customer";
+  const items  = (resp.items || []).map(it => {
+    const m = menuById[it.menu_item_id];
+    const name = m ? m.name : ("Item #" + it.menu_item_id);
+    return (it.quantity > 1 ? it.quantity + "× " : "") + escapeHtml(name);
+  }).join(", ");
+  const total = formatCents(o.total_cents);
+  const ago   = timeAgo(o.created_at);
+
+  let actions = "";
+  if (status === "pending") {
+    actions = `<button class="primary" data-id="${o.id}" data-action="preparing">Start</button>`;
+  } else if (status === "preparing") {
+    actions = `<button class="primary" data-id="${o.id}" data-action="ready">Mark ready</button>`;
+  }
+
+  return `
+    <article class="order">
+      <div class="code">${escapeHtml(o.pickup_code)}</div>
+      <div class="body">
+        <div class="who">${escapeHtml(who)}</div>
+        <div class="items">${items}</div>
+        <div class="meta">
+          <span class="badge ${status}">${status}</span>
+          <span>${ago}</span>
+          <span class="total">${total}</span>
+        </div>
+      </div>
+      <div class="actions">${actions}</div>
+    </article>
+  `;
+}
+
+async function transition(orderId, nextStatus) {
+  try {
+    const r = await apiFetch("/api/whisked/orders/" + orderId + "/status", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: nextStatus }),
+    });
+    if (!r.ok) {
+      const msg = await safeText(r);
+      flashResult("err", "Status update failed: " + msg);
+      return;
+    }
+    await refreshQueue();
+  } catch (_) {}
+}
+
+// ── Pickup validation ──────────────────────────────────────────
+document.getElementById("code-input").addEventListener("keydown", async (ev) => {
+  if (ev.key !== "Enter") return;
+  ev.preventDefault();
+  const raw = ev.target.value.trim().toUpperCase();
+  if (!raw) return;
+  await runValidate(raw);
+});
+
+async function runValidate(code) {
+  const input  = document.getElementById("code-input");
+  const result = document.getElementById("validate-result");
+  result.className = "result busy"; result.textContent = "Looking up…";
+
+  try {
+    const r1 = await apiFetch("/api/whisked/orders/by-code/" + encodeURIComponent(code));
+    if (r1.status === 404) {
+      result.className = "result err"; result.textContent = "Code not found or already used.";
+      return;
+    }
+    if (!r1.ok) {
+      result.className = "result err"; result.textContent = "Lookup failed (" + r1.status + ").";
+      return;
+    }
+    const found = await r1.json();
+    const orderId = found.order.id;
+
+    const r2 = await apiFetch("/api/whisked/orders/" + orderId + "/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pickup_code: code }),
+    });
+    if (!r2.ok) {
+      const msg = await safeText(r2);
+      result.className = "result err"; result.textContent = "Validate failed: " + msg;
+      return;
+    }
+
+    result.className = "result ok"; result.textContent = "✓ Collected — " + code;
+    input.value = "";
+    await refreshQueue();
+    setTimeout(() => {
+      result.textContent = ""; result.className = "result";
+    }, 3000);
+  } catch (e) {
+    result.className = "result err"; result.textContent = "Validate failed.";
+  }
+}
+
+// ── Helpers ────────────────────────────────────────────────────
+async function safeText(r) {
+  try { const t = await r.text(); return t.slice(0, 120); } catch (_) { return String(r.status); }
+}
+
+function timeAgo(iso) {
+  const ms = Date.now() - new Date(iso).getTime();
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  if (sec < 30)   return "just now";
+  if (sec < 60)   return sec + "s ago";
+  const min = Math.floor(sec / 60);
+  if (min < 60)   return min + " min ago";
+  const hr  = Math.floor(min / 60);
+  return hr + "h ago";
+}
+
+function formatCents(cents) {
+  return "$" + (cents / 100).toFixed(2);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+
+function flashResult(kind, text) {
+  const r = document.getElementById("validate-result");
+  r.className = "result " + kind; r.textContent = text;
+  setTimeout(() => { r.textContent = ""; r.className = "result"; }, 3000);
+}
+
+// ── Clock ──────────────────────────────────────────────────────
+function tickClock() {
+  const d = new Date();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  document.getElementById("clock").textContent = hh + ":" + mm;
+}
+
+// ── Polling ────────────────────────────────────────────────────
+let pollHandle = null;
+function startPolling() {
+  if (pollHandle) clearInterval(pollHandle);
+  // Re-render every second so the "X min ago" stamps stay live without
+  // refetching; the actual order list refresh runs every 5s.
+  pollHandle = setInterval(async () => {
+    await refreshQueue();
+  }, 5000);
+  setInterval(tickClock, 30 * 1000);
+}
+
+async function refreshAll() {
+  await loadMenu();
+  await refreshQueue();
+  tickClock();
+}
+
+// ── Go ─────────────────────────────────────────────────────────
+boot();
+
+// TODO: add staff auth before public launch.
+// Right now any authenticated user can open the dashboard and watch a
+// business's order queue. The validate-pickup endpoint already enforces
+// business ownership server-side, so the practical blast radius is
+// limited to viewing; tighten the by-code lookup and the queue listing
+// with the same ownership check once the staff-account model lands.
+</script>
+
+</body>
+</html>
