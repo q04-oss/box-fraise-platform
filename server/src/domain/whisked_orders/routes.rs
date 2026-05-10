@@ -15,6 +15,7 @@ use axum::{
 };
 
 use box_fraise_domain::transaction::RlsTransaction;
+use secrecy::ExposeSecret;
 
 use crate::{
     app::AppState,
@@ -54,7 +55,14 @@ pub async fn place(
     AppJson(body):        AppJson<PlaceOrderRequest>,
 ) -> AppResult<(StatusCode, Json<WhiskedOrderResponse>)> {
     let mut tx = RlsTransaction::begin(&state.db, i32::from(user_id)).await?;
-    let resp = service::place_order(&mut tx, &state.db, i32::from(user_id), body).await?;
+    let resp = service::place_order(
+        &mut tx,
+        &state.db,
+        &state.http,
+        i32::from(user_id),
+        body,
+        state.cfg.stripe_secret_key.expose_secret(),
+    ).await?;
     tx.commit().await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }

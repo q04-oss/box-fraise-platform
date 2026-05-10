@@ -42,20 +42,25 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
 // ── Placement ────────────────────────────────────────────────────────────────
 
 /// Place a new Whisked order. Validates every line item against
-/// `whisked_menu_items`, mints a unique pickup code, persists the order plus
-/// its line items in the supplied transaction, and writes a `whisked.order_placed`
-/// audit row on `pool` (outside the transaction so the audit lands even if the
-/// caller rolls back later).
+/// `whisked_menu_items`, calls Stripe to create a `PaymentIntent` for the
+/// total, mints a unique pickup code, persists the order plus its line
+/// items in the supplied transaction, and writes a `whisked.order_placed`
+/// audit row on `pool` (outside the transaction so the audit lands even
+/// if the caller rolls back later).
 ///
-/// Stripe `PaymentIntent` integration is deferred — `stripe_payment_intent_id`
-/// is left `NULL` for now; the iOS client treats this as "pay at counter"
-/// until the payment flow lands. TODO: integrate once whisked-platform
-/// settles on the per-order payment policy.
+/// `stripe_secret_key` is read from `Config.stripe_secret_key`; passing an
+/// empty string short-circuits the Stripe call so unit tests can run
+/// without a live key. The PaymentIntent is created with
+/// `capture_method = manual` (Stripe's default in this codebase): the card
+/// is authorized at order placement and captured later when the order
+/// transitions to `collected` (capture-on-collect is a follow-up).
 pub async fn place_order(
-    tx:      &mut RlsTransaction,
-    pool:    &PgPool,
-    user_id: i32,
-    req:     PlaceOrderRequest,
+    tx:                &mut RlsTransaction,
+    pool:              &PgPool,
+    http:              &reqwest::Client,
+    user_id:           i32,
+    req:               PlaceOrderRequest,
+    stripe_secret_key: &str,
 ) -> AppResult<WhiskedOrderResponse> {
     // 1. Validate request shape early.
     if req.items.is_empty() {
@@ -101,10 +106,17 @@ pub async fn place_order(
     //    a bounds check so a runaway request can't insert a negative total.
     let total_cents = sum_total_cents(&req.items, &menu_rows)?;
 
-    // 5. Mint a pickup code, retry on the (rare) unique-violation collision.
-    let order_row = mint_order(tx, user_id, req.business_id, total_cents).await?;
+    // 5. Create a Stripe PaymentIntent if a key is configured. An empty key
+    //    means we're running without Stripe (dev / unit tests) — the order
+    //    persists with NULL `stripe_payment_intent_id` and the response
+    //    `stripe_client_secret` is `None`.
+    let (stripe_pi_id, stripe_client_secret) =
+        create_payment_intent_if_configured(http, stripe_secret_key, total_cents, user_id).await?;
 
-    // 6. Insert line items.
+    // 6. Mint a pickup code, retry on the (rare) unique-violation collision.
+    let order_row = mint_order(tx, user_id, req.business_id, total_cents, stripe_pi_id.as_deref()).await?;
+
+    // 7. Insert line items.
     let mut item_rows: Vec<WhiskedOrderItemRow> = Vec::with_capacity(req.items.len());
     for req_item in &req.items {
         let menu = menu_rows
@@ -123,38 +135,72 @@ pub async fn place_order(
         item_rows.push(row);
     }
 
-    // 7. Audit (separate connection — survives rollback).
+    // 8. Audit (separate connection — survives rollback).
     audit::write(
         pool,
         Some(user_id),
         None,
         "whisked.order_placed",
         serde_json::json!({
-            "order_id":    order_row.id,
-            "business_id": req.business_id,
-            "total_cents": total_cents,
-            "item_count":  item_rows.len(),
+            "order_id":                 order_row.id,
+            "business_id":              req.business_id,
+            "total_cents":              total_cents,
+            "item_count":               item_rows.len(),
+            "stripe_payment_intent_id": order_row.stripe_payment_intent_id,
         }),
     )
     .await;
 
     Ok(WhiskedOrderResponse {
-        pickup_code: order_row.pickup_code.clone(),
-        order:       order_row,
-        items:       item_rows,
+        pickup_code:          order_row.pickup_code.clone(),
+        order:                order_row,
+        items:                item_rows,
+        stripe_client_secret,
     })
 }
 
+/// Build a PaymentIntent when a Stripe key is supplied; return `(None, None)`
+/// otherwise so callers can persist `NULL` in `stripe_payment_intent_id` and
+/// surface `None` for `stripe_client_secret` in the response. Stripe failures
+/// surface as `ExternalServiceError` with a generic message — the underlying
+/// error is logged at warn level.
+async fn create_payment_intent_if_configured(
+    http:              &reqwest::Client,
+    stripe_secret_key: &str,
+    total_cents:       i32,
+    user_id:           i32,
+) -> AppResult<(Option<String>, Option<String>)> {
+    if stripe_secret_key.is_empty() {
+        return Ok((None, None));
+    }
+    let user_id_str = user_id.to_string();
+    let metadata: [(&str, &str); 2] = [
+        ("metadata[order_type]", "whisked"),
+        ("metadata[user_id]",    user_id_str.as_str()),
+    ];
+    let client = box_fraise_integrations::stripe::StripeClient::new(stripe_secret_key, http);
+    let pi = client
+        .create_payment_intent(total_cents as i64, "cad", None, &metadata)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "stripe.create_payment_intent failed for whisked order");
+            DomainError::ExternalServiceError("Failed to create payment intent".to_string())
+        })?;
+    Ok((Some(pi.id), pi.client_secret))
+}
+
 async fn mint_order(
-    tx:          &mut RlsTransaction,
-    user_id:     i32,
-    business_id: i32,
-    total_cents: i32,
+    tx:                       &mut RlsTransaction,
+    user_id:                  i32,
+    business_id:              i32,
+    total_cents:              i32,
+    stripe_payment_intent_id: Option<&str>,
 ) -> AppResult<WhiskedOrderRow> {
     for _ in 0..PICKUP_CODE_RETRIES {
         let code = generate_pickup_code();
-        match repository::create_order(tx.as_mut(), user_id, business_id, total_cents, &code).await
-        {
+        match repository::create_order(
+            tx.as_mut(), user_id, business_id, total_cents, &code, stripe_payment_intent_id,
+        ).await {
             Ok(row)                                 => return Ok(row),
             Err(e) if is_unique_violation(&e)       => continue,
             Err(e)                                  => return Err(DomainError::Db(e)),
@@ -209,9 +255,13 @@ pub async fn get_order(
     }
     let items = repository::list_items_for_order(tx.as_mut(), order_id).await?;
     Ok(WhiskedOrderResponse {
-        pickup_code: order.pickup_code.clone(),
+        pickup_code:          order.pickup_code.clone(),
         order,
         items,
+        // Returned only at placement time. The iOS client caches the
+        // client_secret locally for the in-flight order; subsequent fetches
+        // don't re-issue the secret.
+        stripe_client_secret: None,
     })
 }
 
@@ -337,9 +387,10 @@ pub async fn list_active_for_business(
     for order in rows {
         let items = repository::list_items_for_order(&mut conn, order.id).await?;
         out.push(WhiskedOrderResponse {
-            pickup_code: order.pickup_code.clone(),
+            pickup_code:          order.pickup_code.clone(),
             order,
             items,
+            stripe_client_secret: None,
         });
     }
     Ok(out)
@@ -392,13 +443,21 @@ mod tests {
         (uid, biz_id)
     }
 
+    /// Empty Stripe key → service short-circuits the API call; tests stay
+    /// network-free. The shared `reqwest::Client` is harmless in that mode
+    /// because no requests are made.
+    fn test_http() -> reqwest::Client {
+        reqwest::Client::new()
+    }
+
     #[sqlx::test(migrations = "../server/migrations")]
     async fn place_order_creates_order_with_pickup_code(pool: PgPool) {
         let (uid, biz_id) = make_user_and_business(&pool).await;
+        let http = test_http();
 
         let mut tx = RlsTransaction::begin(&pool, uid).await.unwrap();
         let resp = place_order(
-            &mut tx, &pool, uid,
+            &mut tx, &pool, &http, uid,
             PlaceOrderRequest {
                 business_id: biz_id,
                 items: vec![
@@ -406,6 +465,7 @@ mod tests {
                     OrderItemRequest { menu_item_id: 2, quantity: 2 },
                 ],
             },
+            "",
         ).await.expect("place_order must succeed");
         tx.commit().await.unwrap();
 
@@ -423,15 +483,17 @@ mod tests {
     #[sqlx::test(migrations = "../server/migrations")]
     async fn validate_pickup_marks_order_collected(pool: PgPool) {
         let (uid, biz_id) = make_user_and_business(&pool).await;
+        let http = test_http();
 
         let resp = {
             let mut tx = RlsTransaction::begin(&pool, uid).await.unwrap();
             let r = place_order(
-                &mut tx, &pool, uid,
+                &mut tx, &pool, &http, uid,
                 PlaceOrderRequest {
                     business_id: biz_id,
                     items: vec![OrderItemRequest { menu_item_id: 1, quantity: 1 }],
                 },
+                "",
             ).await.unwrap();
             tx.commit().await.unwrap();
             r
@@ -454,15 +516,17 @@ mod tests {
     #[sqlx::test(migrations = "../server/migrations")]
     async fn validate_pickup_rejects_wrong_code(pool: PgPool) {
         let (uid, biz_id) = make_user_and_business(&pool).await;
+        let http = test_http();
 
         let resp = {
             let mut tx = RlsTransaction::begin(&pool, uid).await.unwrap();
             let r = place_order(
-                &mut tx, &pool, uid,
+                &mut tx, &pool, &http, uid,
                 PlaceOrderRequest {
                     business_id: biz_id,
                     items: vec![OrderItemRequest { menu_item_id: 1, quantity: 1 }],
                 },
+                "",
             ).await.unwrap();
             tx.commit().await.unwrap();
             r
@@ -481,15 +545,17 @@ mod tests {
     #[sqlx::test(migrations = "../server/migrations")]
     async fn validate_pickup_rejects_already_used_code(pool: PgPool) {
         let (uid, biz_id) = make_user_and_business(&pool).await;
+        let http = test_http();
 
         let resp = {
             let mut tx = RlsTransaction::begin(&pool, uid).await.unwrap();
             let r = place_order(
-                &mut tx, &pool, uid,
+                &mut tx, &pool, &http, uid,
                 PlaceOrderRequest {
                     business_id: biz_id,
                     items: vec![OrderItemRequest { menu_item_id: 1, quantity: 1 }],
                 },
+                "",
             ).await.unwrap();
             tx.commit().await.unwrap();
             r
@@ -506,5 +572,36 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DomainError::Conflict(_)), "double-validate must be Conflict, got {err:?}");
+    }
+
+    /// Empty `stripe_secret_key` short-circuits the Stripe call so the order
+    /// persists with `NULL stripe_payment_intent_id` and the response carries
+    /// `stripe_client_secret: None`. This is the path every unit test exercises;
+    /// pinning it here protects future test additions from accidentally
+    /// requiring a live Stripe key.
+    #[sqlx::test(migrations = "../server/migrations")]
+    async fn place_order_without_stripe_key_has_null_payment_intent(pool: PgPool) {
+        let (uid, biz_id) = make_user_and_business(&pool).await;
+        let http = test_http();
+
+        let mut tx = RlsTransaction::begin(&pool, uid).await.unwrap();
+        let resp = place_order(
+            &mut tx, &pool, &http, uid,
+            PlaceOrderRequest {
+                business_id: biz_id,
+                items: vec![OrderItemRequest { menu_item_id: 1, quantity: 1 }],
+            },
+            "",
+        ).await.expect("place_order with empty stripe key must succeed");
+        tx.commit().await.unwrap();
+
+        assert!(
+            resp.order.stripe_payment_intent_id.is_none(),
+            "stripe_payment_intent_id must be NULL when no stripe key is set",
+        );
+        assert!(
+            resp.stripe_client_secret.is_none(),
+            "stripe_client_secret must be None when no stripe key is set",
+        );
     }
 }

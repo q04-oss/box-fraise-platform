@@ -72,7 +72,7 @@ The matcha bar's loyalty surface, sharing the same backend.
 - [x] iOS MVP shipped at `q04-oss/whisked-ios@32b6d6e` — menu / cart / order / pickup-code / profile.
 - [ ] Whisked business type added to `locations`.
 - [ ] Whisked Dorotka context (already present — host-header switching).
-- [ ] Stripe `PaymentIntent` integration on `place_order` (currently stored as `NULL`; pay-at-counter for now).
+- [x] Stripe `PaymentIntent` integration on `place_order` — `box_fraise_integrations::stripe::StripeClient::create_payment_intent` is invoked at order placement (CAD, manual capture for capture-on-collect later); empty `stripe_secret_key` short-circuits for unit tests; the `client_secret` is returned to the iOS client via `WhiskedOrderResponse.stripe_client_secret` for the Stripe iOS SDK to confirm.
 
 ---
 

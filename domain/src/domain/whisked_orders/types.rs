@@ -66,9 +66,14 @@ pub struct UpdateOrderStatusRequest {
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct WhiskedOrderResponse {
-    pub order:       WhiskedOrderRow,
-    pub items:       Vec<WhiskedOrderItemRow>,
-    pub pickup_code: String,
+    pub order:                 WhiskedOrderRow,
+    pub items:                 Vec<WhiskedOrderItemRow>,
+    pub pickup_code:           String,
+    /// PaymentIntent client_secret returned by Stripe at order placement.
+    /// `None` if the Stripe key is unset (dev / test mode) — the iOS Stripe
+    /// SDK uses this to confirm the payment without round-tripping the
+    /// secret key.
+    pub stripe_client_secret:  Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]

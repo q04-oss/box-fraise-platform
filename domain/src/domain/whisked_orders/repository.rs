@@ -10,26 +10,29 @@ use super::types::{
 
 // ── Orders ───────────────────────────────────────────────────────────────────
 
-/// Insert a new order with the supplied pickup code. May fail with a
-/// unique-violation if `pickup_code` collides with another active order's
-/// code; the service layer retries with a fresh code on that error.
+/// Insert a new order with the supplied pickup code and (optional) Stripe
+/// PaymentIntent id. May fail with a unique-violation if `pickup_code`
+/// collides with another active order's code; the service layer retries
+/// with a fresh code on that error.
 pub async fn create_order(
-    conn:        &mut PgConnection,
-    user_id:     i32,
-    business_id: i32,
-    total_cents: i32,
-    pickup_code: &str,
+    conn:                     &mut PgConnection,
+    user_id:                  i32,
+    business_id:              i32,
+    total_cents:              i32,
+    pickup_code:              &str,
+    stripe_payment_intent_id: Option<&str>,
 ) -> Result<WhiskedOrderRow, sqlx::Error> {
     sqlx::query_as(&format!(
         "INSERT INTO whisked_orders \
-         (user_id, business_id, status, total_cents, pickup_code) \
-         VALUES ($1, $2, 'pending', $3, $4) \
+         (user_id, business_id, status, total_cents, pickup_code, stripe_payment_intent_id) \
+         VALUES ($1, $2, 'pending', $3, $4, $5) \
          RETURNING {WHISKED_ORDER_COLS}"
     ))
     .bind(user_id)
     .bind(business_id)
     .bind(total_cents)
     .bind(pickup_code)
+    .bind(stripe_payment_intent_id)
     .fetch_one(conn)
     .await
 }
